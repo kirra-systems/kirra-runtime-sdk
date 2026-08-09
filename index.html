@@ -1,0 +1,1237 @@
+<!DOCTYPE html>
+<html lang="en" class="scroll-smooth">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Autonomous Systems Engineering UI — 4-Year Computer Engineering Curriculum with AI Robotics Specialization</title>
+  <meta name="description" content="A complete 4-year, full-time Computer Engineering curriculum roadmap that carries a student from College Algebra and zero programming experience to Calculus 3, professional software development, hardware architecture, and autonomous AI robotics." />
+
+  <!-- Tailwind CSS via CDN — zero build step required -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      darkMode: 'class',
+      theme: {
+        extend: {
+          colors: {
+            neon:   { DEFAULT: '#22d3ee', dim: '#0e7490' },
+            violet2:{ DEFAULT: '#7c3aed', dim: '#4c1d95' },
+          },
+          fontFamily: {
+            mono: ['ui-monospace', 'SFMono-Regular', 'Menlo', 'Consolas', 'monospace'],
+          },
+          boxShadow: {
+            'glow-cyan':   '0 0 24px -6px rgba(34, 211, 238, 0.45)',
+            'glow-violet': '0 0 24px -6px rgba(124, 58, 237, 0.55)',
+          },
+        },
+      },
+    };
+  </script>
+
+  <style>
+    /* Custom primitives that Tailwind utilities alone do not cover. */
+    body { background: #09090b; }
+    ::-webkit-scrollbar { width: 10px; height: 10px; }
+    ::-webkit-scrollbar-track { background: #18181b; }
+    ::-webkit-scrollbar-thumb { background: #3f3f46; border-radius: 6px; }
+    ::-webkit-scrollbar-thumb:hover { background: #52525b; }
+
+    .track-gradient-text {
+      background: linear-gradient(90deg, #22d3ee 0%, #7c3aed 100%);
+      -webkit-background-clip: text;
+      background-clip: text;
+      color: transparent;
+    }
+    .progress-fill { transition: width 500ms cubic-bezier(0.22, 1, 0.36, 1); }
+    .card-enter { animation: cardIn 320ms ease-out both; }
+    @keyframes cardIn {
+      from { opacity: 0; transform: translateY(10px); }
+      to   { opacity: 1; transform: translateY(0); }
+    }
+    .code-panel { display: none; }
+    .code-panel.open { display: block; }
+    pre.code-block {
+      overflow-x: auto;
+      font-size: 0.78rem;
+      line-height: 1.55;
+      tab-size: 4;
+    }
+    .completed-card { border-color: rgba(34, 211, 238, 0.55) !important; }
+    .completed-card .card-title { text-decoration: line-through; text-decoration-color: rgba(34, 211, 238, 0.6); }
+    input[type="checkbox"].course-check {
+      accent-color: #22d3ee;
+      width: 1.15rem; height: 1.15rem;
+      cursor: pointer;
+    }
+  </style>
+</head>
+
+<body class="bg-zinc-950 text-zinc-200 antialiased selection:bg-cyan-500/30 selection:text-cyan-100">
+
+  <!-- ============================================================ -->
+  <!-- STICKY NAVIGATION BAR                                        -->
+  <!-- ============================================================ -->
+  <header class="sticky top-0 z-50 border-b border-zinc-800/80 bg-zinc-950/85 backdrop-blur-md">
+    <div class="mx-auto flex max-w-7xl items-center justify-between gap-4 px-4 py-3 sm:px-6">
+      <div class="flex min-w-0 items-center gap-3">
+        <div class="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-gradient-to-br from-cyan-500 to-violet-600 font-mono text-sm font-bold text-zinc-950 shadow-glow-violet">
+          A∑
+        </div>
+        <div class="min-w-0">
+          <h1 class="truncate text-sm font-bold tracking-tight text-zinc-100 sm:text-base">
+            Autonomous Systems Engineering <span class="track-gradient-text">UI</span>
+          </h1>
+          <p class="hidden text-[11px] text-zinc-500 sm:block">4-Year Computer Engineering Roadmap · AI Robotics Specialization</p>
+        </div>
+      </div>
+
+      <!-- Track badges -->
+      <nav class="hidden items-center gap-2 lg:flex" aria-label="Track badges">
+        <span class="rounded-full border border-cyan-500/40 bg-cyan-500/10 px-2.5 py-1 text-[11px] font-semibold text-cyan-300">A · Mathematics</span>
+        <span class="rounded-full border border-violet-500/40 bg-violet-500/10 px-2.5 py-1 text-[11px] font-semibold text-violet-300">B · Software</span>
+        <span class="rounded-full border border-sky-500/40 bg-sky-500/10 px-2.5 py-1 text-[11px] font-semibold text-sky-300">C · Hardware</span>
+        <span class="rounded-full border border-fuchsia-500/40 bg-fuchsia-500/10 px-2.5 py-1 text-[11px] font-semibold text-fuchsia-300">D · AI Robotics</span>
+      </nav>
+
+      <a href="https://github.com/kirra-systems/kirra-runtime-sdk" target="_blank" rel="noopener noreferrer"
+         class="flex shrink-0 items-center gap-2 rounded-lg border border-zinc-700 bg-zinc-900 px-3 py-2 text-xs font-semibold text-zinc-300 transition hover:border-cyan-500/60 hover:text-cyan-300">
+        <svg viewBox="0 0 16 16" fill="currentColor" class="h-4 w-4" aria-hidden="true">
+          <path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27s1.36.09 2 .27c1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8Z"/>
+        </svg>
+        <span class="hidden sm:inline">View Code on GitHub</span>
+        <span class="sm:hidden">GitHub</span>
+      </a>
+    </div>
+
+    <!-- Slim global progress strip pinned to the nav -->
+    <div class="h-1 w-full bg-zinc-900">
+      <div id="nav-progress-fill" class="progress-fill h-1 w-0 bg-gradient-to-r from-cyan-400 to-violet-500"></div>
+    </div>
+  </header>
+
+  <!-- ============================================================ -->
+  <!-- HERO + GLOBAL PROGRESS DASHBOARD                             -->
+  <!-- ============================================================ -->
+  <section class="relative overflow-hidden border-b border-zinc-800/70">
+    <div class="pointer-events-none absolute -top-32 left-1/4 h-72 w-72 rounded-full bg-cyan-500/10 blur-3xl"></div>
+    <div class="pointer-events-none absolute -bottom-24 right-1/4 h-72 w-72 rounded-full bg-violet-600/10 blur-3xl"></div>
+
+    <div class="mx-auto max-w-7xl px-4 py-12 sm:px-6 lg:py-16">
+      <p class="mb-3 inline-flex items-center gap-2 rounded-full border border-zinc-700 bg-zinc-900/80 px-3 py-1 text-[11px] font-semibold uppercase tracking-widest text-cyan-300">
+        <span class="h-1.5 w-1.5 animate-pulse rounded-full bg-cyan-400"></span>
+        From College Algebra to Autonomous Robots
+      </p>
+      <h2 class="max-w-3xl text-3xl font-extrabold tracking-tight text-zinc-50 sm:text-5xl">
+        A complete <span class="track-gradient-text">4-year, full-time</span> Computer Engineering curriculum for the absolute beginner.
+      </h2>
+      <p class="mt-5 max-w-3xl text-sm leading-relaxed text-zinc-400 sm:text-base">
+        This roadmap assumes exactly two starting conditions: you can do College Algebra-level mathematics, and you have never written a line of code.
+        Across eight sequenced semesters it systematically builds you up through Calculus 3 with Analytic Geometry, professional software engineering in
+        Python and C++, digital logic and x86 microprocessor architecture, and finally the full autonomous-robotics stack — kinematics, perception,
+        motion planning, and independent safety governors that stand between an AI planner and real hardware actuators.
+        General-education requirements (composition, humanities, social sciences) are intentionally omitted so the technical spine stays in focus.
+      </p>
+
+      <!-- Stat tiles + progress dashboard -->
+      <div class="mt-10 grid grid-cols-2 gap-4 sm:grid-cols-4">
+        <div class="rounded-xl border border-zinc-800 bg-zinc-900/60 p-4">
+          <p class="text-2xl font-extrabold text-cyan-300">12</p>
+          <p class="mt-1 text-xs font-medium text-zinc-500">Core technical courses</p>
+        </div>
+        <div class="rounded-xl border border-zinc-800 bg-zinc-900/60 p-4">
+          <p class="text-2xl font-extrabold text-violet-300">4</p>
+          <p class="mt-1 text-xs font-medium text-zinc-500">Academic tracks</p>
+        </div>
+        <div class="rounded-xl border border-zinc-800 bg-zinc-900/60 p-4">
+          <p class="text-2xl font-extrabold text-sky-300">8</p>
+          <p class="mt-1 text-xs font-medium text-zinc-500">Full-time semesters</p>
+        </div>
+        <div class="rounded-xl border border-zinc-800 bg-zinc-900/60 p-4">
+          <p class="text-2xl font-extrabold text-fuchsia-300">0</p>
+          <p class="mt-1 text-xs font-medium text-zinc-500">Prior experience required</p>
+        </div>
+      </div>
+
+      <div class="mt-8 rounded-2xl border border-zinc-800 bg-zinc-900/70 p-5 shadow-glow-cyan/20">
+        <div class="mb-2 flex flex-wrap items-baseline justify-between gap-2">
+          <h3 class="text-sm font-bold uppercase tracking-wider text-zinc-300">Your Degree Progress</h3>
+          <p class="text-sm font-semibold text-cyan-300">
+            <span id="progress-count">0</span> of 12 courses completed ·
+            <span id="progress-percent">0%</span>
+          </p>
+        </div>
+        <div class="h-3 w-full overflow-hidden rounded-full bg-zinc-800" role="progressbar" aria-label="Curriculum completion" aria-valuemin="0" aria-valuemax="100" id="progress-bar-aria">
+          <div id="dashboard-progress-fill" class="progress-fill h-3 w-0 rounded-full bg-gradient-to-r from-cyan-400 via-sky-500 to-violet-500"></div>
+        </div>
+        <p class="mt-2 text-[11px] text-zinc-500">
+          Progress is stored in your browser's local storage — check the "Mark as Completed" box on any course card and this bar updates instantly, and it will still be here the next time you open the page.
+        </p>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============================================================ -->
+  <!-- MAIN LAYOUT: TRACKING MATRIX + SETUP SIDEBAR                 -->
+  <!-- ============================================================ -->
+  <main class="mx-auto max-w-7xl px-4 py-12 sm:px-6">
+    <div class="grid grid-cols-1 gap-10 xl:grid-cols-[minmax(0,1fr)_320px]">
+
+      <!-- ================= INTERACTIVE TRACKING MATRIX ================= -->
+      <section aria-labelledby="matrix-heading" class="min-w-0">
+        <div class="mb-6 flex flex-wrap items-end justify-between gap-4">
+          <div>
+            <h3 id="matrix-heading" class="text-2xl font-extrabold tracking-tight text-zinc-50">Interactive Curriculum Tracking Matrix</h3>
+            <p class="mt-1 max-w-2xl text-sm text-zinc-400">
+              All twelve courses rendered as live course profiles. Filter by academic track, expand the code playground on any card,
+              and check courses off as you complete them.
+            </p>
+          </div>
+        </div>
+
+        <!-- Filter controls -->
+        <div id="filter-bar" class="mb-8 flex flex-wrap gap-2" role="tablist" aria-label="Filter courses by track">
+          <!-- Filter buttons injected by JavaScript -->
+        </div>
+
+        <!-- Course card grid -->
+        <div id="course-grid" class="grid grid-cols-1 gap-6 md:grid-cols-2">
+          <!-- Course cards injected by JavaScript -->
+        </div>
+      </section>
+
+      <!-- ================= SETUP DOCUMENTATION SIDEBAR ================= -->
+      <aside class="min-w-0 xl:sticky xl:top-24 xl:self-start" aria-labelledby="setup-heading">
+        <div class="rounded-2xl border border-violet-500/30 bg-zinc-900/70 p-6 shadow-glow-violet/30">
+          <div class="mb-4 flex items-center gap-3">
+            <div class="flex h-9 w-9 items-center justify-center rounded-lg bg-violet-600/20 text-violet-300">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="h-5 w-5" aria-hidden="true">
+                <path stroke-linecap="round" stroke-linejoin="round" d="M12 3v13m0 0 4-4m-4 4-4-4M4 21h16"/>
+              </svg>
+            </div>
+            <h3 id="setup-heading" class="text-base font-bold text-zinc-100">Deploy This Page Free on GitHub Pages</h3>
+          </div>
+          <p class="mb-5 text-xs leading-relaxed text-zinc-400">
+            This entire platform is one self-contained <code class="rounded bg-zinc-800 px-1.5 py-0.5 font-mono text-[11px] text-cyan-300">index.html</code> file —
+            no build tools, no server, no framework install. Follow these steps and it will be live on the public internet in under five minutes.
+          </p>
+
+          <ol class="space-y-4">
+            <li class="flex gap-3">
+              <span class="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-cyan-500/15 font-mono text-[11px] font-bold text-cyan-300">1</span>
+              <p class="text-xs leading-relaxed text-zinc-300">
+                Sign in at <span class="font-semibold text-zinc-100">github.com</span>, click the <span class="font-semibold text-zinc-100">+</span> icon in the top-right corner,
+                and choose <span class="font-semibold text-zinc-100">New repository</span>. Name it (for example <code class="font-mono text-cyan-300">my-engineering-roadmap</code>),
+                set visibility to <span class="font-semibold text-zinc-100">Public</span>, and click <span class="font-semibold text-zinc-100">Create repository</span>.
+              </p>
+            </li>
+            <li class="flex gap-3">
+              <span class="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-cyan-500/15 font-mono text-[11px] font-bold text-cyan-300">2</span>
+              <p class="text-xs leading-relaxed text-zinc-300">
+                Save this file to your computer with the exact filename <code class="font-mono text-cyan-300">index.html</code>. In your new repository,
+                click <span class="font-semibold text-zinc-100">uploading an existing file</span> (or <span class="font-semibold text-zinc-100">Add file → Upload files</span>),
+                drop <code class="font-mono text-cyan-300">index.html</code> in, and click <span class="font-semibold text-zinc-100">Commit changes</span> to the
+                <code class="font-mono text-cyan-300">main</code> branch.
+              </p>
+            </li>
+            <li class="flex gap-3">
+              <span class="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-cyan-500/15 font-mono text-[11px] font-bold text-cyan-300">3</span>
+              <p class="text-xs leading-relaxed text-zinc-300">
+                Open the repository's <span class="font-semibold text-zinc-100">Settings</span> tab, then choose
+                <span class="font-semibold text-zinc-100">Pages</span> in the left sidebar. Under
+                <span class="font-semibold text-zinc-100">Build and deployment → Source</span>, select
+                <span class="font-semibold text-zinc-100">Deploy from a branch</span>.
+              </p>
+            </li>
+            <li class="flex gap-3">
+              <span class="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-cyan-500/15 font-mono text-[11px] font-bold text-cyan-300">4</span>
+              <p class="text-xs leading-relaxed text-zinc-300">
+                In the <span class="font-semibold text-zinc-100">Branch</span> dropdown, pick <code class="font-mono text-cyan-300">main</code>,
+                keep the folder set to <code class="font-mono text-cyan-300">/ (root)</code>, and click <span class="font-semibold text-zinc-100">Save</span>.
+              </p>
+            </li>
+            <li class="flex gap-3">
+              <span class="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-cyan-500/15 font-mono text-[11px] font-bold text-cyan-300">5</span>
+              <p class="text-xs leading-relaxed text-zinc-300">
+                Wait roughly one minute, then refresh the Pages settings screen. GitHub displays your live URL in the form
+                <code class="break-all font-mono text-cyan-300">https://&lt;username&gt;.github.io/&lt;repo-name&gt;/</code>.
+                Open it — your curriculum platform is now launched and shareable. Every future commit to <code class="font-mono text-cyan-300">main</code> redeploys automatically.
+              </p>
+            </li>
+          </ol>
+
+          <div class="mt-6 rounded-lg border border-zinc-800 bg-zinc-950/70 p-3">
+            <p class="text-[11px] leading-relaxed text-zinc-500">
+              <span class="font-semibold text-cyan-300">Note on progress data:</span> the completion checklist is saved per-browser via
+              <code class="font-mono">localStorage</code>, so your checkmarks persist on your own device but are not shared between visitors — every learner who opens your published page gets their own private progress tracker.
+            </p>
+          </div>
+        </div>
+
+        <!-- Track legend -->
+        <div class="mt-6 rounded-2xl border border-zinc-800 bg-zinc-900/70 p-6">
+          <h4 class="mb-3 text-sm font-bold text-zinc-100">Track Progress Breakdown</h4>
+          <div id="track-progress" class="space-y-4">
+            <!-- Per-track progress bars injected by JavaScript -->
+          </div>
+        </div>
+      </aside>
+    </div>
+
+    <!-- ============================================================ -->
+    <!-- 4-YEAR SEMESTER SEQUENCE                                     -->
+    <!-- ============================================================ -->
+    <section class="mt-16" aria-labelledby="sequence-heading">
+      <h3 id="sequence-heading" class="text-2xl font-extrabold tracking-tight text-zinc-50">The 4-Year Full-Time Semester Sequence</h3>
+      <p class="mt-1 max-w-3xl text-sm text-zinc-400">
+        Courses are ordered so every prerequisite chain resolves naturally: mathematics and programming start together in Year 1,
+        hardware joins once algebra is secure, and the robotics specialization occupies the final three semesters, when Calculus 3,
+        data structures, and microprocessor fluency are all in place.
+      </p>
+      <div id="semester-grid" class="mt-8 grid grid-cols-1 gap-5 sm:grid-cols-2 lg:grid-cols-4">
+        <!-- Semester cards injected by JavaScript -->
+      </div>
+    </section>
+  </main>
+
+  <!-- ============================================================ -->
+  <!-- FOOTER                                                       -->
+  <!-- ============================================================ -->
+  <footer class="mt-8 border-t border-zinc-800/70 bg-zinc-950">
+    <div class="mx-auto flex max-w-7xl flex-col items-center justify-between gap-4 px-4 py-8 text-center sm:flex-row sm:px-6 sm:text-left">
+      <p class="text-xs text-zinc-500">
+        <span class="font-semibold text-zinc-300">Autonomous Systems Engineering UI</span> · A self-contained, zero-build curriculum platform.
+        Built with Tailwind CSS (CDN) and vanilla JavaScript.
+      </p>
+      <p class="text-xs text-zinc-600">
+        The doer proposes; the checker bounds. Ship the safety governor first.
+      </p>
+    </div>
+  </footer>
+
+  <!-- ============================================================ -->
+  <!-- APPLICATION LOGIC (vanilla JavaScript, no dependencies)      -->
+  <!-- ============================================================ -->
+  <script>
+  'use strict';
+
+  /* ------------------------------------------------------------------ *
+   * TRACK DEFINITIONS
+   * ------------------------------------------------------------------ */
+  const TRACKS = {
+    A: {
+      key: 'A',
+      name: 'Mathematics Sequence',
+      short: 'Mathematics',
+      badge: 'border-cyan-500/40 bg-cyan-500/10 text-cyan-300',
+      bar: 'from-cyan-400 to-cyan-600',
+      accentText: 'text-cyan-300',
+      accentBorder: 'hover:border-cyan-500/50',
+    },
+    B: {
+      key: 'B',
+      name: 'Software Engineering Foundations',
+      short: 'Software',
+      badge: 'border-violet-500/40 bg-violet-500/10 text-violet-300',
+      bar: 'from-violet-400 to-violet-600',
+      accentText: 'text-violet-300',
+      accentBorder: 'hover:border-violet-500/50',
+    },
+    C: {
+      key: 'C',
+      name: 'Hardware Systems & Architecture',
+      short: 'Hardware',
+      badge: 'border-sky-500/40 bg-sky-500/10 text-sky-300',
+      bar: 'from-sky-400 to-sky-600',
+      accentText: 'text-sky-300',
+      accentBorder: 'hover:border-sky-500/50',
+    },
+    D: {
+      key: 'D',
+      name: 'Autonomous Systems, Perception & AI Robotics',
+      short: 'AI Robotics',
+      badge: 'border-fuchsia-500/40 bg-fuchsia-500/10 text-fuchsia-300',
+      bar: 'from-fuchsia-400 to-fuchsia-600',
+      accentText: 'text-fuchsia-300',
+      accentBorder: 'hover:border-fuchsia-500/50',
+    },
+  };
+
+  /* ------------------------------------------------------------------ *
+   * COURSE DATA MODEL — all 12 courses, written out in full.
+   * ------------------------------------------------------------------ */
+  const COURSES = [
+
+    /* ============================ TRACK A ============================ */
+    {
+      id: 'math-101',
+      track: 'A',
+      code: 'MATH 101',
+      title: 'College Algebra',
+      semester: 'Year 1 · Fall',
+      prereqs: [],
+      prereqText: 'None — this is the mathematics entry point of the entire curriculum.',
+      description:
+        'The foundation every later course stands on. You will master polynomial operations and factoring, solve linear and nonlinear systems of equations, perform matrix arithmetic and Gaussian elimination by hand, and develop a deep working fluency with functions — domain, range, composition, inverses, and transformations of graphs. Nothing here is assumed: the course starts from arithmetic-level comfort and builds methodically.',
+      outcomes: [
+        'Manipulate, factor, and divide polynomial expressions fluently, and solve quadratic and rational equations using multiple techniques.',
+        'Solve systems of linear equations with substitution, elimination, and matrix row-reduction, and interpret each solution geometrically.',
+        'Analyze functions rigorously — evaluate, compose, invert, and transform them — and connect every algebraic operation to its graph.',
+      ],
+      textbook: {
+        title: 'College Algebra',
+        author: 'Robert Blitzer (Pearson, 8th Edition)',
+        note: 'Chosen for its enormous bank of fully worked examples and its gentle, application-first pacing — ideal for rebuilding math confidence from scratch. The OpenStax "College Algebra 2e" text is a free, high-quality alternative.',
+      },
+      snippet: {
+        label: 'Solving a 2×2 linear system the way you will by hand — expressed in Python',
+        language: 'python',
+        code:
+'# Solve the system:  2x + 3y = 12\n' +
+'#                    4x -  y = 10\n' +
+'# using Cramer\'s Rule, exactly as taught in the matrices unit.\n' +
+'\n' +
+'a, b, e = 2, 3, 12   # first equation coefficients\n' +
+'c, d, f = 4, -1, 10  # second equation coefficients\n' +
+'\n' +
+'det = a * d - b * c          # determinant of the coefficient matrix\n' +
+'if det == 0:\n' +
+'    print("No unique solution: the lines are parallel or identical.")\n' +
+'else:\n' +
+'    x = (e * d - b * f) / det\n' +
+'    y = (a * f - e * c) / det\n' +
+'    print(f"x = {x}, y = {y}")   # -> x = 3.0, y = 2.0',
+      },
+    },
+    {
+      id: 'math-102',
+      track: 'A',
+      code: 'MATH 102',
+      title: 'Trigonometry & Analytic Geometry',
+      semester: 'Year 1 · Spring',
+      prereqs: ['math-101'],
+      prereqText: 'College Algebra (MATH 101).',
+      description:
+        'The geometric language of engineering. You will learn the unit circle and the six trigonometric functions, prove and apply the core identities, and then move into the analytic-geometry material that robotics depends on daily: two-dimensional vectors and their dot products, parametric equations that describe motion over time, and polar coordinates that describe position by angle and distance — exactly how a lidar sensor reports the world.',
+      outcomes: [
+        'Evaluate and graph trigonometric functions from the unit circle, and apply sum, difference, and double-angle identities to simplify real expressions.',
+        'Represent quantities as 2D vectors, compute magnitudes, dot products, and angles between vectors, and resolve forces into components.',
+        'Convert fluently between Cartesian, polar, and parametric representations of curves, and describe moving points with parametric equations.',
+      ],
+      textbook: {
+        title: 'Algebra and Trigonometry',
+        author: 'Michael Sullivan (Pearson, 11th Edition)',
+        note: 'Sullivan\'s treatment of vectors, polar coordinates, and conic sections is unusually complete for a trigonometry text, which makes it a perfect on-ramp to the calculus sequence and to robot coordinate frames.',
+      },
+      snippet: {
+        label: 'Polar-to-Cartesian conversion — how a lidar return becomes an (x, y) point',
+        language: 'python',
+        code:
+'import math\n' +
+'\n' +
+'# A lidar sensor reports: "obstacle at 2.5 meters, bearing 30 degrees".\n' +
+'# Analytic geometry converts that polar reading into Cartesian x, y.\n' +
+'\n' +
+'r_meters = 2.5\n' +
+'theta_deg = 30.0\n' +
+'theta_rad = math.radians(theta_deg)\n' +
+'\n' +
+'x = r_meters * math.cos(theta_rad)\n' +
+'y = r_meters * math.sin(theta_rad)\n' +
+'\n' +
+'print(f"Obstacle position: x = {x:.3f} m, y = {y:.3f} m")\n' +
+'# -> Obstacle position: x = 2.165 m, y = 1.250 m',
+      },
+    },
+    {
+      id: 'math-201',
+      track: 'A',
+      code: 'MATH 201',
+      title: 'Calculus 1 with Analytic Geometry',
+      semester: 'Year 2 · Fall',
+      prereqs: ['math-102'],
+      prereqText: 'Trigonometry & Analytic Geometry (MATH 102).',
+      description:
+        'The mathematics of change. Starting from an intuitive and then rigorous treatment of limits and continuity, you will build the derivative from first principles, master the differentiation rules for every standard function class, and apply single-variable derivatives to the problems engineers actually face: related rates of change, curve sketching, and optimization — finding the exact input that minimizes cost, time, or energy.',
+      outcomes: [
+        'Evaluate limits analytically and graphically, classify discontinuities, and use limit arguments to justify continuity of functions.',
+        'Differentiate polynomial, trigonometric, exponential, and composite functions using the product, quotient, and chain rules with full fluency.',
+        'Solve applied optimization and related-rates problems end-to-end: model the scenario, differentiate, locate critical points, and defend the answer.',
+      ],
+      textbook: {
+        title: 'Calculus: Early Transcendentals',
+        author: 'James Stewart, Daniel Clegg & Saleem Watson (Cengage, 9th Edition)',
+        note: 'The standard engineering calculus reference. One purchase covers Calculus 1, 2, and 3 in this curriculum, and its problem sets scale smoothly from routine drill to genuinely hard.',
+      },
+      snippet: {
+        label: 'The limit definition of the derivative, computed numerically',
+        language: 'python',
+        code:
+'# The derivative is a limit:  f\'(x) = lim (f(x+h) - f(x)) / h  as h -> 0.\n' +
+'# Watch the difference quotient converge to the true answer.\n' +
+'\n' +
+'def f(x):\n' +
+'    return x ** 2          # f(x) = x^2, so f\'(3) should be exactly 6\n' +
+'\n' +
+'x = 3.0\n' +
+'for h in [0.1, 0.01, 0.001, 0.0001]:\n' +
+'    slope = (f(x + h) - f(x)) / h\n' +
+'    print(f"h = {h:<8} difference quotient = {slope:.6f}")\n' +
+'\n' +
+'# h = 0.1      difference quotient = 6.100000\n' +
+'# h = 0.0001   difference quotient = 6.000100   -> converging to 6',
+      },
+    },
+    {
+      id: 'math-202',
+      track: 'A',
+      code: 'MATH 202',
+      title: 'Calculus 2',
+      semester: 'Year 2 · Spring',
+      prereqs: ['math-201'],
+      prereqText: 'Calculus 1 with Analytic Geometry (MATH 201).',
+      description:
+        'The mathematics of accumulation and approximation. You will master the advanced integration toolbox — substitution, integration by parts, partial fractions, and improper integrals — then study infinite sequences and series, convergence tests, and the Taylor series machinery that lets a computer approximate any smooth function with plain arithmetic. The course closes with parametric and polar integration and an introduction to the transform techniques used throughout dynamic-systems engineering.',
+      outcomes: [
+        'Evaluate difficult integrals by strategically selecting substitution, parts, partial fractions, and trigonometric techniques.',
+        'Determine convergence or divergence of infinite sequences and series using the ratio, comparison, and integral tests, and bound the error of a truncated sum.',
+        'Construct Taylor and Maclaurin polynomial approximations of transcendental functions and quantify exactly how accurate a given-order approximation is.',
+      ],
+      textbook: {
+        title: 'Calculus: Early Transcendentals',
+        author: 'James Stewart, Daniel Clegg & Saleem Watson (Cengage, 9th Edition)',
+        note: 'Continues directly from Calculus 1 — chapters on integration techniques, sequences and series, and Taylor approximation. Pair it with the free "Paul\'s Online Math Notes" for a second explanation of every topic.',
+      },
+      snippet: {
+        label: 'A Taylor series turning sin(x) into pure arithmetic — how embedded CPUs do it',
+        language: 'python',
+        code:
+'import math\n' +
+'\n' +
+'# Maclaurin series: sin(x) = x - x^3/3! + x^5/5! - x^7/7! + ...\n' +
+'# Flight controllers with no trig hardware evaluate sine exactly this way.\n' +
+'\n' +
+'def sin_taylor(x, terms):\n' +
+'    total = 0.0\n' +
+'    for n in range(terms):\n' +
+'        k = 2 * n + 1                       # odd powers only\n' +
+'        term = ((-1) ** n) * x ** k / math.factorial(k)\n' +
+'        total += term\n' +
+'    return total\n' +
+'\n' +
+'x = 1.0  # radians\n' +
+'for terms in [1, 2, 4, 6]:\n' +
+'    print(f"{terms} terms -> {sin_taylor(x, terms):.10f}")\n' +
+'print(f"math.sin  -> {math.sin(x):.10f}")   # 6 terms already match',
+      },
+    },
+    {
+      id: 'math-301',
+      track: 'A',
+      code: 'MATH 301',
+      title: 'Calculus 3: Multivariable & Vector Calculus',
+      semester: 'Year 3 · Fall',
+      prereqs: ['math-202'],
+      prereqText: 'Calculus 2 (MATH 202).',
+      description:
+        'Calculus in the three-dimensional world a robot actually inhabits. You will work with 3D vectors, dot and cross products, and vector-valued functions describing spatial motion; take partial derivatives and gradients of multivariable functions; optimize with and without constraints using critical-point analysis and Lagrange multipliers; and evaluate double, triple, and line integrals. The capstone topics — Green\'s theorem, Stokes\' theorem, and the divergence theorem — unify everything into the vector-field language used by physics, control theory, and machine learning alike.',
+      outcomes: [
+        'Compute and interpret partial derivatives, gradients, and directional derivatives, and use them to locate and classify extrema of multivariable functions.',
+        'Set up and evaluate double, triple, and line integrals over regions and paths in 2D and 3D space, choosing coordinates (rectangular, cylindrical, spherical) strategically.',
+        'Apply Green\'s theorem, Stokes\' theorem, and the divergence theorem to convert between line, surface, and volume integrals and to reason about circulation and flux of vector fields.',
+      ],
+      textbook: {
+        title: 'Calculus: Early Transcendentals',
+        author: 'James Stewart, Daniel Clegg & Saleem Watson (Cengage, 9th Edition)',
+        note: 'The multivariable chapters (12–16) of the same text used across the sequence. Supplement with "Vector Calculus" by Marsden & Tromba if you want a deeper theoretical treatment of the big three theorems.',
+      },
+      snippet: {
+        label: 'Gradient descent — the gradient vector from Calc 3 is how machines optimize',
+        language: 'python',
+        code:
+'# Minimize f(x, y) = (x - 3)^2 + (y + 1)^2 by walking against the gradient.\n' +
+'# grad f = <2(x - 3), 2(y + 1)>  — pure Calc 3 partial derivatives.\n' +
+'\n' +
+'x, y = 0.0, 0.0        # starting guess\n' +
+'step = 0.1             # learning rate\n' +
+'\n' +
+'for i in range(50):\n' +
+'    grad_x = 2 * (x - 3)\n' +
+'    grad_y = 2 * (y + 1)\n' +
+'    x -= step * grad_x   # move opposite the gradient:\n' +
+'    y -= step * grad_y   # steepest descent direction\n' +
+'\n' +
+'print(f"Converged to ({x:.4f}, {y:.4f})")  # -> (3.0000, -1.0000)\n' +
+'# This exact loop, scaled up, is how neural networks are trained.',
+      },
+    },
+
+    /* ============================ TRACK B ============================ */
+    {
+      id: 'cs-101',
+      track: 'B',
+      code: 'CS 101',
+      title: 'Introduction to Computational Programming',
+      semester: 'Year 1 · Fall',
+      prereqs: [],
+      prereqText: 'None — designed for a complete beginner who has never written code.',
+      description:
+        'Your first programming course, taught in Python and built for someone starting from absolute zero. You will set up a real execution environment (Python interpreter, VS Code, and the terminal), then learn the core mental models of computing: variables and types, conditional logic paths, loops with structured syntax, arrays and lists, functions, and file input/output. Robust error handling is treated as a first-class topic from week one, because professional code is defined by how it fails, not just how it succeeds.',
+      outcomes: [
+        'Install and operate a professional Python development environment, and run, debug, and version programs from the command line.',
+        'Decompose problems into conditional logic paths, loops, functions, and list/array operations, and translate that decomposition into clean, working Python.',
+        'Write defensive programs that validate input and use try/except error handling to fail safely and report exactly what went wrong.',
+      ],
+      textbook: {
+        title: 'Python Crash Course',
+        author: 'Eric Matthes (No Starch Press, 3rd Edition)',
+        note: 'The best-regarded true-beginner Python book in print: short chapters, hands-on projects from the first page, and no assumed background. "Automate the Boring Stuff with Python" by Al Sweigart is a free-to-read companion.',
+      },
+      snippet: {
+        label: 'A first real program — a loop, a logic path, and honest error handling',
+        language: 'python',
+        code:
+'# Average a list of sensor readings, skipping any corrupted entry.\n' +
+'# Every concept here is covered in the first six weeks of the course.\n' +
+'\n' +
+'raw_readings = ["21.5", "22.1", "not-a-number", "21.9", "22.4"]\n' +
+'valid = []\n' +
+'\n' +
+'for entry in raw_readings:              # structured loop\n' +
+'    try:\n' +
+'        value = float(entry)            # may raise ValueError\n' +
+'        valid.append(value)\n' +
+'    except ValueError:\n' +
+'        print(f"Skipping corrupted reading: {entry!r}")\n' +
+'\n' +
+'if valid:                               # logic path: guard the division\n' +
+'    average = sum(valid) / len(valid)\n' +
+'    print(f"Average of {len(valid)} readings: {average:.2f}")\n' +
+'else:\n' +
+'    print("No valid readings received.")',
+      },
+    },
+    {
+      id: 'cs-201',
+      track: 'B',
+      code: 'CS 201',
+      title: 'Advanced Data Structures & The Object-Oriented Paradigm',
+      semester: 'Year 2 · Spring',
+      prereqs: ['cs-101'],
+      prereqText: 'Introduction to Computational Programming (CS 101).',
+      description:
+        'The course that turns a scripter into a software engineer. Working in C++ alongside advanced Python, you will learn what memory actually is: pointers, references, manual allocation and deallocation, and the ownership discipline that prevents leaks and crashes. On top of that foundation you will build and analyze the classic data structures — linked lists, stacks, queues, hash tables, trees, and complex data graphs — implement the standard sorting mechanics, reason about Big-O complexity, and design class hierarchies with proper encapsulation, inheritance, and polymorphism.',
+      outcomes: [
+        'Manage memory explicitly in C++ — allocate, use, and free heap memory through pointers — and explain exactly what the stack and heap are doing at each step.',
+        'Implement linked lists, hash tables, binary trees, and graph adjacency structures from scratch, and select the right structure for a problem using Big-O analysis.',
+        'Design object-oriented systems with encapsulated classes, constructors and destructors, inheritance, and virtual dispatch, in both C++ and Python.',
+      ],
+      textbook: {
+        title: 'Data Structures and Algorithm Analysis in C++',
+        author: 'Mark Allen Weiss (Pearson, 4th Edition)',
+        note: 'A rigorous, implementation-first classic that matches this course chapter-for-chapter. Keep "The C++ Programming Language" (Stroustrup) nearby as the definitive language reference.',
+      },
+      snippet: {
+        label: 'Pointers and manual allocation — a hand-built linked list node in C++',
+        language: 'cpp',
+        code:
+'#include <iostream>\n' +
+'\n' +
+'// A singly linked list built by hand: every node lives on the heap,\n' +
+'// and we are personally responsible for every byte we allocate.\n' +
+'\n' +
+'struct Node {\n' +
+'    int value;\n' +
+'    Node* next;   // a pointer: the address of the next node, or nullptr\n' +
+'};\n' +
+'\n' +
+'int main() {\n' +
+'    Node* head = new Node{10, nullptr};      // manual heap allocation\n' +
+'    head->next = new Node{20, nullptr};\n' +
+'    head->next->next = new Node{30, nullptr};\n' +
+'\n' +
+'    for (Node* cur = head; cur != nullptr; cur = cur->next) {\n' +
+'        std::cout << cur->value << " ";      // -> 10 20 30\n' +
+'    }\n' +
+'\n' +
+'    while (head != nullptr) {                // walk and free every node:\n' +
+'        Node* doomed = head;                 // forget this loop and the\n' +
+'        head = head->next;                   // program leaks memory\n' +
+'        delete doomed;\n' +
+'    }\n' +
+'    return 0;\n' +
+'}',
+      },
+    },
+
+    /* ============================ TRACK C ============================ */
+    {
+      id: 'ece-201',
+      track: 'C',
+      code: 'ECE 201',
+      title: 'Digital Logic & Circuit Design',
+      semester: 'Year 2 · Fall',
+      prereqs: ['math-101'],
+      prereqText: 'College Algebra (MATH 101).',
+      description:
+        'How computation is physically built. Starting from Boolean algebra — a direct application of your algebra skills to true/false values — you will design with AND, OR, NOT, NAND, and XOR logic gates, simplify circuits with Karnaugh maps, and construct the combinatorial building blocks of every processor: adders, multiplexers, decoders, and comparators. You will then master binary arithmetic and register representations, and cross into sequential logic with SR, D, and JK flip-flops, counters, and finite state machines — circuits that remember.',
+      outcomes: [
+        'Simplify Boolean expressions algebraically and with Karnaugh maps, and realize any truth table as a minimal gate-level circuit.',
+        'Perform binary, two\'s-complement, and hexadecimal arithmetic by hand, and design the adder and register circuits that execute it in hardware.',
+        'Design sequential circuits — flip-flops, counters, and finite state machines — and trace their behavior cycle-by-cycle on a timing diagram.',
+      ],
+      textbook: {
+        title: 'Digital Design: With an Introduction to the Verilog HDL',
+        author: 'M. Morris Mano & Michael D. Ciletti (Pearson, 6th Edition)',
+        note: 'The canonical digital-logic text for four decades, updated with Verilog so every paper design can also be simulated. A free logic simulator such as Logisim Evolution makes the homework tactile.',
+      },
+      snippet: {
+        label: 'A 4-bit synchronous counter in Verilog — sequential flip-flops in action',
+        language: 'verilog',
+        code:
+'// A 4-bit up-counter: four D flip-flops updated on each clock edge.\n' +
+'// This is the "sequential logic" half of the course in twelve lines.\n' +
+'\n' +
+'module counter4 (\n' +
+'    input  wire       clk,     // clock: the heartbeat of the circuit\n' +
+'    input  wire       reset,   // synchronous reset to zero\n' +
+'    output reg  [3:0] count    // 4-bit register: holds state 0..15\n' +
+');\n' +
+'\n' +
+'    always @(posedge clk) begin      // on every rising clock edge:\n' +
+'        if (reset)\n' +
+'            count <= 4\'b0000;        // forced back to zero\n' +
+'        else\n' +
+'            count <= count + 1;      // binary arithmetic in hardware;\n' +
+'    end                              // rolls over 15 -> 0 naturally\n' +
+'\n' +
+'endmodule',
+      },
+    },
+    {
+      id: 'ece-301',
+      track: 'C',
+      code: 'ECE 301',
+      title: 'Microprocessor Fundamentals',
+      semester: 'Year 3 · Fall',
+      prereqs: ['ece-201', 'cs-101'],
+      prereqText: 'Digital Logic & Circuit Design (ECE 201) and Introduction to Computational Programming (CS 101).',
+      description:
+        'Where hardware meets software. You will open up the internal architecture of a CPU — registers, the ALU, the fetch-decode-execute cycle, and pipelining — and program it directly in x86 Assembly language: moving data between registers, arithmetic and logic instructions, comparisons, jumps, loops, and calling conventions on the stack. From there the course maps out the full memory system (memory-mapped blocks, address decoding, caches) and bus architectures, and finishes with hardware interrupts — the mechanism that lets a processor respond to the physical world in real time through interrupt-driven I/O loops.',
+      outcomes: [
+        'Explain the complete fetch-decode-execute cycle and trace how an instruction moves through registers, the ALU, and memory inside a CPU.',
+        'Write, assemble, and debug x86 Assembly programs using registers, the stack, conditional jumps, and loops, and read a compiler\'s generated assembly.',
+        'Design interrupt-driven I/O: configure a hardware interrupt, write its service routine, and explain memory-mapped device access over the system bus.',
+      ],
+      textbook: {
+        title: 'Assembly Language for x86 Processors',
+        author: 'Kip R. Irvine (Pearson, 8th Edition)',
+        note: 'The definitive teaching text for x86 assembly, with a complete link-and-run toolchain. Pair with "Computer Organization and Design" (Patterson & Hennessy) for the architectural theory underneath the instructions.',
+      },
+      snippet: {
+        label: 'An x86 register loop — summing an array with no language above you',
+        language: 'asm',
+        code:
+'; Sum a 5-element array of 32-bit integers, x86 (NASM syntax).\n' +
+'; Every operation touches a real named register — nothing is hidden.\n' +
+'\n' +
+'section .data\n' +
+'    array   dd 10, 20, 30, 40, 50   ; five doublewords in memory\n' +
+'    length  equ 5\n' +
+'\n' +
+'section .text\n' +
+'global _start\n' +
+'_start:\n' +
+'    mov     ecx, length         ; ECX = loop counter (5)\n' +
+'    mov     esi, array          ; ESI = pointer to array base\n' +
+'    xor     eax, eax            ; EAX = running sum, cleared to 0\n' +
+'\n' +
+'sum_loop:\n' +
+'    add     eax, [esi]          ; EAX += value at address in ESI\n' +
+'    add     esi, 4              ; advance pointer 4 bytes (32 bits)\n' +
+'    loop    sum_loop            ; ECX -= 1; jump back while ECX != 0\n' +
+'\n' +
+'    ; EAX now holds 150 — the result lives in a register, not a variable.\n' +
+'    mov     ebx, eax            ; exit code = sum (for demonstration)\n' +
+'    mov     eax, 1              ; syscall number: exit\n' +
+'    int     0x80                ; software interrupt into the kernel',
+      },
+    },
+
+    /* ============================ TRACK D ============================ */
+    {
+      id: 'rob-401',
+      track: 'D',
+      code: 'ROB 401',
+      title: 'Robot Kinematics & Drivetrain Control',
+      semester: 'Year 3 · Spring',
+      prereqs: ['math-301', 'ece-301'],
+      prereqText: 'Calculus 3: Multivariable & Vector Calculus (MATH 301) and Microprocessor Fundamentals (ECE 301).',
+      description:
+        'The mathematics of robot motion, made executable. Using the vectors and matrices you now own, you will model robot geometry with coordinate transformation matrices, chain them through Denavit–Hartenberg (DH) parameterization to describe multi-joint arms, and solve both forward kinematics (joint angles → end-effector pose) and the harder inverse problem (desired pose → joint angles). The drivetrain half of the course covers differential-drive and Ackermann vehicle models, and closes the loop with wheel odometry: integrating encoder ticks over time to estimate where the robot actually is.',
+      outcomes: [
+        'Construct 2D and 3D homogeneous transformation matrices and compose them to map points between world, robot, and sensor coordinate frames.',
+        'Derive forward kinematics for a serial manipulator using DH parameters, and solve inverse kinematics analytically for 2-link and geometrically tractable arms.',
+        'Implement a wheel-odometry integration loop that converts encoder ticks into a continuously updated (x, y, heading) pose estimate, and quantify its drift.',
+      ],
+      textbook: {
+        title: 'Modern Robotics: Mechanics, Planning, and Control',
+        author: 'Kevin M. Lynch & Frank C. Park (Cambridge University Press)',
+        note: 'A modern, mathematically clean treatment with free companion video lectures and software. "Introduction to Robotics" by John J. Craig is the classic alternative with a gentler DH-parameter introduction.',
+      },
+      snippet: {
+        label: 'Forward kinematics of a 2-link arm — transformation matrices doing real work',
+        language: 'python',
+        code:
+'import math\n' +
+'\n' +
+'# A 2-link planar arm: where is the gripper for given joint angles?\n' +
+'# This is forward kinematics — trig and vectors from Tracks A applied.\n' +
+'\n' +
+'L1, L2 = 0.30, 0.25          # link lengths in meters\n' +
+'theta1 = math.radians(30)    # shoulder joint angle\n' +
+'theta2 = math.radians(45)    # elbow joint angle (relative to link 1)\n' +
+'\n' +
+'# Elbow position: rotate link 1 by theta1 from the base frame.\n' +
+'elbow_x = L1 * math.cos(theta1)\n' +
+'elbow_y = L1 * math.sin(theta1)\n' +
+'\n' +
+'# Gripper: compose the second rotation on top of the first.\n' +
+'grip_x = elbow_x + L2 * math.cos(theta1 + theta2)\n' +
+'grip_y = elbow_y + L2 * math.sin(theta1 + theta2)\n' +
+'\n' +
+'print(f"Elbow:   ({elbow_x:.3f}, {elbow_y:.3f}) m")\n' +
+'print(f"Gripper: ({grip_x:.3f}, {grip_y:.3f}) m")\n' +
+'# Inverse kinematics — the second half of the course — runs this backward.',
+      },
+    },
+    {
+      id: 'rob-402',
+      track: 'D',
+      code: 'ROB 402',
+      title: 'Computer Vision & Sensor Perception Pipelines',
+      semester: 'Year 4 · Fall',
+      prereqs: ['cs-201'],
+      prereqText: 'Advanced Data Structures & The Object-Oriented Paradigm (CS 201).',
+      description:
+        'How a robot sees. You will parse raw physical sensor data — camera frames, depth maps, lidar returns — and build the processing pipelines that turn them into decisions. The course covers image filtration with OpenCV (blurring, thresholding, edge and contour detection), the pinhole camera model and its geometric calibration matrices, stereo geometry and dynamic depth calculation from disparity arrays, and 3D point-cloud registration — aligning two scans of the same scene to recover how the sensor moved. Throughout, the emphasis is on pipelines: staged, testable transformations from photons to structured data.',
+      outcomes: [
+        'Build multi-stage OpenCV pipelines that filter, threshold, and extract edges, contours, and object candidates from live camera frames.',
+        'Calibrate a camera to recover its intrinsic matrix and distortion coefficients, and explain how the pinhole model maps 3D points to pixels.',
+        'Compute depth from stereo disparity and register 3D point clouds with iterative alignment, producing a consistent spatial map from multiple scans.',
+      ],
+      textbook: {
+        title: 'Computer Vision: Algorithms and Applications',
+        author: 'Richard Szeliski (Springer, 2nd Edition — free official PDF available from the author)',
+        note: 'The field\'s standard reference, remarkably readable and legally free online. Pair with "Learning OpenCV 4" (Kaehler & Bradski) for the hands-on library-level counterpart used in the labs.',
+      },
+      snippet: {
+        label: 'A minimal OpenCV perception pipeline — frame in, obstacle contours out',
+        language: 'python',
+        code:
+'import cv2\n' +
+'\n' +
+'# Stage 1: acquire  ->  Stage 2: filter  ->  Stage 3: extract.\n' +
+'# Every perception system in this course is a pipeline of this shape.\n' +
+'\n' +
+'frame = cv2.imread("hallway.png")            # raw sensor data (BGR image)\n' +
+'\n' +
+'gray    = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)   # collapse color\n' +
+'blurred = cv2.GaussianBlur(gray, (5, 5), 0)         # suppress pixel noise\n' +
+'edges   = cv2.Canny(blurred, threshold1=50, threshold2=150)\n' +
+'\n' +
+'contours, _ = cv2.findContours(edges, cv2.RETR_EXTERNAL,\n' +
+'                               cv2.CHAIN_APPROX_SIMPLE)\n' +
+'\n' +
+'large = [c for c in contours if cv2.contourArea(c) > 500.0]\n' +
+'print(f"Detected {len(large)} candidate obstacles")\n' +
+'\n' +
+'for c in large:\n' +
+'    x, y, w, h = cv2.boundingRect(c)         # pixel-space bounding box\n' +
+'    print(f"  obstacle at pixel ({x},{y}), size {w}x{h}")',
+      },
+    },
+    {
+      id: 'rob-403',
+      track: 'D',
+      code: 'ROB 403',
+      title: 'Autonomous Motion Planners & Safety Governors',
+      semester: 'Year 4 · Spring',
+      prereqs: ['rob-401', 'rob-402'],
+      prereqText: 'Robot Kinematics & Drivetrain Control (ROB 401) and Computer Vision & Sensor Perception Pipelines (ROB 402).',
+      description:
+        'The capstone: making a robot decide, move, and stay safe — simultaneously. You will implement the real-time pathfinding engines that route autonomous systems, A* and Dijkstra, over local costmap grids built from live perception data, and coordinate them with multi-threaded state logic so planning, sensing, and actuation run concurrently without races. The defining topic is the safety governor: an independent runtime block that intercepts every raw command a planner emits and clamps or rejects it against hard physical envelopes before it can reach an actuator. The planner proposes; the governor bounds. That separation — never trusting the intelligence layer with final authority over hardware — is the architecture underlying every serious autonomous system deployed today.',
+      outcomes: [
+        'Implement A* and Dijkstra over occupancy-grid costmaps, and explain the admissibility conditions under which A* is guaranteed optimal.',
+        'Structure a robot control stack as concurrent threads (perception, planning, actuation) with safe shared-state handoff and no data races.',
+        'Design and defend an independent safety governor that intercepts planner output and enforces absolute limits first, then rate-of-change limits — failing closed when inputs are invalid.',
+      ],
+      textbook: {
+        title: 'Planning Algorithms',
+        author: 'Steven M. LaValle (Cambridge University Press — free official edition at lavalle.pl/planning)',
+        note: 'The encyclopedic planning reference, free from the author. Pair with "Probabilistic Robotics" (Thrun, Burgard & Fox) for the state-estimation side of autonomy.',
+      },
+      snippet: {
+        label: 'A safety governor — the independent block between the planner and the motors',
+        language: 'python',
+        code:
+'# The planner PROPOSES a velocity; the governor BOUNDS it.\n' +
+'# Order matters: clamp to the absolute envelope FIRST, then rate-limit.\n' +
+'# Invalid input never passes through — the governor fails closed.\n' +
+'\n' +
+'import math\n' +
+'\n' +
+'MAX_SPEED_MPS   = 2.0     # absolute hard envelope: never exceeded\n' +
+'MAX_DELTA_MPS   = 0.3     # max change per 100 ms control cycle\n' +
+'\n' +
+'def govern(proposed_mps, current_mps):\n' +
+'    """Intercept a raw planner command; return a safe actuator command."""\n' +
+'    if not math.isfinite(proposed_mps):      # NaN/inf from a bad model?\n' +
+'        return 0.0                           # fail closed: commanded stop\n' +
+'\n' +
+'    # 1) Absolute envelope always wins.\n' +
+'    bounded = max(-MAX_SPEED_MPS, min(MAX_SPEED_MPS, proposed_mps))\n' +
+'\n' +
+'    # 2) Then limit the rate of change to protect the drivetrain.\n' +
+'    delta = bounded - current_mps\n' +
+'    delta = max(-MAX_DELTA_MPS, min(MAX_DELTA_MPS, delta))\n' +
+'    return current_mps + delta\n' +
+'\n' +
+'print(govern(9.99, 0.0))          # -> 0.3  (enveloped, then rate-limited)\n' +
+'print(govern(float("nan"), 1.2))  # -> 0.0  (rejected outright)',
+      },
+    },
+  ];
+
+  /* ------------------------------------------------------------------ *
+   * 4-YEAR SEMESTER SEQUENCE DATA
+   * ------------------------------------------------------------------ */
+  const SEMESTERS = [
+    {
+      label: 'Year 1 · Fall', theme: 'Foundations from zero',
+      courses: ['math-101', 'cs-101'],
+      note: 'Mathematics and programming begin in parallel, both from a true standing start. Neither depends on the other yet.',
+    },
+    {
+      label: 'Year 1 · Spring', theme: 'Geometry & fluency',
+      courses: ['math-102'],
+      note: 'Trigonometry and analytic geometry build the vector language of engineering while you consolidate Python fluency with sustained practice projects.',
+    },
+    {
+      label: 'Year 2 · Fall', theme: 'Change & logic',
+      courses: ['math-201', 'ece-201'],
+      note: 'Calculus begins, and your algebra skills unlock hardware: Boolean logic is algebra over true and false.',
+    },
+    {
+      label: 'Year 2 · Spring', theme: 'Depth in both stacks',
+      courses: ['math-202', 'cs-201'],
+      note: 'Integration and infinite series on the math side; pointers, memory, and data structures turn you into a real software engineer.',
+    },
+    {
+      label: 'Year 3 · Fall', theme: 'Three dimensions, one CPU',
+      courses: ['math-301', 'ece-301'],
+      note: 'Multivariable calculus opens 3D space while x86 assembly opens the processor. The last prerequisites for robotics fall here.',
+    },
+    {
+      label: 'Year 3 · Spring', theme: 'The robot moves',
+      courses: ['rob-401'],
+      note: 'Everything converges: transformation matrices, DH parameters, and odometry — Calc 3 and microprocessor skills applied to physical motion.',
+    },
+    {
+      label: 'Year 4 · Fall', theme: 'The robot sees',
+      courses: ['rob-402'],
+      note: 'Perception pipelines: OpenCV filtration, camera geometry, stereo depth, and point-cloud registration on real sensor data.',
+    },
+    {
+      label: 'Year 4 · Spring', theme: 'The robot decides — safely',
+      courses: ['rob-403'],
+      note: 'The capstone. Pathfinding over costmaps, concurrent state logic, and the independent safety governor that bounds every command.',
+    },
+  ];
+
+  /* ------------------------------------------------------------------ *
+   * LOCAL STORAGE PERSISTENCE
+   * ------------------------------------------------------------------ */
+  const STORAGE_KEY = 'ase-ui-completed-courses-v1';
+
+  function loadCompleted() {
+    try {
+      const raw = localStorage.getItem(STORAGE_KEY);
+      if (!raw) return new Set();
+      const parsed = JSON.parse(raw);
+      return new Set(Array.isArray(parsed) ? parsed : []);
+    } catch (err) {
+      // Corrupt or inaccessible storage: start fresh rather than crash.
+      return new Set();
+    }
+  }
+
+  function saveCompleted(set) {
+    try {
+      localStorage.setItem(STORAGE_KEY, JSON.stringify([...set]));
+    } catch (err) {
+      // Storage full or blocked (private mode): the page still works,
+      // progress simply will not persist across reloads.
+    }
+  }
+
+  let completed = loadCompleted();
+  let activeFilter = 'ALL';
+
+  /* ------------------------------------------------------------------ *
+   * SMALL DOM HELPERS
+   * ------------------------------------------------------------------ */
+  function el(tag, className, text) {
+    const node = document.createElement(tag);
+    if (className) node.className = className;
+    if (text !== undefined) node.textContent = text;
+    return node;
+  }
+
+  function courseById(id) {
+    return COURSES.find(function (c) { return c.id === id; });
+  }
+
+  const LANGUAGE_LABELS = {
+    python: 'Python', cpp: 'C++', asm: 'x86 Assembly', verilog: 'Verilog HDL',
+  };
+
+  /* ------------------------------------------------------------------ *
+   * PROGRESS RENDERING (global + per-track)
+   * ------------------------------------------------------------------ */
+  function updateProgress() {
+    const total = COURSES.length;
+    const done = COURSES.filter(function (c) { return completed.has(c.id); }).length;
+    const pct = Math.round((done / total) * 100);
+
+    document.getElementById('progress-count').textContent = String(done);
+    document.getElementById('progress-percent').textContent = pct + '%';
+    document.getElementById('dashboard-progress-fill').style.width = pct + '%';
+    document.getElementById('nav-progress-fill').style.width = pct + '%';
+    document.getElementById('progress-bar-aria').setAttribute('aria-valuenow', String(pct));
+
+    // Per-track breakdown in the sidebar.
+    const wrap = document.getElementById('track-progress');
+    wrap.innerHTML = '';
+    Object.values(TRACKS).forEach(function (track) {
+      const inTrack = COURSES.filter(function (c) { return c.track === track.key; });
+      const doneInTrack = inTrack.filter(function (c) { return completed.has(c.id); }).length;
+      const trackPct = inTrack.length ? Math.round((doneInTrack / inTrack.length) * 100) : 0;
+
+      const row = el('div');
+      const header = el('div', 'mb-1 flex items-center justify-between');
+      header.appendChild(el('span', 'text-xs font-semibold ' + track.accentText, 'Track ' + track.key + ' · ' + track.short));
+      header.appendChild(el('span', 'text-[11px] text-zinc-500', doneInTrack + '/' + inTrack.length));
+      const barOuter = el('div', 'h-2 w-full overflow-hidden rounded-full bg-zinc-800');
+      const barInner = el('div', 'progress-fill h-2 rounded-full bg-gradient-to-r ' + track.bar);
+      barInner.style.width = trackPct + '%';
+      barOuter.appendChild(barInner);
+      row.appendChild(header);
+      row.appendChild(barOuter);
+      wrap.appendChild(row);
+    });
+  }
+
+  /* ------------------------------------------------------------------ *
+   * FILTER BAR RENDERING
+   * ------------------------------------------------------------------ */
+  function renderFilterBar() {
+    const bar = document.getElementById('filter-bar');
+    bar.innerHTML = '';
+
+    const options = [{ key: 'ALL', label: 'Full Curriculum (12)' }].concat(
+      Object.values(TRACKS).map(function (t) {
+        const count = COURSES.filter(function (c) { return c.track === t.key; }).length;
+        return { key: t.key, label: 'Track ' + t.key + ' · ' + t.short + ' (' + count + ')' };
+      })
+    );
+
+    options.forEach(function (opt) {
+      const active = activeFilter === opt.key;
+      const btn = el('button',
+        'rounded-full border px-4 py-1.5 text-xs font-semibold transition ' +
+        (active
+          ? 'border-cyan-400 bg-cyan-500/15 text-cyan-200 shadow-glow-cyan'
+          : 'border-zinc-700 bg-zinc-900 text-zinc-400 hover:border-zinc-500 hover:text-zinc-200'),
+        opt.label);
+      btn.setAttribute('role', 'tab');
+      btn.setAttribute('aria-selected', active ? 'true' : 'false');
+      btn.addEventListener('click', function () {
+        activeFilter = opt.key;
+        renderFilterBar();
+        renderCourses();
+      });
+      bar.appendChild(btn);
+    });
+  }
+
+  /* ------------------------------------------------------------------ *
+   * COURSE CARD RENDERING
+   * ------------------------------------------------------------------ */
+  function renderCourses() {
+    const grid = document.getElementById('course-grid');
+    grid.innerHTML = '';
+
+    const visible = COURSES.filter(function (c) {
+      return activeFilter === 'ALL' || c.track === activeFilter;
+    });
+
+    visible.forEach(function (course) {
+      const track = TRACKS[course.track];
+      const isDone = completed.has(course.id);
+
+      const card = el('article',
+        'card-enter flex flex-col rounded-2xl border border-zinc-800 bg-zinc-900/60 p-5 transition ' +
+        track.accentBorder + (isDone ? ' completed-card' : ''));
+      card.id = 'card-' + course.id;
+
+      /* --- Header row: badges + semester --- */
+      const head = el('div', 'mb-3 flex flex-wrap items-center gap-2');
+      head.appendChild(el('span', 'rounded-full border px-2.5 py-0.5 text-[11px] font-bold ' + track.badge, 'Track ' + track.key + ' · ' + track.short));
+      head.appendChild(el('span', 'rounded-full border border-zinc-700 bg-zinc-800/80 px-2.5 py-0.5 font-mono text-[11px] font-semibold text-zinc-300', course.code));
+      head.appendChild(el('span', 'ml-auto text-[11px] font-medium text-zinc-500', course.semester));
+      card.appendChild(head);
+
+      /* --- Title + description --- */
+      card.appendChild(el('h4', 'card-title text-lg font-bold leading-snug text-zinc-50', course.title));
+      card.appendChild(el('p', 'mt-2 text-[13px] leading-relaxed text-zinc-400', course.description));
+
+      /* --- Prerequisites --- */
+      const preBox = el('div', 'mt-4 rounded-lg border border-zinc-800 bg-zinc-950/60 p-3');
+      preBox.appendChild(el('p', 'text-[10px] font-bold uppercase tracking-widest text-zinc-500', 'Prerequisites'));
+      const preLine = el('p', 'mt-1 text-xs text-zinc-300');
+      if (course.prereqs.length === 0) {
+        preLine.textContent = course.prereqText;
+      } else {
+        preLine.textContent = course.prereqText + ' ';
+        const met = course.prereqs.every(function (pid) { return completed.has(pid); });
+        const status = el('span',
+          met ? 'font-semibold text-emerald-400' : 'font-semibold text-amber-400',
+          met ? '✓ All prerequisites completed' : '• Prerequisites still in progress');
+        preLine.appendChild(status);
+      }
+      preBox.appendChild(preLine);
+      card.appendChild(preBox);
+
+      /* --- Learning outcomes --- */
+      const outBox = el('div', 'mt-4');
+      outBox.appendChild(el('p', 'text-[10px] font-bold uppercase tracking-widest text-zinc-500', 'Learning Outcomes'));
+      const list = el('ul', 'mt-2 space-y-2');
+      course.outcomes.forEach(function (o) {
+        const li = el('li', 'flex gap-2 text-xs leading-relaxed text-zinc-300');
+        li.appendChild(el('span', 'mt-0.5 shrink-0 ' + track.accentText, '▸'));
+        li.appendChild(el('span', '', o));
+        list.appendChild(li);
+      });
+      outBox.appendChild(list);
+      card.appendChild(outBox);
+
+      /* --- Textbook --- */
+      const bookBox = el('div', 'mt-4 rounded-lg border border-zinc-800 bg-zinc-950/60 p-3');
+      const bookHead = el('p', 'text-[10px] font-bold uppercase tracking-widest text-zinc-500', 'Primary Textbook');
+      bookBox.appendChild(bookHead);
+      const bookTitle = el('p', 'mt-1 text-xs font-semibold text-zinc-100', course.textbook.title);
+      bookBox.appendChild(bookTitle);
+      bookBox.appendChild(el('p', 'text-[11px] italic text-zinc-400', course.textbook.author));
+      bookBox.appendChild(el('p', 'mt-1.5 text-[11px] leading-relaxed text-zinc-500', course.textbook.note));
+      card.appendChild(bookBox);
+
+      /* --- Code playground toggle --- */
+      const codeWrap = el('div', 'mt-4');
+      const toggle = el('button',
+        'flex w-full items-center justify-between rounded-lg border border-zinc-700 bg-zinc-950/80 px-3 py-2 text-left text-xs font-semibold text-zinc-300 transition hover:border-cyan-500/50 hover:text-cyan-300');
+      const toggleLabel = el('span', '', '⌨ Code Playground · ' + (LANGUAGE_LABELS[course.snippet.language] || course.snippet.language));
+      const chevron = el('span', 'text-zinc-500 transition-transform', '▾');
+      toggle.appendChild(toggleLabel);
+      toggle.appendChild(chevron);
+      toggle.setAttribute('aria-expanded', 'false');
+
+      const panel = el('div', 'code-panel mt-2 overflow-hidden rounded-lg border border-zinc-800 bg-zinc-950');
+      panel.appendChild(el('p', 'border-b border-zinc-800 px-3 py-2 text-[11px] font-medium text-zinc-400', course.snippet.label));
+      const pre = el('pre', 'code-block p-3 font-mono text-zinc-200');
+      const codeEl = el('code');
+      codeEl.textContent = course.snippet.code;
+      pre.appendChild(codeEl);
+      panel.appendChild(pre);
+
+      toggle.addEventListener('click', function () {
+        const open = panel.classList.toggle('open');
+        toggle.setAttribute('aria-expanded', open ? 'true' : 'false');
+        chevron.style.transform = open ? 'rotate(180deg)' : '';
+      });
+      codeWrap.appendChild(toggle);
+      codeWrap.appendChild(panel);
+      card.appendChild(codeWrap);
+
+      /* --- Completion checkbox --- */
+      const footer = el('div', 'mt-4 flex items-center justify-between border-t border-zinc-800 pt-3');
+      const checkLabel = el('label', 'flex cursor-pointer select-none items-center gap-2.5');
+      const checkbox = document.createElement('input');
+      checkbox.type = 'checkbox';
+      checkbox.className = 'course-check';
+      checkbox.checked = isDone;
+      checkbox.setAttribute('aria-label', 'Mark ' + course.title + ' as completed');
+      checkbox.addEventListener('change', function () {
+        if (checkbox.checked) completed.add(course.id);
+        else completed.delete(course.id);
+        saveCompleted(completed);
+        updateProgress();
+        renderCourses();      // refresh prerequisite indicators + card styling
+        renderSemesters();    // refresh semester completion counts
+      });
+      checkLabel.appendChild(checkbox);
+      checkLabel.appendChild(el('span', 'text-xs font-semibold ' + (isDone ? 'text-cyan-300' : 'text-zinc-300'), isDone ? 'Completed ✓' : 'Mark as Completed'));
+      footer.appendChild(checkLabel);
+      footer.appendChild(el('span', 'text-[11px] font-medium text-zinc-600', '~15 weeks · full-time load'));
+      card.appendChild(footer);
+
+      grid.appendChild(card);
+    });
+  }
+
+  /* ------------------------------------------------------------------ *
+   * SEMESTER SEQUENCE RENDERING
+   * ------------------------------------------------------------------ */
+  function renderSemesters() {
+    const grid = document.getElementById('semester-grid');
+    grid.innerHTML = '';
+
+    SEMESTERS.forEach(function (sem, idx) {
+      const card = el('div', 'flex flex-col rounded-xl border border-zinc-800 bg-zinc-900/60 p-4');
+
+      const head = el('div', 'mb-2 flex items-center justify-between');
+      head.appendChild(el('span', 'font-mono text-[11px] font-bold text-cyan-300', 'S' + (idx + 1)));
+      head.appendChild(el('span', 'text-[11px] font-semibold text-zinc-500', sem.label));
+      card.appendChild(head);
+
+      card.appendChild(el('p', 'text-sm font-bold text-zinc-100', sem.theme));
+
+      const list = el('ul', 'mt-3 space-y-1.5');
+      sem.courses.forEach(function (cid) {
+        const course = courseById(cid);
+        const track = TRACKS[course.track];
+        const isDone = completed.has(cid);
+        const li = el('li', 'flex items-start gap-2 text-xs');
+        li.appendChild(el('span', 'mt-0.5 ' + track.accentText, isDone ? '✓' : '○'));
+        const label = el('span', isDone ? 'text-zinc-500 line-through' : 'text-zinc-300',
+          course.code + ' — ' + course.title);
+        li.appendChild(label);
+        list.appendChild(li);
+      });
+      card.appendChild(list);
+
+      card.appendChild(el('p', 'mt-3 border-t border-zinc-800 pt-2 text-[11px] leading-relaxed text-zinc-500', sem.note));
+      grid.appendChild(card);
+    });
+  }
+
+  /* ------------------------------------------------------------------ *
+   * BOOT
+   * ------------------------------------------------------------------ */
+  renderFilterBar();
+  renderCourses();
+  renderSemesters();
+  updateProgress();
+  </script>
+</body>
+</html>
