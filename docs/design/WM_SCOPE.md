@@ -1176,8 +1176,10 @@ error until you see it:
   some other answer's envelope.
 
 Exactly the shape of provenance: every payload carries provenance, **and**
-`Explain`/lineage retrieval is a query about provenance. One is a field, the
-other is a question. Neither removes the need for the other.
+lineage retrieval is a query about provenance. One is a field, the other is a
+question. Neither removes the need for the other. (Lineage *retrieval* is the
+Tier 3 half; `Explain` — the rendering that consumes it — is Tier 4 by
+`KIRRA-WM-EXPLAIN-TIER-001` below.)
 - [x] **`evidence_digest` / `prev_hash` as core types** — **DONE 2026-08-07**,
       `crates/kirra-world/src/evidence.rs`, 11 unit tests + 5 seam tests in the
       store, still zero-dependency.
@@ -1266,9 +1268,14 @@ Three rules matter more than the verb count:
 
 An `AnswerRef` serializes *how to reconstruct the answer* — query kind, query
 parameters, `as_known_at`, the requested valid instant, the projection/rule
-version set, the snapshot coordinate, and the pagination bound. `Explain(ref)`
+version set, the snapshot coordinate, and the pagination bound. Resolving a ref
 therefore means **re-execute this exact deterministic query against the same
-snapshot and return its lineage**, not *fetch the stored explanation*.
+snapshot and return its lineage**, not *fetch the stored answer*.
+
+That resolution is Tier 3's **lineage retrieval** (3f). Tier 4's `Explain` is a
+consumer of it, not the thing being defined here — see
+`KIRRA-WM-EXPLAIN-TIER-001` below. The ruling constrains what a ref *is*; which
+tier renders it is a separate question with a separate answer.
 
 Ruled before the envelope is designed, because the alternative builds a second
 store by accident. A durable answer row would need its own retention horizon,
@@ -1295,7 +1302,7 @@ are **three orthogonal axes**, and they must not be folded into one enum.
 |---|---|---|
 | **payload outcome** | `Located` / `Ambiguous` / `Unknown` / `Refused` | what the answer IS |
 | **completeness** | `Full` / `Degraded` | did the evidence SURVIVE |
-| **freshness** | `Fresh` / `Stale` / (see below) | is it RECENT ENOUGH |
+| **freshness** | `Fresh` / `Stale` / `NotApplicable` | is it RECENT ENOUGH |
 
 An answer can be `Located` **and** `Degraded` **and** `Stale` at once —
 `HistoricalAnswer` (2d) already carries the first two separately for exactly this
@@ -1307,13 +1314,15 @@ is the `Option<T>` collapse of §"Why the axes are not one enum" one level up.
 values would mean the same thing and would have to be kept in sync. Envelope owns
 completeness, freshness, provenance and versions; payload owns the domain answer.
 
-**Open sub-question — is a third freshness variant reachable?** If a
-recency-sensitive query with no supplied threshold REFUSES (below), then every
-answer returned has a threshold and freshness is always computable, leaving only
-`NotApplicable` (a historical query at a fixed instant is never stale, by
-construction) and no `Unknown`. An unreachable `Unknown` invites being returned
-as a shrug. Decide by finding a reachable case or dropping the variant; do not
-carry it undecided.
+**Open sub-question — is a FOURTH freshness variant (`Unknown`) reachable?** The
+table above carries three. `NotApplicable` is clearly reachable: a historical
+query at a fixed instant is never stale, by construction. `Unknown` is the
+doubtful one — if a recency-sensitive query with no supplied threshold REFUSES
+(below), then every answer returned has a threshold and freshness is always
+computable, so `Unknown` would arise only from a positive claim with no
+timestamp, which should not exist. An unreachable variant invites being returned
+as a shrug, which is the `Option::None` failure in miniature. Decide by finding a
+reachable case or leaving it out; do not carry it undecided.
 
 ### Freshness thresholds are supplied, never defaulted
 
@@ -1365,8 +1374,9 @@ and Tier 3 would stop being closeable on contracts and representative query
 families — which is its stated closing condition. Tier 3 closes once answers are
 reproducible and carry enough lineage for Tier 4 to explain them later.
 
-Two constraints Tier 3's lineage retrieval inherits anyway, because Explain is
-the query most likely to breach rule 2:
+Two constraints Tier 3's lineage retrieval carries regardless of where the
+rendering lives, because the traversal it performs is the one most likely to
+breach rule 2:
 
 * **Bounded and paginated, with truncation visible.** Answer → projection →
   adjudication → observations → source is unbounded exactly where D-9's 10.5 s
