@@ -1234,6 +1234,96 @@ Three rules matter more than the verb count:
    *"I don't know"* becomes an exception somebody catches and turns into a
    default value.
 
+### `KIRRA-WM-ANSWER-IDENTITY-001` — RULED 2026-08-09
+
+> **Tier 3 answers have no durable stored identity. An `AnswerRef` is a
+> reproducible DESCRIPTOR, not a persisted answer row.**
+
+An `AnswerRef` serializes *how to reconstruct the answer* — query kind, query
+parameters, `as_known_at`, the requested valid instant, the projection/rule
+version set, the snapshot coordinate, and the pagination bound. `Explain(ref)`
+therefore means **re-execute this exact deterministic query against the same
+snapshot and return its lineage**, not *fetch the stored explanation*.
+
+Ruled before the envelope is designed, because the alternative builds a second
+store by accident. A durable answer row would need its own retention horizon,
+its own compaction story, and its own provenance — recursively, since an
+archived answer is evidence about an answer — and it would become a mutable
+"current truth" cache that cannot be reconstructed, which §10 already puts out
+of scope.
+
+**What the ruling costs, stated because it constrains the API rather than merely
+describing it:** every public Tier 3 query must be **fully serializable and
+deterministic**. No closures, no caller-supplied predicates, no ad-hoc filters,
+and no unversioned sort orders — an unversioned sort makes a pagination cursor
+non-reproducible across releases, so the answer re-executes identically while
+page 2 does not. **Cursor stability is part of the query contract**, not a
+pagination detail.
+
+### The three axes of an answer
+
+Rule 1 above says every answer carries value, trust axes, validity and a
+provenance handle. Recorded here, since the shape was nearly got wrong: those
+are **three orthogonal axes**, and they must not be folded into one enum.
+
+| Axis | Values | Question |
+|---|---|---|
+| **payload outcome** | `Located` / `Ambiguous` / `Unknown` / `Refused` | what the answer IS |
+| **completeness** | `Full` / `Degraded` | did the evidence SURVIVE |
+| **freshness** | `Fresh` / `Stale` / (see below) | is it RECENT ENOUGH |
+
+An answer can be `Located` **and** `Degraded` **and** `Stale` at once —
+`HistoricalAnswer` (2d) already carries the first two separately for exactly this
+reason. A single mega-enum forces a caller to discard two of the three facts, and
+is the `Option<T>` collapse of §"Why the axes are not one enum" one level up.
+
+**The envelope never restates the payload's outcome.** `Ambiguous` / `Unknown` /
+`Refused` belong to `ResolutionOutcome`; if the envelope also carried them, two
+values would mean the same thing and would have to be kept in sync. Envelope owns
+completeness, freshness, provenance and versions; payload owns the domain answer.
+
+**Open sub-question — is a third freshness variant reachable?** If a
+recency-sensitive query with no supplied threshold REFUSES (below), then every
+answer returned has a threshold and freshness is always computable, leaving only
+`NotApplicable` (a historical query at a fixed instant is never stale, by
+construction) and no `Unknown`. An unreachable `Unknown` invites being returned
+as a shrug. Decide by finding a reachable case or dropping the variant; do not
+carry it undecided.
+
+### Freshness thresholds are supplied, never defaulted
+
+Freshness is computed at **read time**, like validity (§9 rule 6) — never stored
+as `is_stale = false` and trusted later.
+
+The **threshold** is not Tier 3's to invent. A default staleness window inside
+the query engine is precisely how an answer becomes a safety input without
+anyone deciding it should be, which ADR-0042 Decision 5 (*safety-related,
+**non-authoritative***) exists to hold at bay. The precedent is
+`KIRRA_VEHICLE_CLASS`: **fail-closed, no default**, because a wrong default
+silently selects another class's envelope. So: the threshold comes from the
+caller or from a ruled policy table, and a recency-sensitive query with neither
+**refuses**.
+
+### Rule / projection versioning — declared and enforced, not derived
+
+A digest says *what state you got*; a version says *which semantics produced it*.
+`state_digest_of` already provides the first and cannot provide the second.
+
+The version must be **declared** and must change whenever reducer behaviour
+changes. Two mechanisms, because neither alone is enough:
+
+* **Conformance corpus** — fixed event sequences with expected folded outputs. A
+  diff here proves *behaviour* moved, which is what justifies a version bump.
+* **Source pin** — the frozen-talisman technique (a git blob hash, as
+  `validate_vehicle_command` already uses) over the reducer, so a silent edit
+  reds CI. Hash the comment-stripped form via `ci/check_orphan_cores.py`'s
+  already-unit-tested `strip_noncode`, or ordinary comment churn trips the gate
+  and trains reflexive version bumps — which destroys the signal the gate exists
+  to give.
+
+The corpus proves meaning; the pin proves nobody edited quietly. A version
+checked by neither is decorative metadata.
+
 ---
 
 ## 7. Tier 4 — `Explain`, the flagship
