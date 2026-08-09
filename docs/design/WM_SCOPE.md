@@ -908,8 +908,26 @@ does not describe is how a residue disappears.
       confidence provenance. It writes through the same door as every other
       producer (§4.2) and is visible as inferred.
       **It may not write `claim_status = confirmed`, and may not touch
-      `Corroboration(n)`.** SD-2 already refuses `llm_candidate` + `confirmed` at
-      the write door; this is the same boundary extended to `derivation`.
+      `Corroboration(n)`.** ⚠️ **This is a POLICY REQUIREMENT, not an enforced
+      boundary — and the difference was found by review, not by the schema.**
+      SD-2's `CHECK` refuses `llm_candidate` + `confirmed` and *only* that:
+      `world_events` has `CHECK (writer_class <> 'llm_candidate' OR claim_status
+      = 'candidate')`, so **`derivation` + `confirmed` is currently accepted by
+      the store.** An earlier draft here said the boundary was "extended to
+      `derivation`". It is not, and describing an unenforced policy as an
+      existing guard is how a reader stops looking for the guard.
+
+      In 2a the constraint holds because the *type* cannot express a confirmed
+      candidate — `SameAsCandidate` has no claim-status field and pins its class
+      to `Derivation` — so nothing in that path can write one. That is a
+      producer-side guarantee, and it says nothing about a producer written
+      later, by someone else, against the same store.
+
+      **OPEN — closing it is a schema change, not a doc change:** extend the
+      `CHECK` to `writer_class NOT IN ('llm_candidate','derivation') OR
+      claim_status = 'candidate'`, with a migration. Until then the write door
+      admits what `KIRRA-WM-PROMOTION-001` forbids, and only convention stops
+      it.
 
       **`Corroboration(n)` is NOT 2a's to drive.** The axis folds *confirmed*
       `same_as`, so its first driver is promotion (2b) or an operator-declared
