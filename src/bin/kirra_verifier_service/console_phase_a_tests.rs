@@ -268,6 +268,34 @@ async fn console_runtime_reports_live_state() {
 }
 
 #[tokio::test]
+async fn console_reports_the_gate_window_in_force_not_the_constant() {
+    // The seam that fixed the DNP3 flake let the gate's window differ from the
+    // global constant. `console_runtime_reports_live_state` above cannot tell
+    // the two apart -- it builds a state at the production value, so it passes
+    // whichever of the two the handler prints. This one varies ONLY the field
+    // and pins that the console follows it.
+    //
+    // The value is deliberately not POSTURE_CACHE_TTL_MS and not a multiple of
+    // it, so a handler that printed the constant reports 5000 and fails here.
+    let svc = Arc::new(
+        Arc::try_unwrap(build_state())
+            .unwrap_or_else(|_| unreachable!("sole owner"))
+            .with_posture_cache_ttl_ms(1_234),
+    );
+    let (status, body) = get(svc, "/console/runtime").await;
+    assert_eq!(status, StatusCode::OK);
+    let v = parse(&body);
+    assert_eq!(
+        v["posture_cache_ttl_ms"], 1_234,
+        "the console must report the window the gate evaluates against"
+    );
+    assert_ne!(
+        v["posture_cache_ttl_ms"], POSTURE_CACHE_TTL_MS,
+        "non-vacuity: the asserted value must differ from the constant"
+    );
+}
+
+#[tokio::test]
 async fn console_sites_rolls_up_by_trust_status() {
     // #397: Trusted→nominal, Unknown→degraded, Untrusted→lockedout; NULL site
     // → unassigned. Two nodes at "alpha", one NULL-site node.

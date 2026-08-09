@@ -214,7 +214,13 @@ pub(crate) async fn console_runtime(State(svc): State<Arc<ServiceState>>) -> imp
         "posture_generation": kirra_verifier::posture_engine::POSTURE_GENERATION
             .load(std::sync::atomic::Ordering::SeqCst),
         "last_recalc_ms": last_recalc_ms,
-        "posture_cache_ttl_ms": POSTURE_CACHE_TTL_MS,
+        // The window actually IN FORCE, read from the same field `gate_posture`
+        // reads -- not the global constant. They are equal in production and the
+        // test below pins that. Reporting the constant would have made the
+        // console right by coincidence: it would keep printing 5000 while the
+        // gate evaluated against something else, which is the one condition an
+        // operator would consult this endpoint to detect.
+        "posture_cache_ttl_ms": svc.posture_cache_ttl_ms,
         "total_nodes": svc.app.fleet.nodes.len(),
         "fabric_assets": svc.fabric_router.fabric_state().total_assets,
         "fabric_denial_rate": svc.fabric_telemetry.summary().fabric_denial_rate,

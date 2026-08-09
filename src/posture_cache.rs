@@ -219,8 +219,18 @@ pub struct ServiceState {
     /// Staleness window the posture gate evaluates the cache against.
     ///
     /// **Production always sets [`POSTURE_CACHE_TTL_MS`]** — every construction
-    /// site does, and [`Self::with_posture_cache_ttl_ms`] is the only way to
-    /// change it. This is dependency injection around a policy input that
+    /// site does, and [`Self::with_posture_cache_ttl_ms`] is the intended way
+    /// to change it in a test or harness.
+    ///
+    /// It is not the ONLY way, and this doc does not pretend otherwise: the
+    /// field is `pub` like every other field on this struct, so a struct
+    /// literal can set it directly. What holds the line is weaker than
+    /// visibility and worth stating exactly — the field has no default, so
+    /// every construction site must name it explicitly and a new one cannot
+    /// silently inherit a non-production window; and nothing reads a
+    /// deployment input into it (see below).
+    ///
+    /// This is dependency injection around a policy input that
     /// already existed as a parameter of
     /// [`crate::posture_engine_v2::resolve_posture_with_reason`]; it is **not**
     /// an invitation to make safety timing configurable at deployment, and no
