@@ -28,7 +28,7 @@
 //!
 //! | Rule | Mechanism |
 //! |---|---|
-//! | only the ruled class may promote | [`AdjudicationAuthority`] is constructible **only** from [`SourceClass::Operator`] |
+//! | only the ruled class may promote | [`AdjudicationAuthority::new`] REFUSES any class but [`SourceClass::Operator`], so a held authority is always an authorized one |
 //! | promotion cites the candidate | the constructor requires a non-empty, duplicate-free citation of [`ObservationId`]s |
 //! | rejection never deletes | a rejection is another append-only record that cites the same candidate |
 //! | promotion yields pairwise identity | the outcome carries a [`CandidatePair`]; there is no cluster type to produce |
@@ -97,9 +97,18 @@ impl std::fmt::Display for AdjudicationError {
 
 /// Proof that a writer is allowed to adjudicate.
 ///
-/// The gate is the type, not a check somebody remembers: there is no
-/// constructor that accepts a non-`Operator` class, so an unauthorized
-/// adjudication is unrepresentable rather than merely refused.
+/// **The check is at the constructor, not in the type signature**, and the
+/// distinction is worth stating precisely because an earlier draft of this doc
+/// overclaimed it. [`Self::new`] accepts any [`SourceClass`] and REFUSES every
+/// one but [`SourceClass::Operator`] at runtime; nothing stops a caller
+/// *passing* `Derivation`, only from getting an authority back.
+///
+/// What the type does buy is that the refusal cannot be forgotten downstream:
+/// there is no public field and no other constructor, so **a value of this type
+/// that exists is always an authorized one**, and every function taking it gets
+/// that for free without re-checking. That is a runtime-checked invariant with
+/// a type-level carrier — not a compile-time restriction, and it should not be
+/// described as one.
 ///
 /// **This constrains the class, never the credential.** `SourceClass` is
 /// declared by the writer, so "operator only" is exactly as strong as the
