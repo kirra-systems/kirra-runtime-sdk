@@ -885,6 +885,146 @@ impl kirra_world::resolution::AdjudicationGraph for IdentityView {
     }
 }
 
+/// **The identity graph as it stood at a past instant** — §6.3, Tier 2 box 2d.
+///
+/// §6.3: *"A query at a past instant resolves identity as it was adjudicated
+/// then — **because identity is a projection like everything else**."* An
+/// [`IdentityView`] is that projection folded over the whole log; this is the
+/// same projection folded over a **prefix** of it.
+///
+/// # It restrains the GRAPH, it does not re-answer the question
+///
+/// The distinction is the whole slice, and the cheap wrong version is easy to
+/// write: resolve against current state and label the answer with a timestamp.
+/// That answers today's question and lies about when. What happens here instead
+/// is that the fold is re-run over only the adjudications recorded by the
+/// instant, and then [`kirra_world::resolution::resolve`] — the **same**
+/// function, unmodified — walks the smaller graph.
+///
+/// So there is no historical resolver, no second set of outcome variants, and
+/// no shortcut. `KIRRA-WM-TRANSITIVITY-001` disqualified union-find and
+/// required that transitive resolution preserve the accepted path and refuse a
+/// contradictory graph rather than repairing it; a second engine here would be
+/// a second place for that to be got wrong. `resolve_at` is `resolve` over a
+/// restricted graph, and that is the entire mechanism.
+///
+/// # Which of the two clocks this cuts on
+///
+/// **Transaction time** (`txn_time_ms`) — *what had been recorded by then* —
+/// matching the `as_known_at_ms` axis of [`crate::WorldStore::as_of`].
+///
+/// Valid time is deliberately **not** consulted, and the reason is that an
+/// adjudication is not a claim about the world that holds over an interval. It
+/// is a judgement, and a judgement's effect on identity begins when it is
+/// recorded. `MergeEntities` carries a `DomainInstant` for *when the operator
+/// decided*; nothing in the model gives a merge an interval over which it
+/// stops being true, and `valid_to_ms` on an adjudication row is always NULL
+/// because [`crate::WorldStore::append_adjudication`] hardcodes it so. Filtering
+/// on an axis the writer never populates would look rigorous and do nothing.
+///
+/// Stated rather than assumed because the store IS bitemporal and the omission
+/// would otherwise read as an oversight: a genuine valid-time identity question
+/// ("who did we think this was, for the period the robot was in bay 3") is a
+/// different query and would need its own ruling.
+pub struct HistoricalIdentityView {
+    view: IdentityView,
+    as_known_at_ms: i64,
+    resolution: crate::compaction::Resolution,
+}
+
+impl HistoricalIdentityView {
+    /// Build a historical view over an already-restricted fold.
+    ///
+    /// Private to the crate: the restriction is what makes this type honest,
+    /// and a public constructor would let a caller build one from the *current*
+    /// projection and label it with any instant it liked — the precise lie the
+    /// type exists to prevent. [`crate::WorldStore::identity_view_at`] is the
+    /// only way to obtain one.
+    pub(crate) fn new(
+        view: IdentityView,
+        as_known_at_ms: i64,
+        resolution: crate::compaction::Resolution,
+    ) -> Self {
+        Self {
+            view,
+            as_known_at_ms,
+            resolution,
+        }
+    }
+
+    /// The transaction-time instant this view was cut at.
+    #[must_use]
+    pub fn as_known_at_ms(&self) -> i64 {
+        self.as_known_at_ms
+    }
+
+    /// Whether compaction could have removed an adjudication bearing on this
+    /// answer. See [`crate::WorldStore::identity_view_at`] for why this is
+    /// derived rather than asserted.
+    #[must_use]
+    pub fn resolution(&self) -> &crate::compaction::Resolution {
+        &self.resolution
+    }
+
+    /// The restricted projection itself.
+    #[must_use]
+    pub fn view(&self) -> &IdentityView {
+        &self.view
+    }
+
+    /// **Resolve an id against the graph as it stood at this instant.**
+    ///
+    /// Delegates to [`kirra_world::resolution::resolve`]. The answer carries
+    /// the instant and the resolution alongside the outcome, so a caller cannot
+    /// hold a historical answer without holding *when* it was true and whether
+    /// anything was missing from it.
+    #[must_use]
+    pub fn resolve_at(&self, id: &EntityId) -> HistoricalAnswer {
+        HistoricalAnswer {
+            outcome: kirra_world::resolution::resolve(&self.view, id),
+            as_known_at_ms: self.as_known_at_ms,
+            resolution: self.resolution.clone(),
+        }
+    }
+}
+
+impl kirra_world::resolution::AdjudicationGraph for HistoricalIdentityView {
+    fn lifecycle_of(&self, id: &EntityId) -> Option<Lifecycle> {
+        self.view.lifecycle_of(id)
+    }
+
+    fn is_contradicted(&self, id: &EntityId) -> bool {
+        self.view.is_contradicted(id)
+    }
+}
+
+/// One historical identity answer: the outcome, when it was true, and whether
+/// that is all of it.
+///
+/// The same shape as [`crate::compaction::TemporalAnswer`] and for the same
+/// stated reason — a caller cannot obtain the outcome without the resolution
+/// being in front of it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HistoricalAnswer {
+    /// What the id resolved to, from the restricted graph.
+    ///
+    /// The **same** four variants as a present-tense resolution. A historical
+    /// query has no extra answers and no missing ones.
+    pub outcome: kirra_world::resolution::ResolutionOutcome,
+    /// The transaction-time instant the graph was cut at.
+    pub as_known_at_ms: i64,
+    /// Whether a compacted span could have borne on the answer.
+    pub resolution: crate::compaction::Resolution,
+}
+
+impl HistoricalAnswer {
+    /// Shorthand for [`crate::compaction::Resolution::is_degraded`].
+    #[must_use]
+    pub fn is_degraded(&self) -> bool {
+        self.resolution.is_degraded()
+    }
+}
+
 /// A digest over a projection accumulator, in key order.
 ///
 /// Takes the accumulator rather than reading the table, so the value written

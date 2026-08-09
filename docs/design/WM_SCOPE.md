@@ -973,14 +973,35 @@ does not describe is how a residue disappears.
       adjudication question at read time. `resolve`'s existing refusal of a
       redirect cycle is the precedent.
 
-- [ ] **2d — Historical / as-of resolution.** `resolve` is **current-state only**
-      today. **RULED 2026-08-08: as-of identity resolution stays INSIDE Tier 2
-      and gets built** — the tier is not redefined to avoid it.
-      `resolve_at(...)` / `IdentityView::at(...)` **composes an as-of
-      evidence/projection view with the existing resolver**; it does not
-      introduce a second resolution algorithm, and it does not build
-      bitemporality, because the substrate already ships in `kirra-world-store`
-      (`current` / `as_of` / `history` / `candidates` / `changed_since`, #1353).
+- [x] **2d — Historical / as-of resolution.** **DONE 2026-08-09**,
+      `WorldStore::identity_view_at` / `resolve_at` +
+      `entity_projection::HistoricalIdentityView`, 13 integration tests.
+      **RULED 2026-08-08: as-of identity resolution stays INSIDE Tier 2 and gets
+      built** — the tier is not redefined to avoid it. As built, it **composes an
+      as-of projection view with the existing resolver**: the fold is re-run over
+      the adjudications recorded by the instant, and
+      `kirra_world::resolution::resolve` — unmodified, the same function the
+      present-tense path calls — walks the smaller graph. No second resolution
+      algorithm, no historical outcome variants, no bitemporal substrate built
+      here (it already ships, #1353).
+      **The cut is on transaction time** (`txn_time_ms`), the `as_known_at_ms`
+      axis of `as_of`. Valid time is deliberately not consulted: an adjudication
+      is a judgement whose effect begins when recorded, not a claim holding over
+      an interval, and `append_adjudication` hardcodes `valid_to_ms = NULL`, so
+      filtering on that axis would look rigorous and do nothing. A genuine
+      valid-time identity question is a different query needing its own ruling.
+      **`KIRRA-WM-CLUSTERING-001` holds at every instant, not just the present:**
+      the fold's `claim_status = 'confirmed'` predicate is inherited rather than
+      restated, so a candidate `same_as` observation is invisible to the
+      historical view too — it cannot be the back door into the confirmed graph
+      that the write door refuses.
+      **Degradation is derived, not asserted.** The answer carries a
+      `Resolution`; it reads `Full` over a compacted store because
+      `compaction::is_protected` holds for the `adjudication` retention class, so
+      a recorded citation is itself evidence its window held no adjudication. The
+      derivation consults that predicate at runtime, so a future compaction mode
+      that could remove a protected class makes identity answers degrade instead
+      of silently keeping their completeness claim.
       §6.3 makes historical identity part of the intended semantics, and the
       incident-reconstruction goal is not served by a resolver that can only
       answer "who is this *now*" — reconstruction asks who it was *then*.
