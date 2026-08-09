@@ -1,15 +1,38 @@
-# What "candidate clustering" is — a ruling request
+# What "candidate clustering" is — RULED
 
-**KIRRA-WM-CLUSTERING-001** · drafted 2026-08-08 · **status: PROPOSED — not a
-ruling, not an authorization**
+**KIRRA-WM-CLUSTERING-001** · drafted 2026-08-08 · **RULED 2026-08-08** ·
+**status: ADOPTED — §4 is now binding**
+
+> ## The ruling
+>
+> **Clustering may PROPOSE co-reference. It may never CONFIRM identity.**
+>
+> A heuristic or learned matcher is authorized as a *candidate producer*.
+> Confirmed identity continues to arrive only through explicit adjudication over
+> recorded evidence. The trust boundary the four-axis model exists to protect is
+> unchanged: no threshold, score or model output may become an identity fact
+> without passing a deterministic, auditable promotion step.
+>
+> This adopts §4 as written — both halves. The choice was framed as *"deterministic
+> reading of explicit `same_as` evidence only"* **versus** *"a matcher that
+> proposes but cannot confirm"*, and those are not alternatives: §4.2 makes
+> `same_as` the carrier, and a matcher is simply one `derivation`-class producer
+> writing through it. Ruling the second **includes** the first. What would have
+> been a narrower ruling is a matcher barred entirely, and that is not what was
+> chosen.
+>
+> **Transitivity: also RULED 2026-08-08** — `KIRRA-WM-TRANSITIVITY-001`, §4.4.
+> *Evidence is pairwise and never transitively closed; only promoted identity is
+> traversed transitively.* 2b is unblocked.
 
 | | |
 |---|---|
 | **Asks** | What candidate clustering *is*, before anything is built to do it |
-| **Blocks** | `WM_SCOPE.md` §5's last open box; `Corroboration(n)`, which has no driver |
+| **Blocks** | ~~`WM_SCOPE.md` §5's last open box~~ — split into four (§5) |
 | **Blocked by** | Nothing. Every dependency it had is now merged |
 | **Constrained by** | `KIRRA-WM-CANDIDATE-ID-001` (2026-08-08); ADR-0040 writer classes; §9's four axes |
 | **Related** | `KIRRA-WM-SPLIT-SURVIVAL-001`, `KIRRA-WM-CANDIDATE-ID-001` |
+| **Also ruled** | `KIRRA-WM-TRANSITIVITY-001` (§4.4) — evidence pairwise, resolution transitive |
 
 ---
 
@@ -210,13 +233,144 @@ Stated so adoption is not mistaken for completion:
 
 - **No similarity model is supplied.** A perception stack still has nothing to
   match tracks with. That is the matcher, and it stays open.
-- **What confirms a `same_as` candidate** is unruled. Operator confirmation is
-  the obvious first answer and may be the only one for a while.
-- **Transitivity is unruled.** If `a same_as b` and `b same_as c`, is `a same_as
-  c`? Union-find says yes; evidence says only that two producers each made one
-  claim. This matters because a wrong transitive closure merges two real
-  entities, and §6.3 makes merges *revisable but recorded*. It should be ruled
-  before any fold computes closures.
+- ~~**What confirms a `same_as` candidate** is unruled.~~ **RULED 2026-08-08 —
+  `KIRRA-WM-PROMOTION-001`, §4.5 below.**
+- ~~**Transitivity is unruled.**~~ **RULED 2026-08-08 —
+  `KIRRA-WM-TRANSITIVITY-001`, §4.4 below.** If `a same_as b` and `b same_as c`,
+  is `a same_as c`? Union-find says yes; evidence says only that two producers
+  each made one claim. A wrong transitive closure merges two real entities, and
+  §6.3 makes merges *revisable but recorded*, so it was ruled before any fold
+  could compute one.
+
+### 4.4 `KIRRA-WM-TRANSITIVITY-001` — evidence is pairwise; resolution is transitive
+
+> **`same_as` evidence is pairwise and is NOT transitively closed at the
+> evidence/candidate layer. Transitivity applies only to promoted identity state
+> after adjudication.** A derived `A = C` may be *resolved* through an accepted
+> `A = B`, `B = C` chain, but Kirra must never synthesize a new confirmed
+> `same_as(A, C)` evidence record merely because the chain exists.
+
+**Why the line falls here.** Two independent local claims must not silently
+manufacture a third evidentiary one. Nobody asserted `A = C`; a closure that
+records it as though somebody did is a fabricated observation, and it is
+indistinguishable downstream from a real one — the same laundering-inference-
+into-evidence failure §2 names for thresholds, arriving by a different route.
+Resolution can be transitive; evidence cannot. If `A` resolves to `C` through
+`B`, provenance should expose the **accepted chain**, not pretend to a direct
+assertion.
+
+```
+  candidate / evidence layer
+      A same_as B          (pairwise, from a producer)
+      B same_as C          (pairwise, from a producer)
+            │
+            │   ✗ NO automatic closure — A same_as C is never minted here
+            ↓
+  adjudication
+            │   accept / reject / ambiguous, per relation
+            ↓
+  promoted identity graph
+            │
+            └── resolution MAY traverse accepted merges transitively,
+                carrying the path
+```
+
+**The four rules this ruling adds:**
+
+1. **Candidate matchers emit pairwise candidate relations only.** No closure, no
+   clusters-as-sets, no `CandidateId` standing in for a merged group.
+2. **Candidate relations never participate in closure or in confirmed folds.**
+   They are inputs to adjudication and to nothing else.
+3. **Promotion is the only boundary** at which a relation may affect canonical
+   identity.
+4. **Transitive resolution over promoted merges must preserve the path and its
+   provenance**, and must fail to `Ambiguous` / `Refused` when the promoted
+   graph is contradictory — **never** "repair" it with union-find. A resolver
+   that silently picks a representative is deciding an adjudication question at
+   read time, which is rule 3 violated from the other side.
+
+Rule 4 is the one most likely to be lost to a convenient data structure: union-
+find is the obvious implementation and it *cannot* express "contradictory", because
+merging is its only operation. The precedent already exists in-tree —
+`resolution::resolve` refuses a redirect cycle rather than collapsing it.
+
+### 4.5 `KIRRA-WM-PROMOTION-001` — promotion authority
+
+> **A `same_as` candidate does not become confirmed identity merely because a
+> matcher produced it, or because multiple candidates agree. Promotion requires
+> an explicitly authorized adjudicator.**
+
+Narrow by construction: this rules *who may promote*, not *how good the matching
+is*. Matching quality is a 2a concern and is deliberately untouched here.
+
+```
+  matcher / derivation producer
+          ↓
+  pairwise same_as candidate
+          ↓
+     ✗ no trust-grade effect · ✗ no transitive closure · ✗ no confirmed identity
+          ↓
+  authorized adjudicator
+          ↓
+  promotion record
+          ↓
+  confirmed same_as evidence
+          ↓
+  Corroboration(n)
+          ↓
+  deterministic identity resolution
+```
+
+**1 — Who may promote.** **v1: `WriterClass::Operator` only.** Enforced where
+SD-2 already lives: the write door refuses `writer_class = derivation` with
+`claim_status = confirmed` on a `same_as`, exactly as it refuses
+`llm_candidate + confirmed` today. Automated adjudicators are **not** authorized
+and each requires its own ruling — "conservative v1" is the claim, so the
+document must not leave a gap an implementer could read as permission.
+
+> **Assumption of use, stated because the ruling cannot enforce it.**
+> `writer_class` is *declared by the writer*. "Operator only" is therefore
+> exactly as strong as the authentication on the write path, and no stronger. The
+> store enforces *what class may confirm*, never *who holds that credential*. A
+> deployment that lets an automated agent write as `operator` has bypassed this
+> ruling without violating a single line of it.
+
+**2 — What promotion records.** The existing adjudication shape, not a parallel
+vocabulary: a promotion cites the **candidate observations** by `ObservationId`
+through `Justification` (already non-empty and duplicate-refusing at
+construction), plus the adjudicator's `source` + `writer_class` and the decision
+time, and yields the confirmed `same_as`.
+
+*Consequence for 2a, and the reason to rule this before building it:*
+`KIRRA-WM-CANDIDATE-ID-001` keeps a candidate's identifier out of the hashed
+record, and `Justification` cites `ObservationId`s — so **a cluster cannot be
+cited, only a candidate observation can.** 2a must therefore emit candidates
+*as observations*, not as in-memory cluster objects handed to an adjudicator.
+That is the seam, and it is fixed now rather than discovered after 2a has an API.
+
+**3 — Reversal, which is three distinct things and not one.**
+
+| | Mechanism |
+|---|---|
+| **Rejection** — the adjudicator declines to promote | **New, separate.** Nothing was promoted, so this is not a reversal at all. It needs its own record so that "we looked and said no" is distinguishable from "nobody has looked yet", and so a rejected candidate is not re-adjudicated forever. |
+| **Reversal of a promotion** — it was promoted and is now wrong | **Existing `SplitEntity`.** No new verb. |
+| **Erasure** | **`ForgetEntity`**, which is *not* a reversal mechanism and must not be used as one. |
+
+Rejection is an **append-only record, never a deletion of the candidate.** A
+candidate is evidence; deleting it to represent a judgement about it destroys the
+thing the judgement was about.
+
+**4 — What `Corroboration(n)` counts. Confirmed `same_as` evidence records —
+NOT matcher votes.** Counting votes would let one matcher run N times, or N
+matchers with correlated features, manufacture corroboration; that is the §2
+laundering failure with extra steps. Every increment must trace to an
+adjudication.
+
+> **Counted per distinct *relation*, not per record.** If an adjudicator promotes
+> three candidate observations about the same `(A, B)` pair, that is **one**
+> corroborated relation, not three — otherwise re-adjudication inflates trust.
+> A rejected candidate never contributes and never decrements; it simply is not
+> confirmed.
 
 ---
 

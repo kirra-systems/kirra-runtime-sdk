@@ -893,6 +893,97 @@ does not describe is how a residue disappears.
       instead of reaching into a trust axis directly. Deliberately left open:
       the similarity model itself, what confirms a `same_as` candidate, and
       **transitivity**.
+
+      **RULED 2026-08-08 — adopted.** *Clustering may PROPOSE co-reference; it
+      may never CONFIRM identity.* A heuristic or learned matcher is authorized
+      as a candidate producer; confirmed identity still arrives only through
+      explicit adjudication over recorded evidence. **This box is therefore
+      retired and replaced by the four below** — one vague box is exactly how a
+      matcher gets mistaken for identity truth, which is the failure the ruling
+      exists to prevent.
+
+- [ ] **2a — Candidate generation / matching.** A `derivation`-class producer
+      emitting `candidate` `same_as` claims: the two subjects, the similarity or
+      evidence that prompted it, the source and its model/rule **version**, and
+      confidence provenance. It writes through the same door as every other
+      producer (§4.2) and is visible as inferred.
+      **It may not write `claim_status = confirmed`, and may not touch
+      `Corroboration(n)`.** ⚠️ **This is a POLICY REQUIREMENT, not an enforced
+      boundary — and the difference was found by review, not by the schema.**
+      SD-2's `CHECK` refuses `llm_candidate` + `confirmed` and *only* that:
+      `world_events` has `CHECK (writer_class <> 'llm_candidate' OR claim_status
+      = 'candidate')`, so **`derivation` + `confirmed` is currently accepted by
+      the store.** An earlier draft here said the boundary was "extended to
+      `derivation`". It is not, and describing an unenforced policy as an
+      existing guard is how a reader stops looking for the guard.
+
+      In 2a the constraint holds because the *type* cannot express a confirmed
+      candidate — `SameAsCandidate` has no claim-status field and pins its class
+      to `Derivation` — so nothing in that path can write one. That is a
+      producer-side guarantee, and it says nothing about a producer written
+      later, by someone else, against the same store.
+
+      **OPEN — closing it is a schema change, not a doc change:** extend the
+      `CHECK` to `writer_class NOT IN ('llm_candidate','derivation') OR
+      claim_status = 'candidate'`, with a migration. Until then the write door
+      admits what `KIRRA-WM-PROMOTION-001` forbids, and only convention stops
+      it.
+
+      **`Corroboration(n)` is NOT 2a's to drive.** The axis folds *confirmed*
+      `same_as`, so its first driver is promotion (2b) or an operator-declared
+      confirmation — never the matcher. An earlier note in this session said
+      building 2a "gives `Corroboration(n)` its first driver"; that contradicted
+      the bar above and is withdrawn. A matcher score must not become trust
+      corroboration, quietly or otherwise.
+
+      **The seam, fixed by `KIRRA-WM-PROMOTION-001` before this box is coded:**
+      a promotion cites candidates by `ObservationId` through `Justification`,
+      and `KIRRA-WM-CANDIDATE-ID-001` keeps a candidate's identifier out of the
+      hashed record — so a cluster **cannot** be cited, only a candidate
+      observation can. **2a therefore emits candidates as observations**, not as
+      in-memory cluster objects passed to an adjudicator. 2a needs to know
+      nothing else about how confirmation works.
+
+- [ ] **2b — Adjudication / promotion.** The deterministic, auditable step that
+      turns a confirmed `same_as` into identity, and the **only** boundary at
+      which a relation may affect canonical identity.
+      **Unblocked: transitivity was ruled 2026-08-08**
+      (`KIRRA-WM-TRANSITIVITY-001`). Evidence is pairwise and never transitively
+      closed; a confirmed `same_as(A,C)` is never synthesized from an
+      `A=B`, `B=C` chain. Promotion accepts / rejects / marks ambiguous **per
+      relation**.
+      **Promotion authority ruled 2026-08-08** (`KIRRA-WM-PROMOTION-001`):
+      a candidate never becomes confirmed because a matcher produced it or
+      because candidates agree — promotion requires an **explicitly authorized
+      adjudicator**, and v1 is **`WriterClass::Operator` only**, enforced at the
+      same write door as SD-2. Automated adjudicators each need their own ruling.
+      Rejection is a **separate append-only record** (not a deletion, and not a
+      reversal); reversing an actual promotion is existing `SplitEntity`;
+      `ForgetEntity` is erasure and is not a reversal mechanism.
+
+- [ ] **2c — Deterministic resolution over promoted identity.** Rebuild-from-log
+      must stay exact: the same log yields the same identity, with no dependence
+      on matcher output, tie-break order or wall-clock. The existing
+      `resolution::resolve` invariants are the floor, not a new standard.
+      Per `KIRRA-WM-TRANSITIVITY-001` rule 4, traversal of accepted merges
+      **preserves the path and its provenance**, and a contradictory promoted
+      graph resolves to `Ambiguous` / `Refused` rather than being repaired.
+      **Union-find is disqualified as the representation** — merging is its only
+      operation, so it cannot express "contradictory" and would decide an
+      adjudication question at read time. `resolve`'s existing refusal of a
+      redirect cycle is the precedent.
+
+- [ ] **2d — Historical / as-of resolution.** `resolve` is **current-state only**
+      today. **RULED 2026-08-08: as-of identity resolution stays INSIDE Tier 2
+      and gets built** — the tier is not redefined to avoid it.
+      `resolve_at(...)` / `IdentityView::at(...)` **composes an as-of
+      evidence/projection view with the existing resolver**; it does not
+      introduce a second resolution algorithm, and it does not build
+      bitemporality, because the substrate already ships in `kirra-world-store`
+      (`current` / `as_of` / `history` / `candidates` / `changed_since`, #1353).
+      §6.3 makes historical identity part of the intended semantics, and the
+      incident-reconstruction goal is not served by a resolver that can only
+      answer "who is this *now*" — reconstruction asks who it was *then*.
 - [x] **`MergeEntities` / `SplitEntity` / `ForgetEntity` as recorded events** —
       **DONE 2026-08-07**, `crates/kirra-world/src/adjudication.rs`, 24 unit
       tests, still zero-dependency.
