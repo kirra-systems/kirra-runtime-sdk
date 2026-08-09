@@ -1593,11 +1593,14 @@ costs far more than discovering it against one.
 
 *Corrected 2026-08-09.* The sentence above read *"and the service crate is
 deliberately empty"*, which is no longer true and would send the next reader
-looking for an empty crate: `kirra-world-service` carries a 393-line
-`read_view.rs` with 580 lines of tests. The claim that survives is the one that
-matters, and it is about **callers, not contents** — the crate has none, so it
-reproduces the built-for-nobody problem one level up rather than solving it.
-See §5.5.
+looking for an empty crate: `kirra-world-service` carries a populated
+`read_view.rs` with its own test suite. Counts are deliberately not quoted here
+— a correction that pins exact line numbers goes stale by the same mechanism it
+is fixing, and this note exists because that already happened once.
+
+The claim that survives is the one that matters, and it is about **callers, not
+contents** — the crate has none, so it reproduces the built-for-nobody problem
+one level up rather than solving it. See §5.5.
 
 There are **no callers today**, so the breaking change is free *now* and never
 again.
