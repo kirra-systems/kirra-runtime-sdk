@@ -65,6 +65,13 @@ pub enum PredicateGroup {
     Assignment,
     /// Ordering and causality.
     Temporal,
+    /// **Co-reference** — that two references denote the same entity.
+    ///
+    /// Not one of §8's four families. Added by `KIRRA-WM-CLUSTERING-001`
+    /// (2026-08-08), which ruled that co-reference is carried as a
+    /// `Relationship` claim rather than as new machinery, so that it inherits
+    /// source, confidence, provenance, the hash chain and SD-2 for free.
+    Identity,
 }
 
 /// A typed, directed relation — §8's predicate table.
@@ -104,6 +111,18 @@ pub enum Predicate {
     /// system events; **never** for inferred physical causation — which
     /// [`Relationship::new`] enforces.
     CausedBy,
+    /// **Subject and object denote the same entity.**
+    ///
+    /// Not from §8's table — ruled in by `KIRRA-WM-CLUSTERING-001`, which made
+    /// co-reference a carried claim rather than new machinery.
+    ///
+    /// **A `same_as` claim is not identity.** `KIRRA-WM-PROMOTION-001`: a
+    /// candidate becomes confirmed identity only through an authorized
+    /// adjudicator, never because a matcher produced it or because candidates
+    /// agree. And `KIRRA-WM-TRANSITIVITY-001`: `same_as` evidence is **pairwise
+    /// and never transitively closed** — `a same_as b` with `b same_as c` does
+    /// not yield a `same_as(a, c)` record, at any claim status.
+    SameAs,
 }
 
 /// What a predicate implies about its reverse direction.
@@ -133,6 +152,7 @@ impl Predicate {
                 PredicateGroup::Assignment
             }
             Self::Preceded | Self::CausedBy => PredicateGroup::Temporal,
+            Self::SameAs => PredicateGroup::Identity,
         }
     }
 
@@ -155,6 +175,7 @@ impl Predicate {
             Self::OperatedBy => "operated_by",
             Self::Preceded => "preceded",
             Self::CausedBy => "caused_by",
+            Self::SameAs => "same_as",
         }
     }
 
@@ -186,6 +207,16 @@ impl Predicate {
         match self {
             Self::Contains => Symmetry::Inverse(Self::Inside),
             Self::Inside => Symmetry::Inverse(Self::Contains),
+            // Symmetry here is DEFINITIONAL, not inferred: "denotes the same
+            // entity as" reads identically in both directions, so this is not
+            // the module deriving a relation algebra the blueprint withheld.
+            //
+            // It licenses CANONICALISATION and LOOKUP only. It does NOT license
+            // minting a reverse `same_as(b, a)` evidence record —
+            // KIRRA-WM-TRANSITIVITY-001 forbids manufacturing evidence nobody
+            // asserted, and a synthesized reverse row is that, one step short of
+            // a closure.
+            Self::SameAs => Symmetry::Symmetric,
             _ => Symmetry::Unspecified,
         }
     }
@@ -526,6 +557,25 @@ impl Relationship {
     /// no other direction to point in.
     #[must_use]
     pub fn canonical(self) -> Self {
+        // A SYMMETRIC predicate has no inverse to swap to -- both directions are
+        // the same predicate -- so canonicalising it means ordering the two
+        // endpoints, not renaming the relation. Without this arm the
+        // `Symmetry::Symmetric` that `same_as` declares would be inert here, and
+        // `(A same_as B)` / `(B same_as A)` would not normalise, which is what a
+        // store's dedupe compares.
+        if self.predicate.symmetry() == Symmetry::Symmetric {
+            let RelObject::Entity(obj) = self.object.clone() else {
+                return self;
+            };
+            if self.subject <= obj {
+                return self;
+            }
+            return Self {
+                subject: obj,
+                object: RelObject::Entity(self.subject.clone()),
+                ..self
+            };
+        }
         let Symmetry::Inverse(inverse) = self.predicate.symmetry() else {
             return self;
         };
@@ -1053,12 +1103,77 @@ mod tests {
             (Predicate::OperatedBy, PredicateGroup::Assignment),
             (Predicate::Preceded, PredicateGroup::Temporal),
             (Predicate::CausedBy, PredicateGroup::Temporal),
+            // Not from §8 -- ruled in by KIRRA-WM-CLUSTERING-001.
+            (Predicate::SameAs, PredicateGroup::Identity),
         ];
-        assert_eq!(all.len(), 15, "§8's table has 15 predicates");
+        // The count alone is a WEAK assertion: this list is hand-written, so a
+        // new variant that nobody adds here leaves the test passing while
+        // covering less. `SameAs` was added and every predicate test still
+        // passed, which is how that was noticed. The exhaustive match below
+        // makes omission a COMPILE error instead of a silent gap.
+        for (p, _) in all {
+            match p {
+                Predicate::Inside
+                | Predicate::Contains
+                | Predicate::ConnectedTo
+                | Predicate::AdjacentTo
+                | Predicate::PartOf
+                | Predicate::Near
+                | Predicate::Supports
+                | Predicate::OnTopOf
+                | Predicate::LastSeenAt
+                | Predicate::BelongsTo
+                | Predicate::AssignedTo
+                | Predicate::ChargingFor
+                | Predicate::OperatedBy
+                | Predicate::Preceded
+                | Predicate::CausedBy
+                | Predicate::SameAs => {}
+            }
+        }
+        assert_eq!(
+            all.len(),
+            16,
+            "§8's 15 predicates plus the ruled-in same_as"
+        );
         for (p, g) in all {
             assert_eq!(p.group(), g, "{p:?}");
             assert!(!p.as_token().is_empty());
         }
+    }
+
+    /// `same_as` is symmetric, so `canonical()` must normalise the two
+    /// spellings onto one triple. Review caught that `canonical()` handled only
+    /// `Symmetry::Inverse`, which left the declared symmetry inert exactly where
+    /// a store's dedupe would look for it.
+    #[test]
+    fn canonical_normalises_a_symmetric_predicate_by_endpoint_order() {
+        let a = EntityId::new("robot-a").expect("admissible");
+        let b = EntityId::new("robot-b").expect("admissible");
+        let t = DomainInstant {
+            ms: 1,
+            domain: ClockDomain::System,
+        };
+        let iv = ValidInterval::new(t, None).expect("valid");
+        let mk = |subj: &EntityId, obj: &EntityId| {
+            Relationship::new(
+                RelationshipId::new("r1").expect("admissible"),
+                subj.clone(),
+                Predicate::SameAs,
+                RelObject::Entity(obj.clone()),
+                iv,
+                t,
+                Origination::Direct(SourceClass::Operator),
+                Confidence::new(None, ConfidenceBasis::OperatorCertainty, None).expect("valid"),
+            )
+            .expect("constructible")
+            .canonical()
+        };
+        let ab = mk(&a, &b);
+        let ba = mk(&b, &a);
+        assert_eq!(ab.subject(), ba.subject(), "both spellings normalise alike");
+        assert_eq!(ab.object(), ba.object());
+        assert_eq!(ab.subject(), &a, "the lower endpoint leads");
     }
 
     #[test]
