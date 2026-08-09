@@ -1153,6 +1153,33 @@ Eight verbs in §14.2; about five exist in partial form.
 
 - [ ] `Resolve` · [ ] `Related` (bounded graph) · [ ] `WhatIsAt` ·
       [ ] `Capabilities` · [ ] `Freshness`
+
+### `KIRRA-WM-QUERY-VOCAB-001` — RULED 2026-08-09
+
+> **Tier 3 implements the existing §14.2 query families. New helper names may
+> exist as aliases or domain-specific wrappers, but they do not replace the
+> blueprint verbs without a separate ruling.**
+
+The tracked set above stays intact, `Capabilities` and `Freshness` included. A
+convenience name (`WhereIs`, `WhatIsHere`, `History`, `ChangedSince`) is a
+wrapper over a blueprint verb, never a rename of one — a silent rename makes the
+blueprint and the code disagree about what the system offers, and the blueprint
+is the authority.
+
+**`Freshness` is BOTH an answer axis and a query family, and they are different
+things.** The distinction is worth stating because the duplication reads as an
+error until you see it:
+
+* the **axis** is metadata carried on an answer — *is this answer recent enough*;
+* the **verb** is a first-class question *about* that metadata — *what is the
+  freshness state of this subject*, asked directly rather than inferred from
+  some other answer's envelope.
+
+Exactly the shape of provenance: every payload carries provenance, **and**
+lineage retrieval is a query about provenance. One is a field, the other is a
+question. Neither removes the need for the other. (Lineage *retrieval* is the
+Tier 3 half; `Explain` — the rendering that consumes it — is Tier 4 by
+`KIRRA-WM-EXPLAIN-TIER-001` below.)
 - [x] **`evidence_digest` / `prev_hash` as core types** — **DONE 2026-08-07**,
       `crates/kirra-world/src/evidence.rs`, 11 unit tests + 5 seam tests in the
       store, still zero-dependency.
@@ -1233,6 +1260,213 @@ Three rules matter more than the verb count:
    storage faults — never for absence of knowledge. Conflating the two is how
    *"I don't know"* becomes an exception somebody catches and turns into a
    default value.
+
+### `KIRRA-WM-ANSWER-IDENTITY-001` — RULED 2026-08-09
+
+> **Tier 3 answers have no durable stored identity. An `AnswerRef` is a
+> reproducible DESCRIPTOR, not a persisted answer row.**
+
+An `AnswerRef` serializes *how to reconstruct the answer* — query kind, query
+parameters, `as_known_at`, the requested valid instant, the projection/rule
+version set, the snapshot coordinate, and the pagination bound. Resolving a ref
+therefore means **re-execute this exact deterministic query against the same
+snapshot and return its lineage**, not *fetch the stored answer*.
+
+That resolution is Tier 3's **lineage retrieval** (3f). Tier 4's `Explain` is a
+consumer of it, not the thing being defined here — see
+`KIRRA-WM-EXPLAIN-TIER-001` below. The ruling constrains what a ref *is*; which
+tier renders it is a separate question with a separate answer.
+
+Ruled before the envelope is designed, because the alternative builds a second
+store by accident. A durable answer row would need its own retention horizon,
+its own compaction story, and its own provenance — recursively, since an
+archived answer is evidence about an answer — and it would become a mutable
+"current truth" cache that cannot be reconstructed, which §10 already puts out
+of scope.
+
+**What the ruling costs, stated because it constrains the API rather than merely
+describing it:** every public Tier 3 query must be **fully serializable and
+deterministic**. No closures, no caller-supplied predicates, no ad-hoc filters,
+and no unversioned sort orders — an unversioned sort makes a pagination cursor
+non-reproducible across releases, so the answer re-executes identically while
+page 2 does not. **Cursor stability is part of the query contract**, not a
+pagination detail.
+
+### The three axes of an answer
+
+Rule 1 above says every answer carries value, trust axes, validity and a
+provenance handle. Recorded here, since the shape was nearly got wrong: those
+are **three orthogonal axes**, and they must not be folded into one enum.
+
+| Axis | Values | Question |
+|---|---|---|
+| **payload outcome** | `Located` / `Ambiguous` / `Unknown` / `Refused` | what the answer IS |
+| **completeness** | `Full` / `Degraded` | did the evidence SURVIVE |
+| **freshness** | `Fresh` / `Stale` / `NotApplicable` | is it RECENT ENOUGH |
+
+An answer can be `Located` **and** `Degraded` **and** `Stale` at once —
+`HistoricalAnswer` (2d) already carries the first two separately for exactly this
+reason. A single mega-enum forces a caller to discard two of the three facts, and
+is the `Option<T>` collapse of §"Why the axes are not one enum" one level up.
+
+**The envelope never restates the payload's outcome.** `Ambiguous` / `Unknown` /
+`Refused` belong to `ResolutionOutcome`; if the envelope also carried them, two
+values would mean the same thing and would have to be kept in sync. Envelope owns
+completeness, freshness, provenance and versions; payload owns the domain answer.
+
+**Open sub-question — is a FOURTH freshness variant (`Unknown`) reachable?** The
+table above carries three. `NotApplicable` is clearly reachable: a historical
+query at a fixed instant is never stale, by construction. `Unknown` is the
+doubtful one — if a recency-sensitive query with no supplied threshold REFUSES
+(below), then every answer returned has a threshold and freshness is always
+computable, so `Unknown` would arise only from a positive claim with no
+timestamp, which should not exist. An unreachable variant invites being returned
+as a shrug, which is the `Option::None` failure in miniature. Decide by finding a
+reachable case or leaving it out; do not carry it undecided.
+
+### Freshness thresholds are supplied, never defaulted
+
+Freshness is computed at **read time**, like validity (§9 rule 6) — never stored
+as `is_stale = false` and trusted later.
+
+The **threshold** is not Tier 3's to invent. A default staleness window inside
+the query engine is precisely how an answer becomes a safety input without
+anyone deciding it should be, which ADR-0042 Decision 5 (*safety-related,
+**non-authoritative***) exists to hold at bay. The precedent is
+`KIRRA_VEHICLE_CLASS`: **fail-closed, no default**, because a wrong default
+silently selects another class's envelope. So: the threshold comes from the
+caller or from a ruled policy table, and a recency-sensitive query with neither
+**refuses**.
+
+### Rule / projection versioning — declared and enforced, not derived
+
+A digest says *what state you got*; a version says *which semantics produced it*.
+`state_digest_of` already provides the first and cannot provide the second.
+
+The version must be **declared** and must change whenever reducer behaviour
+changes. Two mechanisms, because neither alone is enough:
+
+* **Conformance corpus** — fixed event sequences with expected folded outputs. A
+  diff here proves *behaviour* moved, which is what justifies a version bump.
+* **Source pin** — the frozen-talisman technique (a git blob hash, as
+  `validate_vehicle_command` already uses) over the reducer, so a silent edit
+  reds CI. Hash the comment-stripped form via `ci/check_orphan_cores.py`'s
+  already-unit-tested `strip_noncode`, or ordinary comment churn trips the gate
+  and trains reflexive version bumps — which destroys the signal the gate exists
+  to give.
+
+The corpus proves meaning; the pin proves nobody edited quietly. A version
+checked by neither is decorative metadata.
+
+### `KIRRA-WM-EXPLAIN-TIER-001` — RULED 2026-08-09
+
+> **`Explain` stays at Tier 4. Tier 3 builds only the deterministic lineage
+> CONTRACT that Tier 4 consumes.**
+
+The split: Tier 3 owns the typed answer — provenance, completeness, freshness,
+versions, a reproducible `AnswerRef`, and **bounded lineage retrieval**. Tier 4
+owns `Explain` — derivation-edge traversal and the human-facing rationale.
+
+Ruled this way because §7 records Explain as depending on *"derivation edges
+being real structure rather than a JSON array of identifiers."* Folding Explain
+into Tier 3 would drag that structural prerequisite in as a **Tier 3 blocker**,
+and Tier 3 would stop being closeable on contracts and representative query
+families — which is its stated closing condition. Tier 3 closes once answers are
+reproducible and carry enough lineage for Tier 4 to explain them later.
+
+Two constraints Tier 3's lineage retrieval carries regardless of where the
+rendering lives, because the traversal it performs is the one most likely to
+breach rule 2:
+
+* **Bounded and paginated, with truncation visible.** Answer → projection →
+  adjudication → observations → source is unbounded exactly where D-9's 10.5 s
+  p99 says it must not be. A lineage response that silently stops is worse than
+  one that says it stopped.
+* **Historically correct.** Lineage for an answer true at *T* traverses the
+  evidence visible at *T*, not today's graph. This is 2d's trap
+  (`KIRRA-WM-...` box 2d: *"resolve current state and label it historical"*)
+  re-appearing one tier up, and it will look like reuse when it arrives.
+
+### The Tier 3 boxes
+
+A continuation of rules 1–3 above, not a replacement: **rule 1 becomes the formal
+answer-boundary contract (3a), rule 2 remains the bounded-query rule
+(cross-cutting), rule 3 stands verbatim** as the payload axis's `Unknown`.
+
+- [ ] **3a — Answer envelope + provenance contract.** Payload owns the domain
+      outcome; envelope owns completeness, freshness, provenance and versions.
+      **This box already has a falsified predecessor, which is why it exists in
+      this shape rather than as a fresh idea:** rule 1 was tested against a real
+      caller on 2026-08-07 and **cannot be met by `ProjectedClaim`** — its fields
+      are public, so `…current("robot-01", now)?[0].payload` compiles with no
+      validity, trust or handle, and `validity_at`/`grade_at` are methods a caller
+      must remember. The fix is an **answer-boundary type with no constructor
+      that omits validity, trust or provenance**. The named next hop is
+      `WorldAnswer::provenance()` returning `EvidenceDigest`, **blocked on
+      #1388**; unblocking it is this box's first move. The honest bound stands:
+      such a type closes the hole at *retrieval*, not against a caller who
+      destructures and passes the value onward alone.
+- [ ] **3b — Rule / projection versioning.** Declared, behaviour-changing, and
+      enforced by corpus + source pin (above). Not decorative metadata.
+- [ ] **3c — Snapshot consistency.** An answer composing several projections
+      (identity, claims, relationships, summaries) must read them at ONE coherent
+      point, or report each coordinate explicitly. Projections carry independent
+      checkpoints and can sit at different heads, so an envelope naming a single
+      `as_known_at` over a multi-projection answer is otherwise approximately a
+      lie. `IdentityView` already records the single-snapshot argument for one
+      walk; this is that argument across projections.
+- [ ] **3d — Typed query engine.** The only supported path for **domain
+      questions**. Operational reads are explicitly carved out — `verify_chain`,
+      `schema_version`, backup/export, the retention driver, the compaction
+      planner and the WM-2 measurement harness all legitimately read below it,
+      and a rule that forbade them would be false on the day it was written.
+      Direct domain reads of projection tables below the engine are
+      **mechanically gated**, on the `ci/check_reexport_shims.py` zero-tolerance
+      ratchet pattern — an invariant with no gate is prose.
+- [ ] **3e — Freshness.** Computed at read time; threshold supplied by caller or
+      ruled policy; no implicit default for recency-sensitive semantics (above).
+- [ ] **3f — Lineage retrieval contract.** Deterministic, bounded, paginated,
+      truncation visible, historically correct. Consumed by Tier 4's `Explain`;
+      does not render.
+- [ ] **3g — Degradation propagation.** Every answer family preserves
+      `Full`/`Degraded` **independently of the payload outcome**, not just
+      `subject_summary`. Retention may reduce answer precision; Tier 3 makes the
+      loss observable.
+- [ ] **3h — Historical composition.** Historical queries use historical identity
+      (2d) and historical evidence — never today's entity graph applied to old
+      evidence.
+
+**Cross-cutting, applying to every box above:**
+
+- [ ] Every interactive query bounded (existing rule 2; D-9, ADR-0041 D-12)
+- [ ] Pagination and truncation explicit, and **cursors stable across releases**
+      — an unversioned sort re-executes the answer identically while page 2
+      differs
+- [ ] No dependency path from the query engine to checker or actuation, on the
+      `ci/check_mick_actuation_fence.py` fence pattern — this is what makes
+      ADR-0042 Decision 5's *non-authoritative* mechanical rather than declared
+- [ ] `ChangedSince` takes an **opaque domain cursor**, never the SQLite
+      `generation`. The adapter may encode a generation inside it; a caller that
+      knows this makes the API un-implementable over another backend, against
+      ADR-0040's domain-core/swappable-adapter shape. Same opaque-newtype
+      discipline as `reference.rs`.
+
+**Closing condition.** Tier 3 closes on the contracts plus a representative
+proving set — not on every conceivable query. The minimum set:
+
+1. current entity query;
+2. historical entity query;
+3. relationship / history query;
+4. degraded / compacted query;
+5. lineage-retrieval query;
+6. bounded temporal query;
+7. **contradicted identity → `Refused` with its reason preserved through the
+   envelope** — the case Tier 2 spent three slices establishing, and the one an
+   envelope most easily flattens into an empty answer;
+8. **discrimination: `Unknown` ≠ `Refused` ≠ empty-but-`Full`** — three distinct
+   facts that are one keystroke from collapsing into each other.
+
+New domain queries can then be added without changing the Tier 3 trust model.
 
 ---
 
