@@ -197,10 +197,40 @@ impl CachedFleetPosture {
 ///   - `CachedFleetPosture` — complete atomic snapshot (never partially updated)
 pub type SharedPostureCache = std::sync::Arc<std::sync::RwLock<Option<CachedFleetPosture>>>;
 
+impl ServiceState {
+    /// Override the gate's staleness window. **Tests and internal harnesses
+    /// only** — production leaves the field at [`POSTURE_CACHE_TTL_MS`].
+    ///
+    /// Returned by value so a caller writes
+    /// `ServiceState { .. }.with_posture_cache_ttl_ms(ms)`, which keeps the
+    /// override visible at the construction site rather than buried in a
+    /// mutation later.
+    #[must_use]
+    pub fn with_posture_cache_ttl_ms(mut self, ttl_ms: u64) -> Self {
+        self.posture_cache_ttl_ms = ttl_ms;
+        self
+    }
+}
+
 /// Shared service state threaded through all axum handlers.
 pub struct ServiceState {
     pub app: Arc<AppState>,
     pub posture_cache: SharedPostureCache,
+    /// Staleness window the posture gate evaluates the cache against.
+    ///
+    /// **Production always sets [`POSTURE_CACHE_TTL_MS`]** — every construction
+    /// site does, and [`Self::with_posture_cache_ttl_ms`] is the only way to
+    /// change it. This is dependency injection around a policy input that
+    /// already existed as a parameter of
+    /// [`crate::posture_engine_v2::resolve_posture_with_reason`]; it is **not**
+    /// an invitation to make safety timing configurable at deployment, and no
+    /// env var or config field feeds it.
+    ///
+    /// It exists because `gate_posture` reached for the global constant
+    /// directly, which left no seam: a test asserting an AUDIT property could
+    /// only keep its cache entry fresh by racing the wall clock, and under
+    /// `cargo test --workspace` load it lost that race and read LockedOut.
+    pub posture_cache_ttl_ms: u64,
     /// #395 console runtime — boot timestamp (ms since epoch) captured once at
     /// `main` startup. Read-only; powers the live console `uptime_ms`.
     pub started_at_ms: u64,

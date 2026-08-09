@@ -833,6 +833,7 @@ async fn async_main() {
     let svc_state = Arc::new(ServiceState {
         app: app_state,
         posture_cache: Arc::new(std::sync::RwLock::new(None)),
+        posture_cache_ttl_ms: kirra_verifier::posture_cache::POSTURE_CACHE_TTL_MS,
         // #395 console runtime — boot timestamp captured once at startup.
         started_at_ms: now_ms(),
         audit_verifying_key,

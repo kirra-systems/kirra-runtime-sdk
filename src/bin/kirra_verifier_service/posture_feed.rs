@@ -64,7 +64,13 @@ pub(crate) fn enqueue_downgrade_recalc(
 /// `LockoutReason` is threaded into the denial-audit payload so operators
 /// can distinguish a DAG-derived LockedOut from a posture-cache-derived one.
 pub(crate) fn gate_posture(svc: &ServiceState) -> (FleetPosture, Option<LockoutReason>) {
-    resolve_posture_with_reason(&svc.posture_cache, POSTURE_CACHE_TTL_MS)
+    // The TTL comes from the STATE, not the global constant. Production sets it
+    // to POSTURE_CACHE_TTL_MS at every construction site, so the gate's timing
+    // is unchanged -- this is a seam, not a policy relaxation. Reaching for the
+    // constant here left tests no way to hold a cache entry fresh except by
+    // racing the wall clock, which is what made the DNP3 poison-recovery tests
+    // flake under workspace load.
+    resolve_posture_with_reason(&svc.posture_cache, svc.posture_cache_ttl_ms)
 }
 
 /// Verifier→fabric posture feed (#88, single-local-asset model).
