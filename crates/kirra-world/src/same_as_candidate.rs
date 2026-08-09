@@ -198,11 +198,9 @@ impl CandidatePair {
         if a == b {
             return Err(CandidateError::SelfPair);
         }
-        let (low, high) = if a.as_str() <= b.as_str() {
-            (a, b)
-        } else {
-            (b, a)
-        };
+        // `EntityId` derives `Ord`; comparing through `as_str` would restate that
+        // ordering here and silently diverge if the newtype's ever changed.
+        let (low, high) = if a <= b { (a, b) } else { (b, a) };
         Ok(Self { low, high })
     }
 
@@ -247,7 +245,6 @@ impl SameAsCandidate {
     ///
     /// # Errors
     ///
-    /// * [`CandidateError::SelfPair`] — both sides are the same entity.
     /// * [`CandidateError::NoSupportingEvidence`] — `support` is empty.
     /// * [`CandidateError::DuplicateSupport`] — an observation was cited twice.
     pub fn propose(
