@@ -454,6 +454,54 @@ mod tests {
         assert_eq!(p.decided_at(), at(1));
     }
 
+    /// **Every relation key is canonical, whichever way it was asserted.**
+    ///
+    /// The dedupe is only as symmetric as its KEY. `same_as` being symmetric at
+    /// the domain type buys nothing if something downstream counts a raw
+    /// `(A, B)` tuple — the relation would be symmetric in the type system and
+    /// still count twice in the tally, which is the trust inflation
+    /// `KIRRA-WM-PROMOTION-001` bars, arriving one layer lower than expected.
+    ///
+    /// This pins the property rather than today's call sites: whatever order a
+    /// caller asserted in, every key that reaches a set or a count has
+    /// `low() <= high()`. `CandidatePair`'s fields are private with one
+    /// constructor, so a non-canonical key is unconstructible — this asserts
+    /// that stays true.
+    #[test]
+    fn every_confirmed_relation_key_is_canonical_whichever_order_was_asserted() {
+        let records = vec![
+            decide(
+                &candidate("robot-b", "robot-a", OBS_A),
+                Outcome::Promoted,
+                OBS_A,
+            ),
+            decide(
+                &candidate("robot-c", "robot-b", OBS_B),
+                Outcome::Promoted,
+                OBS_B,
+            ),
+            decide(
+                &candidate("robot-a", "robot-c", OBS_C),
+                Outcome::Promoted,
+                OBS_C,
+            ),
+        ];
+        let keys = confirmed_relations(&records);
+        assert_eq!(
+            keys.len(),
+            3,
+            "three distinct relations, none duplicated by order"
+        );
+        for k in &keys {
+            assert!(
+                k.low() <= k.high(),
+                "a non-canonical relation key reached the dedupe: {k:?}"
+            );
+        }
+        // And the count agrees with the set: no path counts records instead.
+        assert_eq!(corroboration_count(&records), keys.len());
+    }
+
     /// Pair order does not create a second confirmed relation, since `same_as`
     /// is symmetric and the pair is canonical.
     #[test]
