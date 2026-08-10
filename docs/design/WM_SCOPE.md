@@ -1471,7 +1471,13 @@ A continuation of rules 1–3 above, not a replacement: **rule 1 becomes the for
 answer-boundary contract (3a), rule 2 remains the bounded-query rule
 (cross-cutting), rule 3 stands verbatim** as the payload axis's `Unknown`.
 
-- [ ] **3a — Answer envelope + provenance contract.** Payload owns the domain
+- [x] **3a — Answer envelope + provenance contract** — **COMPLETE for the
+      `current()` / `ask()` answer family, 2026-08-10, with the exclusions
+      below.** Not complete for families that do not yet exist; each will have
+      to meet this box again on its own terms, and two of the exclusions below
+      exist *because* those families are absent rather than because the fields
+      are unwanted.
+      Payload owns the domain
       outcome; envelope owns completeness, freshness, provenance and versions.
       **This box already has a falsified predecessor, which is why it exists in
       this shape rather than as a fresh idea:** rule 1 was tested against a real
@@ -1479,11 +1485,79 @@ answer-boundary contract (3a), rule 2 remains the bounded-query rule
       are public, so `…current("robot-01", now)?[0].payload` compiles with no
       validity, trust or handle, and `validity_at`/`grade_at` are methods a caller
       must remember. The fix is an **answer-boundary type with no constructor
-      that omits validity, trust or provenance**. The named next hop is
-      `WorldAnswer::provenance()` returning `EvidenceDigest`, **blocked on
-      #1388**; unblocking it is this box's first move. The honest bound stands:
+      that omits validity, trust or provenance**. The honest bound stands:
       such a type closes the hole at *retrieval*, not against a caller who
       destructures and passes the value onward alone.
+
+      **Substantially BUILT already — corrected 2026-08-10.** This entry said the
+      next hop was *"`WorldAnswer::provenance()` returning `EvidenceDigest`,
+      **blocked on #1388**"*. That was true when written and went stale the day
+      **#1388 merged (2026-08-07)**, which is the PR that *built* the boundary.
+      It was then carried forward into this box on 2026-08-09 without being
+      checked, and read by the next reader — twice — as a live blocker. Recorded
+      at length because the failure is the one this tier exists to prevent, in
+      the document that defines the tier.
+
+      What `kirra-world-service::read_view` ships **today**: `WorldAnswer` with
+      `WorldView::ask` as its only constructor, **validity resolved at
+      construction** (the whole difference from `ProjectedClaim`), the trust
+      **axes** carried beside the collapsed grade, `provenance()` **already
+      returning `&EvidenceDigest`**, and `WorldLookup::Unknown` as a success
+      variant. Staleness is **already reported, not swallowed**: `is_admissible`
+      filters on `Expired` and `Inadmissible` only, so a stale claim is served
+      carrying `Validity::Stale` — pinned by test.
+
+      Three things are absent, and they are absent for three different reasons —
+      the first must **stay** absent, the second has nothing to carry yet, and
+      the third is blocked on a capability:
+
+      * **Completeness is deliberately absent at THIS boundary, and adding it
+        would be a defect.** `ask` is built on `WorldStore::current`, whose own
+        docs refuse a `TemporalAnswer` because *"compaction can never degrade
+        it"* — `compact_range` clamps its window below any generation joined to
+        `world_current`, so the events `current` reads are exactly the ones
+        compaction is forbidden to remove. A completeness field here is
+        structurally always `Full`, and *"would suggest the check is doing
+        something"*. It becomes real when the boundary serves a query that **can**
+        degrade — `as_of`, `history`, lineage retrieval — none of which exist yet.
+      * **Version** — no reducer version exists to carry. Minting one here would
+        be the decorative metadata 3b forbids; it lands with 3b's enforcement.
+      * **`AnswerRef`** — absent, and blocked on a **capability** rather than on
+        effort: `KIRRA-WM-ANSWER-IDENTITY-001` requires re-execution *against the
+        same snapshot*, and there is no generation-pinned read of `world_current`
+        to re-execute against. `projection_generation()` can report the
+        coordinate; nothing can read *at* it.
+
+### `KIRRA-WM-ANSWERREF-NAMING-001` — RULED 2026-08-10
+
+> **The name `AnswerRef` is reserved for the ruled guarantee — re-execution
+> against the same snapshot. A weaker capability may be built, but not under
+> that name.**
+
+A ref that records the observed projection coordinate and lets a later ask
+**detect drift** is genuinely useful, and is *not* snapshot replay. Shipping it
+as `AnswerRef` would put the ruled guarantee's name on a type that cannot honour
+it — and the cost is paid later and by someone else: a migration spent teaching
+callers which flavour of `AnswerRef` they were handed, with no way to tell from
+the type.
+
+If the weaker thing is wanted before pinned reads exist, it gets an honestly
+weaker name — `ObservedAnswerRef` or `AnswerCheckpoint` — whose contract reads:
+
+> records the query and the observed projection coordinate; re-execution may
+> **detect** drift, and does **not** promise snapshot replay.
+
+Recorded as a ruling rather than a preference because the pressure to reuse the
+ruled name will come from wanting the checklist to close, which is the same
+pressure that produced every stale claim this box already documents.
+
+- [ ] **Generation-pinned read (prerequisite for the ruled `AnswerRef`).**
+      Scoped separately because it is a **store capability**, not an answer-boundary
+      one: a way to read `world_current` *as of* a projection generation, so a
+      recorded coordinate can actually be re-executed against. Until it exists,
+      `KIRRA-WM-ANSWER-IDENTITY-001` is a ruling with no mechanism behind it —
+      stated plainly here so that gap is visible rather than inferred from
+      `AnswerRef`'s absence.
 - [ ] **3b — Rule / projection versioning.** Declared, behaviour-changing, and
       enforced by corpus + source pin (above). Not decorative metadata.
 - [ ] **3c — Snapshot consistency.** An answer composing several projections
