@@ -88,6 +88,7 @@ DOMAIN_READ_METHODS = (
     "history",
     "candidates",
     "read_snapshot",
+    "read_at_generation",
     "identity_view",
     "identity_view_at",
     "resolve_at",

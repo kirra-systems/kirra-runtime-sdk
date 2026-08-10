@@ -1988,13 +1988,14 @@ Recorded as a ruling rather than a preference because the pressure to reuse the
 ruled name will come from wanting the checklist to close, which is the same
 pressure that produced every stale claim this box already documents.
 
-- [ ] **Generation-pinned read (prerequisite for the ruled `AnswerRef`).**
-      Scoped separately because it is a **store capability**, not an answer-boundary
-      one: a way to read `world_current` *as of* a projection generation, so a
-      recorded coordinate can actually be re-executed against. Until it exists,
-      `KIRRA-WM-ANSWER-IDENTITY-001` is a ruling with no mechanism behind it —
-      stated plainly here so that gap is visible rather than inferred from
-      `AnswerRef`'s absence.
+- [x] **Generation-pinned read (prerequisite for the ruled `AnswerRef`).**
+      ✅ **DONE 2026-08-10** — `WorldStore::read_at_generation` /
+      `ReadSnapshot::read_at_generation`; see *"the pinned read, and what ends
+      one"* below. Scoped separately because it is a **store capability**, not an
+      answer-boundary one: a way to read `world_current` *as of* a projection
+      generation, so a recorded coordinate can actually be re-executed against.
+      `KIRRA-WM-ANSWER-IDENTITY-001` now has a mechanism behind it; the ruled
+      `AnswerRef` itself is the next step and is still open.
 - [ ] **3b — Rule / projection versioning.** Declared, behaviour-changing, and
       enforced by corpus + source pin (above). Not decorative metadata.
 - [x] **3c — Snapshot consistency.** ✅ **DONE 2026-08-10** — see *"3c closed
@@ -2720,3 +2721,72 @@ where *every* dependant is permitted fails with *"no crate is in scope — that 
 how a ratchet dies quietly"*; and re-adding a stale exemption fails the gate
 itself. Twelve self-test cases, with the same uncollected-case guard the
 symbolic-seam suite carries.
+
+
+### The pinned read, and what ends one — 2026-08-10
+
+`KIRRA-WM-ANSWER-IDENTITY-001` rules that resolving an `AnswerRef` means
+*"re-execute this exact deterministic query against the same snapshot"*. Until
+now that was a ruling with no mechanism: `projection_generation()` could report
+the coordinate, and nothing could read AT it.
+
+`ReadSnapshot::read_at_generation(g)` reconstructs `world_current` as it stood at
+generation `g`, by replaying the confirmed log through `projection::fold_all` —
+the SAME reducer the live fold uses, over the same confirmed-only filter, in the
+same order. It is not a second implementation of the projection that could drift
+from the first; it is the one implementation given a bounded input, which is the
+property `rebuild_from_zero_equals_incremental` already pins.
+
+**It fails closed and never falls forward.** `PinnedRead` is
+`Reproduced | Irreproducible`, so there is no code path that answers with current
+state when the requested generation cannot be rebuilt. That failure mode is the
+one worth naming: falling forward is not merely wrong, it is wrong in the way
+that looks right — the caller asked what was true at generation 40 and receives
+what is true at 90, with nothing in the value to say so.
+
+**Generation is the right axis to pin on, and this is the one place the two axes
+genuinely differ.** `identity_degradation` records that a transaction-time filter
+over citations was FAIL-OPEN and could not be repaired: the removed rows are the
+only record of their own `txn_time_ms`, so a compacted span can never be shown
+irrelevant to a past instant after the fact. Generation does not have that
+problem. A `Citation` records the exact `lo_generation..=hi_generation` it
+removed — the same axis being pinned — so *"did compaction take anything at or
+below g"* is an EXACT test rather than a necessary condition.
+
+**Compaction is what ends a pinned read's life, and it ends it for every
+generation at or above the removed span, not merely inside it.** Rebuilding at
+`g` folds every confirmed event `<= g`; if one is gone, the fold cannot be
+reproduced whatever its result would have been. That is deliberately stricter
+than necessary, on the asymmetry `Resolution` already documents: a removed event
+may well have been superseded and made no difference, but it cannot be *shown* to
+have made none. Over-refusing costs availability; under-refusing returns a
+silently wrong reconstruction wearing the word "pinned".
+
+Worth stating plainly to whoever sets a retention horizon: **the compaction floor
+is also the floor on how far back answers stay reproducible.** That is a real
+operational consequence of the retention policy, and it was not visible before
+this existed.
+
+**A negative generation is an error, not an outcome.** Rule 3's split:
+`Irreproducible` reports facts about the DATA — this was compacted, this has not
+happened yet — and a negative generation is neither. Generation `0` is legal and
+reconstructs the empty projection that preceded every event.
+
+**Non-vacuity.** Four mutations, each caught:
+
+| Mutation | Caught by |
+|---|---|
+| fall forward to current state when compacted | both compaction tests |
+| clamp a future generation to the head | `a_generation_ahead_of_the_head_refuses` |
+| read the live table instead of replaying | 4 tests, incl. the positive witness |
+| test span containment instead of overlap | both compaction tests |
+
+The compaction fixture is built so that falling forward returns a *plausible,
+non-empty, wrong* answer — `dock_a` where `dock_old` was the truth — because a
+refusal that only fired when the fallback was empty would be indistinguishable
+from doing nothing. `re_execution_at_the_same_generation_is_stable_across_later_writes`
+pins the determinism the ruled `AnswerRef` will rest on, with a guard proving the
+head really moved.
+
+`read_at_generation` was added to the 3d answer-boundary gate's method list in
+the same change, so the new capability cannot become a fresh bypass.

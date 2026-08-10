@@ -326,6 +326,17 @@ pub enum StoreError {
         /// What did not line up.
         detail: String,
     },
+    /// A generation-pinned read was asked for a negative generation.
+    ///
+    /// The error channel rather than an `Irreproducible` outcome, on rule 3's
+    /// split: `Irreproducible` reports facts about the DATA (this was compacted,
+    /// this has not happened yet), and a negative generation is neither — it is
+    /// a malformed query, which is what the error channel is for. Generation `0`
+    /// is legal and reconstructs the empty projection that preceded every event.
+    InvalidGeneration {
+        /// What was asked for.
+        requested: i64,
+    },
     /// A compaction range was empty or inverted.
     EmptyRange {
         /// The requested low bound.
@@ -428,6 +439,10 @@ impl std::fmt::Display for StoreError {
                 lo_generation,
                 detail,
             } => write!(f, "citation at generation {lo_generation}: {detail}"),
+            Self::InvalidGeneration { requested } => write!(
+                f,
+                "generation {requested} is not a generation (generations start at 0)"
+            ),
             Self::EmptyRange { lo, hi } => {
                 write!(f, "compaction range {lo}..={hi} is empty or inverted")
             }
@@ -2596,6 +2611,21 @@ impl WorldStore {
         Ok(snapshot::ReadSnapshot::new(
             self.conn.unchecked_transaction()?,
         ))
+    }
+
+    /// **Reconstruct `world_current` as it stood at a projection generation.**
+    ///
+    /// The generation-pinned read `KIRRA-WM-ANSWER-IDENTITY-001` needs, taken
+    /// inside a snapshot so the citation check and the replay cannot disagree
+    /// about which events exist. See
+    /// [`snapshot::ReadSnapshot::read_at_generation`] for the contract — in
+    /// particular that it FAILS CLOSED and never falls forward to current state.
+    ///
+    /// # Errors
+    ///
+    /// [`StoreError::InvalidGeneration`] for a negative generation.
+    pub fn read_at_generation(&self, generation: i64) -> Result<snapshot::PinnedRead, StoreError> {
+        self.read_snapshot()?.read_at_generation(generation)
     }
 
     /// Where every projection stands right now, read outside any snapshot.
