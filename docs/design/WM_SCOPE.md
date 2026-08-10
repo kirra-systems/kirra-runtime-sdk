@@ -1507,10 +1507,12 @@ answer-boundary contract (3a), rule 2 remains the bounded-query rule
       filters on `Expired` and `Inadmissible` only, so a stale claim is served
       carrying `Validity::Stale` — pinned by test.
 
-      What is genuinely absent, and the one that must NOT be added:
+      Three things are absent, and they are absent for three different reasons —
+      the first must **stay** absent, the second has nothing to carry yet, and
+      the third is blocked on a capability:
 
       * **Completeness is deliberately absent at THIS boundary, and adding it
-        would be a defect.** `ask` is built on [`WorldStore::current`], whose own
+        would be a defect.** `ask` is built on `WorldStore::current`, whose own
         docs refuse a `TemporalAnswer` because *"compaction can never degrade
         it"* — `compact_range` clamps its window below any generation joined to
         `world_current`, so the events `current` reads are exactly the ones
