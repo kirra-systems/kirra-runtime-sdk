@@ -1285,7 +1285,7 @@ contract it never tested.
 
 ### Goals
 
-- [ ] **Name the non-authoritative host** for world knowledge, and record why it
+- [x] **Name the non-authoritative host** for world knowledge, and record why it
       is outside the checker's closure rather than merely believed to be.
       *Placement ruled* (`KIRRA-WM-CONSUMER-PLACEMENT-001`): a **new** crate,
       because the survey found no existing one that satisfies both halves.
@@ -1295,19 +1295,19 @@ contract it never tested.
       satisfies the *letter* of this goal and none of its purpose. Naming is
       therefore half of it; goal 4's differential proof is what earns the other
       half, and this box closes when that proof runs — not when the crate exists.
-- [ ] **Define the one-way seam** from Kirra World into operational software.
+- [x] **Define the one-way seam** from Kirra World into operational software.
       The seam's type-level obligation: what crosses it is *proposal context*, and
       nothing in its output type is admissible as a checker bound.
-- [ ] **Prove the consumer cannot influence the checker — mechanically.** The
+- [x] **Prove the consumer cannot influence the checker — mechanically.** The
       acceptance criterion is that
       `ci/check_kirra_world_bidirectional_fence.py` passes **with the new
       dependency edge present**, not an argument in a document.
-- [ ] **Prove the consumer changes proposals and only proposals — differentially.**
+- [x] **Prove the consumer changes proposals and only proposals — differentially.**
       Two runs over one scenario, world-consumer off and on: the proposals must
       differ (else goal 1 is vacuous) *and* the checker's bound-derivation inputs
       must be bit-identical (else the invariant is breached).
-- [ ] **Exercise the Tier 3 contracts with a real caller** (the typed one).
-- [ ] **Capture every contract that breaks** before the API is expanded.
+- [x] **Exercise the Tier 3 contracts with a real caller** (the typed one).
+- [x] **Capture every contract that breaks** before the API is expanded.
 
 ### The acceptance proof — four parts, and why each is separate
 
@@ -1470,7 +1470,7 @@ carried on the context. A producer could in principle take a bound as an argumen
 and encode it into an id string. Nothing here would catch that, and nothing cheap
 would.
 
-### Tier 2.5 — evidence recorded, closure still open
+### Tier 2.5 step 3 — the evidence that preceded closure
 
 `crates/kirra-proposal-context` exists: the sanctioned consumer, whose only Kirra
 dependencies are `kirra-world` and `kirra-world-store`. Deliberately **not**
@@ -1610,6 +1610,50 @@ Which preserves, mechanically rather than as a slogan:
 
 > **Kirra World may change what is proposed. It may not change the inputs from
 > which the checker derives what is permitted.**
+
+### Tier 2.5 — **CLOSED, 2026-08-10**
+
+`crates/kirra-mission-orchestrator` is the production host, and all eight
+conditions hold.
+
+| # | condition | how it is established |
+|---|---|---|
+| 1 | host depends on `kirra-proposal-context` | manifest |
+| 2 | passes symbolic context into a **real** producer | `plan_for_intent` + `GeometricPlanner`, unmodified |
+| 3 | proposal producer remains World-blind | `kirra-planner` reaches `kirra-world*`: **false** |
+| 4 | `kirra-planner` gains no world dependency | same, mechanically |
+| 5 | `kirra-sidecars` World-free transitively | reaches `kirra-world*`: **false** |
+| 6 | Fence B green with the production edge | INTACT, closure 19 of 56 |
+| 7 | differential: proposal differs | bit-compared trajectory, world-silent vs world-knowing |
+| 8 | checker inputs unchanged across that pair | corridor + objects are the **same borrow** (`ptr::eq`) |
+
+**Criterion 8 came out stronger than specified.** The plan was to digest the
+bound-derivation inputs and compare them. That is not needed: the host forwards
+the caller's world with `PlanInput { goal, ..world.clone() }` — the idiom the
+production Mick bridge already uses — so both runs receive *one*
+`&dyn CorridorSource` and *one* `&[PerceivedObject]`. The runs do not merely have
+equal checker inputs; there is only ever one of each, and `ptr::eq` says so. A
+digest could only have shown the bytes matched.
+
+**The contract half is discharged by construction, and the first draft of the
+test got this wrong.** It compared `contract_digest_hex(&contract)` against
+itself — true for every possible implementation, therefore proof of nothing, in
+the one assertion the milestone exists for. What is actually true is stronger:
+`PlanInput` carries no `VehicleKinematicsContract` and the host has no access to
+one, so the envelope cannot differ because neither run can reach it. End-to-end,
+#1423's digest pins the resolved envelope at the gateway, where it actually
+bounds a command.
+
+**One fixture fact worth keeping**, because it looks like a test bug and is not:
+`GeometricPlanner` follows the corridor centerline, so two destinations displaced
+only *laterally* within one corridor yield a bit-identical trajectory. The first
+fixture used a lateral offset and criterion 7 failed — correctly. The docks now
+differ longitudinally. A harness that had "fixed" that by loosening the
+comparison would have passed while proving less.
+
+Goal 1's non-vacuity condition — *a host whose removal changes observable
+proposal behaviour* — is now met: remove the host and both runs plan to the
+caller's own goal.
 
 ---
 

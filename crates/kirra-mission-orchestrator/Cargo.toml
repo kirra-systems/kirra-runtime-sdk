@@ -1,0 +1,31 @@
+# crates/kirra-mission-orchestrator/Cargo.toml
+#
+# Tier 2.5's production orchestration host (KIRRA-WM-ORCHESTRATION-BOUNDARY-001).
+#
+# IT HOLDS BOTH EDGES, and that is the entire mechanism:
+#
+#   kirra-world → kirra-proposal-context → THIS CRATE → kirra-planner → proposal
+#
+# The arrow points FROM here TO the planner. `kirra-planner` gains nothing, and
+# `kirra-sidecars` (which depends on the planner and implements CorridorSource)
+# stays World-free transitively, because nothing depends on this crate.
+[package]
+name = "kirra-mission-orchestrator"
+version = "0.1.0"
+edition = "2021"
+rust-version.workspace = true
+description = "Tier 2.5 orchestration host: turns symbolic Kirra World context into a planner goal. Produces no checker bounds."
+repository = "https://github.com/kirra-systems/kirra-runtime-sdk"
+license-file = "../../COPYRIGHT"
+publish = false  # proprietary (see COPYRIGHT) — not for crates.io
+
+[dependencies]
+kirra-proposal-context = { path = "../kirra-proposal-context" }
+kirra-planner = { path = "../kirra-planner" }
+
+[dev-dependencies]
+# Fixture only: the differential harness needs a CorridorSource and the frozen
+# contract to build a PlanInput and to digest the enforced envelope. A DEV edge —
+# the shipped crate names no checker-input type it does not forward.
+kirra-core = { path = "../kirra-core", features = ["capture"] }
+kirra-world-store = { path = "../kirra-world-store" }

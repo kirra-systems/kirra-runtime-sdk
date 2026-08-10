@@ -2348,6 +2348,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "kirra-mission-orchestrator"
+version = "0.1.0"
+dependencies = [
+ "kirra-core",
+ "kirra-planner",
+ "kirra-proposal-context",
+ "kirra-world-store",
+]
+
+[[package]]
 name = "kirra-ota-campaign"
 version = "0.1.0"
 dependencies = [
