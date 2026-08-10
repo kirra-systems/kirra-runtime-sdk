@@ -1175,10 +1175,14 @@ future consumer rediscovers it after writing the same code.
 ### What the workspace already answers
 
 `kirra-world-service` is **the only crate that depends on `kirra-world*` and
-implements no `CorridorSource`** — its entire dependency list is `kirra-world`
-and `kirra-world-store`. It is outside every barred set: not a safety-closure
-member, not a corridor producer, nothing transitive to drag in. The **hosting**
-question is therefore already answered by construction.
+implements no `CorridorSource`** — its runtime dependencies are `kirra-world` and
+`kirra-world-store`, and nothing else. (It also carries one dev-dependency: the
+same `kirra-world-store` with `test-support`, for the raw-SQL escape hatch that
+plants a corrupt chain digest. Worth naming rather than eliding, because the
+§11 finding below turns entirely on how dev edges are classified — the same
+distinction, seen where it does no harm.) It is outside every barred set: not a
+safety-closure member, not a corridor producer, nothing transitive to drag in.
+The **hosting** question is therefore already answered by construction.
 
 **Hosting is not consuming, and this is the trap.** Nothing depends on
 `kirra-world-service` today except workspace membership, so it carries the same
@@ -1195,18 +1199,28 @@ the workspace manifests, not by reading crate names. What that produced:
 * The behaviour-shaping crates are **not** caught by Fence B. `kirra-planner`,
   `kirra-map`, `kirra-taj`, `kirra-sidecars` and `kirra-mick` are all outside the
   safety closure. What bars them is the *other* gate: `check_4_trait_impls`, whose
-  conjunction is *implements `CorridorSource`* ∧ *`pkg_reaches_world`*. The
-  production `CorridorSource` implementors are `kirra-core`, `kirra-map`,
-  `kirra-ros2-adapter`, `kirra-sidecars` and `kirra-taj`.
+  conjunction is *implements `CorridorSource`* ∧ *`pkg_reaches_world`*. The crates
+  carrying a non-`cfg(test)` `impl CorridorSource` — the set the gate actually
+  keys on — are `kirra-core`, `kirra-map`, `kirra-ros2-adapter`, `kirra-sidecars`
+  and `kirra-taj`. **`kirra-core` is on that list for a reason worth stating:** its
+  impl is `MockCorridorSource`, documented in place as "a straight-line test
+  stand-in, not drivable space" whose selection for a real deployment "is a
+  configuration error". It is not production drivable space — but it is not
+  `cfg(test)`-gated either, so it compiles into the library and the gate counts it.
+  The gate keys on *what ships*, not on what was intended, which is the correct
+  behaviour for a fence and the reason the list must not be read as five
+  production corridor producers.
 * **Two of the five are barred directly and three transitively**, which is worth
   separating because only the first kind is obvious from the crate itself.
   `kirra-map` and `kirra-taj` implement `CorridorSource`, so a world edge on
   either satisfies the conjunction on the spot. `kirra-planner` and `kirra-mick`
   implement nothing — they are barred because `kirra-sidecars` *does* implement it
-  and depends on both (its full list is `kirra-core`, `kirra-planner`,
-  `kirra-trajectory`, `kirra-taj`, `kirra-mick`), so a world edge added at either
-  makes `kirra-sidecars` reach world and the gate fires there. That is the
-  transitivity direction §9 relies on, confirmed rather than assumed.
+  and depends on both (its full **Kirra-internal** dependency list is `kirra-core`,
+  `kirra-planner`, `kirra-trajectory`, `kirra-taj`, `kirra-mick`; it carries
+  third-party crates besides, which the closure walk follows but which cannot
+  reach Kirra World), so a world edge added at either makes `kirra-sidecars` reach
+  world and the gate fires there. That is the transitivity direction §9 relies on,
+  confirmed rather than assumed.
 * **27 packages pass both gates mechanically.** Nearly all are harnesses, benches,
   fuzz targets or proof crates. A consumer placed in one of them would satisfy
   goal 1 *vacuously* — the fence would say yes to a crate that ships no behaviour,
