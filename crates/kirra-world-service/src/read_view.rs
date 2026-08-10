@@ -195,6 +195,7 @@ pub enum UnknownReason {
 pub struct WorldAnswer {
     subject: String,
     predicate: Option<String>,
+    object: Option<String>,
     value: String,
     validity: Validity,
     axes: Option<TrustAxes>,
@@ -208,6 +209,37 @@ impl WorldAnswer {
     #[must_use]
     pub fn subject(&self) -> &str {
         &self.subject
+    }
+
+    /// The claim's OBJECT — the entity or value a relationship-shaped claim
+    /// points at — `None` for claims that carry no relationship.
+    ///
+    /// **Added because a real consumer needed it and could not get it.**
+    /// `mission_context` reads facts of the form `package_17 last_seen_at
+    /// dock_b`, matching candidates against the object; before this existed the
+    /// boundary modelled a subject-predicate-**payload** claim while the store
+    /// stored subject-predicate-**object**-payload, so a triple-shaped fact
+    /// could not cross the boundary at all. Nothing had ever needed to read an
+    /// object, so nothing had noticed the field was missing — which is the
+    /// specification-without-a-consumer failure `KIRRA-WM-CONSUMER-WITNESS-001`
+    /// exists to prevent.
+    ///
+    /// # Invariant
+    ///
+    /// `object.is_some()` implies `predicate.is_some()`. That is not defended
+    /// here; it is guaranteed upstream by `KIRRA-WM-CLAIM-SHAPES-001` at two
+    /// layers — admission and the v5 schema trigger — because the alternative
+    /// shape aliases a payload-only claim in `world_current`'s
+    /// `(subject, '')` slot and destroys it.
+    ///
+    /// **This is the stored object, uninterpreted.** It is not resolved through
+    /// the identity graph, even when it names an entity: that resolution
+    /// composes two projections with independent checkpoints, which is 3c's
+    /// snapshot-consistency question and not something an answer boundary may
+    /// answer silently.
+    #[must_use]
+    pub fn object(&self) -> Option<&str> {
+        self.object.as_deref()
     }
 
     /// The claim's predicate, `None` for predicate-less claims.
@@ -382,6 +414,7 @@ impl<'a> WorldView<'a> {
         Ok(WorldAnswer {
             subject: claim.subject.clone(),
             predicate: claim.predicate.clone(),
+            object: claim.object.clone(),
             value: claim.payload.clone(),
             validity: claim.validity_at(clock, self.staleness_budget_ms),
             axes: claim.trust,

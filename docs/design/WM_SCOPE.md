@@ -2221,16 +2221,17 @@ that violates them today; 3e has a live consumer that is silently mislabelled;
 and 3a additionally cannot represent the fact that the consumer reads. The revised
 sequence, each step forced by the consumer rather than by the checklist:
 
-1. **3a** — make `WorldAnswer` faithfully represent the stored claim: add
-   first-class `object`, keep `value()` as `payload`, leave subject / predicate /
-   validity / axes / grade / provenance unchanged. Migrate `mission_context` onto
-   `WorldView::ask`, **requiring the staleness budget at construction** so 3e's
-   no-implicit-default rule arrives with it rather than as a later discipline.
-   Keep `NoClaim` and `NoneAdmissible` distinguishable — today both collapse to
-   "no preference", losing exactly what Tier 3 exists to retain. Propagate the
-   categorical grade into `ContextHint` (a grade is categorical, not a magnitude,
-   so the symbolic-seam gate is unaffected). **Do not** resolve object identity
-   inside `WorldAnswer`.
+1. **3a** — ✅ **DONE 2026-08-10.** Make `WorldAnswer` faithfully represent the
+   stored claim: add first-class `object`, keep `value()` as `payload`, leave
+   subject / predicate / validity / axes / grade / provenance unchanged. Migrate
+   `mission_context` onto `WorldView::ask`, **requiring the staleness budget at
+   construction** so 3e's no-implicit-default rule arrives with it rather than as
+   a later discipline. Keep `NoClaim` and `NoneAdmissible` distinguishable —
+   before this, both collapsed to "no preference", losing exactly what Tier 3
+   exists to retain. Propagate the categorical grade into `ContextHint` (a grade
+   is categorical, not a magnitude, so the symbolic-seam gate is unaffected).
+   **Do not** resolve object identity inside `WorldAnswer`. See *"3a closed
+   against its consumer"* below.
 2. **3c** — the composed read now exists: `WorldAnswer.object` → identity
    resolution → one snapshot coordinate. Prove subject/object resolution cannot
    mix projection generations: same snapshot, or explicitly degraded/refused.
@@ -2241,6 +2242,66 @@ sequence, each step forced by the consumer rather than by the checklist:
    approximation — the same discipline as the symbolic-seam gate's control 3, and
    it gives the gate a real provenance story: this bypass existed, was repaired,
    and cannot return.
+
+### 3a closed against its consumer — 2026-08-10
+
+Finding 6 said the boundary could not express the claim the consumer reads. It
+can now, and the consumer reads through it.
+
+**What shipped.**
+
+| Change | Where |
+|---|---|
+| `WorldAnswer::object()` — first-class, uninterpreted | `kirra-world-service::read_view` |
+| `mission_context` routes through `WorldView::ask` | `kirra-proposal-context` |
+| `staleness_budget_ms` is a required parameter | `mission_context`'s signature |
+| `WorldSilence::{NoClaim, NoneAdmissible, NoCandidateMatched}` | `kirra-proposal-context` |
+| `ContextHint::{FactTrust, FactFreshness}` — categorical | `kirra-proposal-context` |
+
+`value()`, `subject()`, `predicate()`, `validity()`, `axes()`, `grade()` and
+`provenance()` are unchanged; the object is added beside them, not in place of
+anything.
+
+**The dependency ceiling did not move, and that was the deciding constraint.**
+`kirra-world-service`'s own dependencies are exactly `kirra-world` +
+`kirra-world-store` — the ceiling finding 1 said was set without noticing the
+consequence — so depending on the answer boundary leaves the consumer's
+transitive set, and therefore its capability ceiling, byte-identical. Had the
+service crate carried anything more, the fix would have been to move
+`WorldAnswer`, not to widen the ceiling.
+
+**Three silences instead of one, and why the third exists.** The audit named two.
+Building it turned up a third: a claim that *is* admissible and names something
+the caller never offered. Flattening that into `NoClaim` would report "the world
+has never heard of this" about a subject the world had just answered about —
+finding 6's failure mode in miniature, so it gets its own variant.
+
+**The freshness budget is required at the signature.** `Validity::Timeless` is
+what the world returns when no budget is supplied, and it is a *positive claim
+that age does not matter*. For `last_seen_at` that claim is false. 3e's
+no-implicit-default rule is therefore enforced by the type system here rather
+than by discipline: `None` is still expressible and now means *I considered this
+and the fact is genuinely timeless*, which is a different act from never having
+been asked. The verdict crosses the seam as `FactValidity::Timeless` so a
+consumer can notice.
+
+**What is deliberately NOT done.** `object()` returns the stored string,
+unresolved. Resolving it through the 2d identity graph composes two projections
+with independent checkpoints — 3c's question — and an answer boundary that did it
+silently would be answering a snapshot-consistency question by accident. The
+doc comment says so at the accessor, so the next reader finds the reason where
+they find the limitation.
+
+**Non-vacuity.** Three mutations were run against the new tests and each is
+caught: mapping `NoneAdmissible → NoClaim` (the collapse the box exists to
+prevent), mapping `Timeless → Fresh` (the silent-default 3e forbids), and
+matching candidates against `value()` instead of `object()` — the exact
+mechanical translation finding 6 predicted would compile, match nothing, and pass
+both negative controls. `NoneAdmissible` itself is unreachable through the
+sanctioned write path (pinned by `inadmissible_never_read.rs`), so its test
+plants the state by writing `world_current` directly; what that proves is that
+the *mapping* does not collapse, not that the store can be made to serve a
+rejected claim.
 
 ---
 

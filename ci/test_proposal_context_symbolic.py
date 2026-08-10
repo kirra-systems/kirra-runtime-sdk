@@ -351,22 +351,30 @@ def t15_a_planted_bound_in_the_real_crate_would_be_caught() -> None:
     real = (root / "crates" / "kirra-proposal-context" / "src" / "lib.rs").read_text(
         encoding="utf-8"
     )
-    mutated = real.replace(
-        "pub struct ProposalContext {\n    hints: Vec<ContextHint>,\n}",
-        "pub struct ProposalContext {\n    hints: Vec<ContextHint>,\n    speed_cap_mps: f64,\n}",
-    )
+    # The anchor is ONE field line rather than the whole struct body. The body
+    # form broke the moment `ProposalContext` gained a second field, which made
+    # this control fail for a reason that had nothing to do with what it tests.
+    # A single field line survives sibling additions and still lands the planted
+    # field inside the struct.
+    anchor = "    hints: Vec<ContextHint>,\n"
+    # ...but only if it is unambiguous. A second occurrence would plant the bound
+    # somewhere this control never inspected, and it would pass anyway.
+    occurrences = real.count(anchor)
+    mutated = real.replace(anchor, anchor + "    speed_cap_mps: f64,\n")
     changed = mutated != real
     found = scan_source(mutated, "lib.rs")
+    if occurrences != 1:
+        detail = f"the anchor is ambiguous — {occurrences} occurrences, expected 1"
+    elif not changed:
+        detail = "the mutation did not apply — the anchor text moved"
+    elif not found:
+        detail = "the scanner missed a planted f64 in the real source"
+    else:
+        detail = ""
     record(
-        changed and bool(found),
+        occurrences == 1 and changed and bool(found),
         "t15_a_planted_bound_in_the_real_crate_would_be_caught",
-        ""
-        if changed and found
-        else (
-            "the mutation did not apply — the anchor text moved"
-            if not changed
-            else "the scanner missed a planted f64 in the real source"
-        ),
+        detail,
     )
 
 

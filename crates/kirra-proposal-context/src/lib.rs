@@ -36,20 +36,29 @@
 // that crosses the seam is a value a planner can act on; a value used to read
 // the store and discarded is not.
 //
-// § WHAT THIS CRATE DOES NOT PROVE
+// § WHO CONSUMES THIS
 //
-// Nothing consumes its output in production yet. The differential harness in
-// `tests/` shows that world knowledge changes the symbolic context, and that a
-// proposal-producing function fed by it produces a different proposal. That is
-// Tier 2.5 EVIDENCE, not Tier 2.5 closure: §5.5's Goal 1 requires a host whose
-// removal changes observable proposal behaviour, and the production
-// orchestration boundary has not been ruled yet. Until it is, this crate is a
-// consumer with a test-local consumer of its own, and the honest claim is the
-// narrow one.
+// `kirra-mission-orchestrator` — the production orchestration host ruled by
+// `KIRRA-WM-ORCHESTRATION-BOUNDARY-001` and built in #1426, which closed Tier
+// 2.5's Goal 1. Its closure differential shows a proposal changing because of
+// world knowledge while the checker's inputs stay the same borrow.
+//
+// (This paragraph read *"nothing consumes its output in production yet"* until
+// the host landed. It is called out because a stale disclaimer is worse than
+// none: it invites a reader to discount evidence that now exists.)
+//
+// § THE OTHER HALF, WHICH THIS CRATE OWES ITS CONSUMER
+//
+// Every answer here arrives from the sanctioned boundary with validity, trust
+// axes, grade and provenance attached, so the seam can carry the world's own
+// judgement about a fact rather than just the fact. What it deliberately does
+// NOT carry is any of those as a number — see the capability rule above.
 
 #![forbid(unsafe_code)]
 
-use kirra_world_store::{StoreError, WorldStore};
+use kirra_world::trust::{TrustGrade, Validity};
+use kirra_world_service::read_view::{AskError, UnknownReason, WorldLookup, WorldView};
+use kirra_world_store::WorldStore;
 
 /// An opaque symbolic identity — a destination, a task, a package, a relation.
 ///
@@ -103,6 +112,49 @@ pub enum ContextHint {
         /// What it relates to.
         object: ContextId,
     },
+    /// How much the world's own boundary trusts the fact this context acted on.
+    ///
+    /// CATEGORICAL, never a score — a grade is a named tier, so it carries no
+    /// magnitude and the symbolic-seam gate is unaffected. The variant exists
+    /// because a proposal that acted on world knowledge should be able to say
+    /// how well-founded that knowledge was without re-reading the world.
+    FactTrust(FactGrade),
+    /// How fresh the fact was, as the boundary judged it against the caller's
+    /// staleness budget. Categorical for the same reason.
+    FactFreshness(FactValidity),
+}
+
+/// The trust grade of a world fact, mirrored symbolically.
+///
+/// A mirror rather than a re-export so this crate's public surface stays
+/// independent of the world's internal vocabulary — and so the seam carries a
+/// closed set of named tiers rather than anything a future edit could widen into
+/// a number.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FactGrade {
+    /// The world graded the claim, and the grade is this tier.
+    Graded(&'static str),
+    /// The claim carries no trust axes, so there is no grade to report.
+    ///
+    /// Distinct from a low grade: absent is not weak. Manufacturing a default
+    /// here would invent a trust judgement from the absence of one.
+    Ungraded,
+}
+
+/// The freshness of a world fact, mirrored symbolically.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FactValidity {
+    /// Within the caller's staleness budget.
+    Fresh,
+    /// Past the caller's staleness budget, and served anyway — the boundary
+    /// reports staleness rather than swallowing it, and so does this.
+    Stale,
+    /// The caller supplied no budget, so the world made no freshness judgement.
+    ///
+    /// Reported rather than silently treated as fresh: `Timeless` is a positive
+    /// claim that age does not matter, and for a fact like "last seen at" that
+    /// claim is false. Surfacing it is what lets a consumer notice.
+    Timeless,
 }
 
 /// The bundle of hints that crosses the seam.
@@ -113,6 +165,7 @@ pub enum ContextHint {
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ProposalContext {
     hints: Vec<ContextHint>,
+    silence: Option<WorldSilence>,
 }
 
 impl ProposalContext {
@@ -121,7 +174,48 @@ impl ProposalContext {
     /// this candidate": empty means the seam carried nothing at all.
     #[must_use]
     pub fn empty() -> Self {
-        Self { hints: Vec::new() }
+        Self {
+            hints: Vec::new(),
+            silence: None,
+        }
+    }
+
+    /// The candidates unchanged, no preference, and the REASON the world
+    /// expressed none.
+    fn silent(candidates: &[ContextId], silence: WorldSilence) -> Self {
+        Self {
+            hints: vec![ContextHint::CandidatePriority(candidates.to_vec())],
+            silence: Some(silence),
+        }
+    }
+
+    /// Why the world expressed no preference, when it expressed none.
+    ///
+    /// `None` here means the world DID express a preference — not that it was
+    /// silent for an unrecorded reason. The three silences stay distinct because
+    /// collapsing them is precisely the information loss Tier 3 exists to
+    /// prevent.
+    #[must_use]
+    pub fn silence(&self) -> Option<WorldSilence> {
+        self.silence
+    }
+
+    /// The trust grade of the fact this context acted on, if it acted on one.
+    #[must_use]
+    pub fn fact_trust(&self) -> Option<FactGrade> {
+        self.hints.iter().find_map(|h| match h {
+            ContextHint::FactTrust(g) => Some(*g),
+            _ => None,
+        })
+    }
+
+    /// The freshness of the fact this context acted on, if it acted on one.
+    #[must_use]
+    pub fn fact_freshness(&self) -> Option<FactValidity> {
+        self.hints.iter().find_map(|h| match h {
+            ContextHint::FactFreshness(v) => Some(*v),
+            _ => None,
+        })
     }
 
     /// The hints, in the order the producer emitted them.
@@ -161,73 +255,136 @@ impl ProposalContext {
 /// indistinguishable from "the world knows nothing".
 #[derive(Debug)]
 pub enum ContextError {
-    /// The world store could not be read.
-    Store(StoreError),
+    /// The answer boundary could not serve the question.
+    Ask(AskError),
 }
 
 impl std::fmt::Display for ContextError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Store(e) => write!(f, "world store read failed: {e}"),
+            Self::Ask(e) => write!(f, "world read failed: {e}"),
         }
     }
 }
 
 impl std::error::Error for ContextError {}
 
-impl From<StoreError> for ContextError {
-    fn from(e: StoreError) -> Self {
-        Self::Store(e)
+impl From<AskError> for ContextError {
+    fn from(e: AskError) -> Self {
+        Self::Ask(e)
     }
+}
+
+/// Why the world had nothing usable to say — PRESERVED, not flattened.
+///
+/// Before this, both reasons collapsed into "no preference", which loses exactly
+/// what Tier 3 exists to retain: *never heard of it* and *heard of it but not
+/// servable* are different facts about the world, and a consumer that cannot
+/// tell them apart cannot report which one it hit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorldSilence {
+    /// No current claim for this subject at this clock.
+    NoClaim,
+    /// Claims exist, but none was admissible at this clock and budget.
+    NoneAdmissible,
+    /// A claim exists and is admissible, but its object is not among the
+    /// candidates the caller offered. The world spoke; it just did not name
+    /// anything on the menu.
+    NoCandidateMatched,
 }
 
 /// Derive proposal-shaping context from what Kirra World knows about `subject`.
 ///
-/// The one behaviour, kept deliberately tiny (Tier 2.5 asks for ONE observable
-/// difference, not a generally useful engine): if the world holds a claim
+/// The one behaviour, kept deliberately tiny: if the world holds a claim
 /// `subject --relation--> X` and `X` is among `candidates`, the returned context
-/// prefers `X` and reorders the candidate list to put it first. If the world
-/// holds no such claim, the context carries the candidates in the order given
-/// and expresses no preference.
+/// prefers `X` and reorders the candidate list to put it first. Otherwise the
+/// context carries the candidates in the order given and expresses no preference
+/// — with [`ProposalContext::silence`] recording WHY, rather than flattening
+/// three different reasons into one.
 ///
-/// `now_ms` is the bitemporal query instant — see the module note on why a
-/// parameter is not a seam value.
+/// # The freshness contract is required, not defaulted
 ///
-/// Note what is NOT consulted: nothing spatial, nothing metric. The producer
-/// reads a symbolic triple and emits symbolic hints. There is no path from a
-/// world claim's numeric payload to the returned context, because the returned
-/// type has nowhere to put one.
+/// `staleness_budget_ms` is a parameter with no default because
+/// `Validity::Timeless` — what the world returns when no budget is supplied — is
+/// a positive claim that the fact's age does not matter. For "where was this
+/// last seen", that claim is false. Tier 3 box 3e's *"no implicit default for
+/// recency-sensitive semantics"* is enforced here by the signature: a caller
+/// cannot avoid deciding. `None` is still expressible, and it means *I have
+/// considered this and this fact is genuinely timeless*, which is a different
+/// act from never having been asked.
+///
+/// # What this reads, and what it does not
+///
+/// It goes through the sanctioned answer boundary — `WorldView::ask` — so every
+/// value it sees arrives with validity, trust axes, grade and provenance
+/// attached. It does NOT touch `ProjectedClaim`'s public fields, which was the
+/// 3a defect this migration closes.
+///
+/// It also does not resolve the object through the identity graph, even though
+/// the object names an entity. That composes two projections with independent
+/// checkpoints — 3c's question, and not one an answer this small may decide
+/// silently.
 pub fn mission_context(
     store: &WorldStore,
     subject: &ContextId,
     relation: &ContextId,
     candidates: &[ContextId],
     now_ms: i64,
+    staleness_budget_ms: Option<u64>,
 ) -> Result<ProposalContext, ContextError> {
-    let claims = store.current(subject.as_str(), now_ms)?;
+    let view = WorldView::new(store, staleness_budget_ms);
 
-    let preferred = claims.iter().find_map(|c| {
-        let predicate = c.predicate.as_deref()?;
-        if predicate != relation.as_str() {
+    let answers = match view.ask(subject.as_str(), now_ms)? {
+        WorldLookup::Answered(answers) => answers,
+        WorldLookup::Unknown(reason) => {
+            let silence = match reason {
+                UnknownReason::NoClaim => WorldSilence::NoClaim,
+                UnknownReason::NoneAdmissible => WorldSilence::NoneAdmissible,
+            };
+            return Ok(ProposalContext::silent(candidates, silence));
+        }
+    };
+
+    let matched = answers.iter().find_map(|a| {
+        if a.predicate()? != relation.as_str() {
             return None;
         }
-        let object = c.object.as_deref()?;
-        candidates.iter().find(|cand| cand.as_str() == object)
+        // The OBJECT, not the payload: the fact is a relationship, and the
+        // object is what it points at.
+        let object = a.object()?;
+        let candidate = candidates.iter().find(|c| c.as_str() == object)?;
+        Some((candidate, a))
     });
 
-    let Some(preferred) = preferred else {
-        // The world had nothing to say. Carry the candidates unchanged and
-        // express no preference — an ordering the caller already had is not a
-        // world-derived hint, but omitting it entirely would make "world silent"
-        // and "world absent" produce different shapes for the same knowledge.
-        return Ok(ProposalContext {
-            hints: vec![ContextHint::CandidatePriority(candidates.to_vec())],
-        });
+    let Some((preferred, answer)) = matched else {
+        return Ok(ProposalContext::silent(
+            candidates,
+            WorldSilence::NoCandidateMatched,
+        ));
     };
 
     let mut priority = Vec::with_capacity(candidates.len());
     priority.push(preferred.clone());
     priority.extend(candidates.iter().filter(|c| *c != preferred).cloned());
+
+    let grade = match answer.grade() {
+        Some(TrustGrade::Strong) => FactGrade::Graded("strong"),
+        Some(TrustGrade::Adequate) => FactGrade::Graded("adequate"),
+        Some(TrustGrade::Weak) => FactGrade::Graded("weak"),
+        // Cannot reach here — `is_admissible` filters it at the boundary — but
+        // mapped rather than collapsed, so a future change to that filter
+        // surfaces as a visible grade instead of a silent misreport.
+        Some(TrustGrade::Inadmissible) => FactGrade::Graded("inadmissible"),
+        None => FactGrade::Ungraded,
+    };
+    let freshness = match answer.validity() {
+        Validity::Fresh => FactValidity::Fresh,
+        Validity::Stale => FactValidity::Stale,
+        // `Expired` cannot reach here — the boundary filters it — but mapping it
+        // to `Timeless` would be a lie, so it is grouped with the honest
+        // "no judgement was made" rather than with "fresh".
+        Validity::Timeless | Validity::Expired => FactValidity::Timeless,
+    };
 
     Ok(ProposalContext {
         hints: vec![
@@ -238,7 +395,10 @@ pub fn mission_context(
                 relation: relation.clone(),
                 object: preferred.clone(),
             },
+            ContextHint::FactTrust(grade),
+            ContextHint::FactFreshness(freshness),
         ],
+        silence: None,
     })
 }
 
@@ -271,6 +431,7 @@ mod tests {
                 ContextHint::PreferDestination(dock_b.clone()),
                 ContextHint::CandidatePriority(vec![dock_b.clone(), dock_a.clone()]),
             ],
+            silence: None,
         };
         assert_eq!(c.preferred_destination(), Some(&dock_b));
         assert_eq!(c.candidate_priority(), Some([dock_b, dock_a].as_slice()));

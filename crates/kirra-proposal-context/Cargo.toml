@@ -21,5 +21,20 @@ license-file = "../../COPYRIGHT"
 publish = false  # proprietary (see COPYRIGHT) — not for crates.io
 
 [dependencies]
+# The SANCTIONED answer boundary. `kirra-world-service` is a library crate whose
+# own dependencies are exactly `kirra-world` + `kirra-world-store`, so routing
+# through `WorldView::ask` leaves this crate's transitive set — and therefore its
+# capability ceiling — unchanged. Before this, `mission_context` read
+# `ProjectedClaim`'s public fields directly, which is the very defect Tier 3 box
+# 3a exists to close.
+kirra-world-service = { path = "../kirra-world-service" }
 kirra-world = { path = "../kirra-world" }
 kirra-world-store = { path = "../kirra-world-store" }
+
+# `test-support` unlocks the store's raw-SQL escape hatch. `WorldSilence::
+# NoneAdmissible` cannot be reached through the sanctioned write path — that is
+# a pinned guarantee, not an oversight — so proving the consumer does not
+# COLLAPSE it into `NoClaim` requires planting the state behind the write path's
+# back. Same reason, and the same precedent, as `kirra-world-service`'s dev-dep.
+[dev-dependencies]
+kirra-world-store = { path = "../kirra-world-store", features = ["test-support"] }

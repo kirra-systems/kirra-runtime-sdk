@@ -2435,6 +2435,7 @@ name = "kirra-proposal-context"
 version = "0.1.0"
 dependencies = [
  "kirra-world",
+ "kirra-world-service",
  "kirra-world-store",
 ]
 
