@@ -157,12 +157,28 @@ pub fn contract_digest_hex(contract: &VehicleKinematicsContract) -> String {
     let digest = h.finalize();
     let mut out = String::with_capacity(64);
     for byte in digest {
-        // Hand-rolled rather than pulling `hex` into the lean foundation for
-        // one call site.
-        out.push(char::from_digit(u32::from(byte >> 4), 16).expect("nibble < 16"));
-        out.push(char::from_digit(u32::from(byte & 0x0f), 16).expect("nibble < 16"));
+        // Hand-rolled rather than pulling `hex` into the lean foundation for one
+        // call site — and TOTAL: no indexing, no `Option`, no `expect`. The mask
+        // makes the arithmetic in-range for every input, so there is no panic
+        // branch here at all, reachable or otherwise. Capture is a side channel
+        // that must never be able to take the process down.
+        out.push(lower_hex_nibble(byte >> 4));
+        out.push(lower_hex_nibble(byte));
     }
     out
+}
+
+/// The low nibble of `n` as a lowercase hex digit. Total by construction: the
+/// mask bounds the input to `0..=15`, so both branches stay inside ASCII and
+/// neither can overflow.
+#[inline]
+fn lower_hex_nibble(n: u8) -> char {
+    let n = n & 0x0f;
+    if n < 10 {
+        (b'0' + n) as char
+    } else {
+        (b'a' + (n - 10)) as char
+    }
 }
 
 /// Build a record from the already-computed gateway verdict + context. Pure;
@@ -704,6 +720,18 @@ mod tests {
                 .all(|ch| ch.is_ascii_hexdigit() && !ch.is_ascii_uppercase()),
             "must be lowercase hex: {a}"
         );
+    }
+
+    /// The hand-rolled hex encoder agrees with the standard formatter for EVERY
+    /// byte value. A hand-rolled encoder without an exhaustive check is a
+    /// liability: a wrong nibble would corrupt digests silently, and every
+    /// comparison downstream would still "pass" by comparing two corrupt values.
+    #[test]
+    fn the_hex_encoder_matches_the_standard_formatter_for_all_256_bytes() {
+        for b in 0u8..=255 {
+            let hand = format!("{}{}", lower_hex_nibble(b >> 4), lower_hex_nibble(b));
+            assert_eq!(hand, format!("{b:02x}"), "byte {b}");
+        }
     }
 
     /// The `Option` is length-tagged, so `None` and `Some` are never confusable.
