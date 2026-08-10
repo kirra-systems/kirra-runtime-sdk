@@ -1,0 +1,25 @@
+# crates/kirra-proposal-context/Cargo.toml
+#
+# Tier 2.5's sanctioned consumer (KIRRA-WM-CONSUMER-PLACEMENT-001): the ONLY
+# crate whose job is turning Kirra World knowledge into proposal-shaping context.
+#
+# THE DEPENDENCY LIST IS THE POINT, so it is stated as a rule rather than left to
+# inspection: the only Kirra dependencies are `kirra-world` and
+# `kirra-world-store`. In particular NOT `kirra-core` — that is where
+# `CorridorSource` and `VehicleKinematicsContract` live, and a crate that can
+# NAME a checker-bound type is one refactor away from producing one. If this
+# crate ever needs a geometric primitive it defines its own; it does not reach
+# for the checker's.
+[package]
+name = "kirra-proposal-context"
+version = "0.1.0"
+edition = "2021"
+rust-version.workspace = true
+description = "Non-authoritative Kirra World consumer: translates world knowledge into symbolic proposal-shaping context. Produces no checker bounds."
+repository = "https://github.com/kirra-systems/kirra-runtime-sdk"
+license-file = "../../COPYRIGHT"
+publish = false  # proprietary (see COPYRIGHT) — not for crates.io
+
+[dependencies]
+kirra-world = { path = "../kirra-world" }
+kirra-world-store = { path = "../kirra-world-store" }
