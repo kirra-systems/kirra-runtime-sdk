@@ -4,11 +4,14 @@
   "max_violations": 0,
   "why_zero": "This is not an aspiration being ratcheted down. The one real violation -- mission_context reading ProjectedClaim's public fields off store.current(..) -- was repaired by boxes 3a (#1430) and 3c (#1431), so the tree is already clean. The ceiling starts at 0 and has nowhere to go.",
   "permitted_readers": {
-    "kirra-world-store": "Owns the projection tables. Gating the crate that defines them would be circular.",
     "kirra-world-service": "IS the answer boundary. Its whole job is to read a projection and wrap it in validity, trust axes, provenance and identity resolution -- this is the one crate that must call these methods.",
-    "wm2-persistence-harness": "ADR-0041 measurement instrument. WM_SCOPE names the WM-2 harness as a legitimate reader below the engine: it measures storage behaviour, which is not a domain question.",
-    "wm2-schema-growth": "ADR-0041 D-20 measurement instrument, same carve-out as the persistence harness."
+    "wm2-schema-growth": "ADR-0041 D-20 measurement instrument. WM_SCOPE names the WM-2 harness as a legitimate reader below the engine: it measures storage behaviour, which is not a domain question."
   },
-  "on_adding_a_permitted_reader": "Do not. A new domain consumer going through the boundary needs no entry here, and one that cannot is the regression this gate exists to catch. If an entry is genuinely required, it belongs in review with the reason written above -- which is why this is a JSON file with a prose field rather than a regex in the gate.",
+  "not_listed_because_never_in_scope": {
+    "kirra-world-store": "Owns the projection tables and cannot depend on itself, so it is never scanned. An entry here would have described a decision nobody is making -- it was removed after the gate's own stale-exemption check flagged it.",
+    "wm2-persistence-harness": "Does NOT depend on kirra-world-store; its manifest only discusses the dependency in a comment explaining why it stays out. An earlier substring-matching draft of the gate pulled it into scope on that comment and carried a written justification for an exemption it never needed. Caught in review on #1432.",
+    "kirra-mission-orchestrator": "Depends on kirra-world-store as a DEV-dependency only, which is unreachable from src/ -- the only tree this gate scans. Its own module docs say it does not depend on kirra-world* at all."
+  },
+  "on_adding_a_permitted_reader": "Do not. A new domain consumer going through the boundary needs no entry here, and one that cannot is the regression this gate exists to catch. If an entry is genuinely required, it belongs in review with the reason written above -- which is why this is a JSON file with a prose field rather than a regex in the gate. Note the gate FAILS on an entry that is not in scope, so a carve-out cannot outlive its reason.",
   "violations": []
 }

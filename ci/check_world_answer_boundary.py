@@ -68,6 +68,7 @@ from __future__ import annotations
 import json
 import re
 import sys
+import tomllib
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -93,7 +94,21 @@ DOMAIN_READ_METHODS = (
     "load_entity_projection",
 )
 
-_CALL_RE = re.compile(r"\.\s*(" + "|".join(DOMAIN_READ_METHODS) + r")\s*\(")
+# Both call syntaxes. `.current(..)` is how anyone would write it; but
+# `WorldStore::current(store, ..)` is the same call in UFCS form, and a regex
+# that only knew the first would advertise zero tolerance while leaving a
+# syntactic door open — the exact overclaim this gate exists to prevent
+# elsewhere. `::` also catches the aliased (`WS::current`) and fully-qualified
+# (`<WorldStore as T>::current`) spellings.
+_CALL_RE = re.compile(r"(?:\.|::)\s*(" + "|".join(DOMAIN_READ_METHODS) + r")\s*\(")
+
+# Dependency tables whose presence means the crate's `src/` can reach the store.
+# `dev-dependencies` is deliberately NOT here: a dev-dependency is unavailable to
+# `src/`, which is the only tree this gate scans, so a crate that dev-depends on
+# the store cannot commit the violation. Including it would put crates in the
+# scope report that were never at risk — `kirra-mission-orchestrator` is exactly
+# that case, and its own module docs say so.
+_DEP_TABLES = ("dependencies", "build-dependencies")
 
 
 def _strip_comments_and_strings(text: str) -> str:
@@ -123,13 +138,25 @@ def crate_name(manifest: Path) -> str:
 
 
 def depends_on_world_store(manifest: Path) -> bool:
-    """True iff this manifest names `kirra-world-store` as a dependency.
+    """True iff this manifest names `kirra-world-store` in a dependency table
+    reachable from `src/`.
 
-    Read from the manifest rather than resolved through cargo metadata: this
-    gate must run standalone in CI without a build, and a direct dependency is
-    exactly the relationship that makes the calls reachable.
+    Parsed, not substring-matched. A raw `"kirra-world-store" in text` search
+    also matches the crate name in a COMMENT, and two manifests in this repo
+    discuss the dependency in prose precisely to explain why they must not have
+    it — `wm2-persistence-harness` was pulled into scope on the strength of a
+    comment saying it stays out. A gate whose scope is decided by prose it does
+    not understand reports a dependency graph that does not exist.
+
+    Read from the manifest rather than via `cargo metadata` so the gate runs
+    standalone in CI without a build.
     """
-    return "kirra-world-store" in manifest.read_text(encoding="utf-8")
+    data = tomllib.loads(manifest.read_text(encoding="utf-8"))
+    tables = [data.get(t, {}) for t in _DEP_TABLES]
+    # `[target.'cfg(..)'.dependencies]` reaches `src/` just as plainly.
+    for target in data.get("target", {}).values():
+        tables.extend(target.get(t, {}) for t in _DEP_TABLES)
+    return any("kirra-world-store" in table for table in tables)
 
 
 def load_baseline() -> dict:
@@ -155,6 +182,20 @@ def in_scope_crates() -> list[tuple[str, Path]]:
         if depends_on_world_store(manifest):
             out.append((crate_name(manifest), manifest.parent))
     return out
+
+
+def stale_exemptions() -> list[str]:
+    """Permitted readers that are not actually in scope.
+
+    An exemption list only stays honest if entries disappear when they stop
+    being needed. This gate shipped with one such entry already —
+    `wm2-persistence-harness`, admitted on a substring match against a comment —
+    carrying a written justification for an exemption it never required. That is
+    how a carve-out list rots: every entry looks reasoned, and nothing checks
+    whether it is still load-bearing.
+    """
+    in_scope = {name for name, _ in in_scope_crates()}
+    return sorted(set(load_baseline()["permitted_readers"]) - in_scope)
 
 
 def collect() -> tuple[list[dict], list[str], list[str]]:
@@ -314,6 +355,73 @@ def t06_operational_reads_are_not_flagged() -> None:
     )
 
 
+def t07a_ufcs_is_caught_as_well_as_method_syntax() -> None:
+    method = scan_source("fn f() { store.current(s, n); }", "m")
+    ufcs = scan_source("fn f() { WorldStore::current(store, s, n); }", "u")
+    aliased = scan_source("fn f() { WS::current(store, s, n); }", "a")
+    qualified = scan_source("fn f() { <WorldStore as T>::current(store, s); }", "q")
+    missing = [
+        n
+        for n, got in [
+            ("method", method),
+            ("ufcs", ufcs),
+            ("aliased", aliased),
+            ("fully-qualified", qualified),
+        ]
+        if not got
+    ]
+    record(
+        not missing,
+        "t07a_ufcs_is_caught_as_well_as_method_syntax",
+        f"same call, undetected spelling(s): {missing}" if missing else "",
+    )
+
+
+def t07b_a_comment_mentioning_the_crate_is_not_a_dependency() -> None:
+    import tempfile
+
+    manifest = (
+        '# The harness must not depend on `kirra-world-store`. Its manifest\n'
+        '# says so, and this comment is the reason why.\n'
+        '[package]\nname = "prose-only"\nversion = "0.1.0"\n'
+        '[dependencies]\nserde = "1"\n'
+    )
+    with tempfile.TemporaryDirectory() as d:
+        path = Path(d) / "Cargo.toml"
+        path.write_text(manifest, encoding="utf-8")
+        record(
+            not depends_on_world_store(path),
+            "t07b_a_comment_mentioning_the_crate_is_not_a_dependency",
+            "a crate is in scope because a comment names the dependency it avoids",
+        )
+
+
+def t07c_a_real_dependency_is_still_detected() -> None:
+    import tempfile
+
+    manifest = (
+        '[package]\nname = "real"\nversion = "0.1.0"\n'
+        '[dependencies]\nkirra-world-store = { path = "../x" }\n'
+    )
+    with tempfile.TemporaryDirectory() as d:
+        path = Path(d) / "Cargo.toml"
+        path.write_text(manifest, encoding="utf-8")
+        record(
+            depends_on_world_store(path),
+            "t07c_a_real_dependency_is_still_detected",
+            "the parse tightened past the point of detecting anything",
+        )
+
+
+def t07d_no_permitted_reader_is_stale() -> None:
+    stale = stale_exemptions()
+    record(
+        not stale,
+        "t07d_no_permitted_reader_is_stale",
+        f"exemptions carried for crates not in scope: {stale}" if stale else "",
+    )
+
+
 def t07_the_live_tree_is_clean() -> None:
     violations, checked, _ = collect()
     record(
@@ -388,10 +496,22 @@ def main() -> int:
         print()
         if violations:
             for v in violations:
-                print(f"  {v['file']}:{v['line']}  .{v['method']}(  {v['source']}")
+                print(f"  {v['file']}:{v['line']}  {v['method']}(..)  {v['source']}")
         else:
             print("  no direct domain reads")
         return 0
+
+    stale = stale_exemptions()
+    if stale:
+        print("Answer-boundary gate FAILED — stale exemption(s) in the baseline.")
+        print()
+        for name in stale:
+            print(f"  {name} is on `permitted_readers` but is not in scope.")
+        print()
+        print("  An exemption for a crate the gate never scans is a written")
+        print("  justification for a decision nobody is making. Remove it, or")
+        print("  record it under `not_listed_because_never_in_scope`.")
+        return 1
 
     ceiling = baseline["max_violations"]
     if len(violations) > ceiling:
@@ -400,7 +520,7 @@ def main() -> int:
         for v in violations:
             print(f"  {v['file']}:{v['line']}")
             print(f"      {v['source']}")
-            print(f"      `.{v['method']}(` reads a projection directly.")
+            print(f"      `{v['method']}(..)` reads a projection directly.")
         print()
         print("  A domain consumer must ask through the answer boundary:")
         print("      let view = WorldView::new(store, staleness_budget_ms);")

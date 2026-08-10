@@ -2662,14 +2662,38 @@ NAMES `&WorldStore` and passes it to `WorldView::new`, and a gate that flagged
 that would be unusable.
 
 **Scope is self-maintaining, which is the part that matters in six months.**
-Every crate *depending on* `kirra-world-store` is checked; permitted readers are
-named in the baseline with a reason each. So a NEW domain consumer is covered
-from its first commit, without anyone remembering to add it — undoing 3a by
-writing a fresh consumer is the same regression as undoing it in place, and a
-hand-maintained list of watched crates would have missed it. Crates without the
-dependency are not scanned at all, since they cannot make the call and scanning
-them could only manufacture false positives from unrelated `history()` /
-`candidates()` methods.
+Every crate whose `src/` can reach `kirra-world-store` — a normal or build
+dependency, parsed from the manifest — is checked; permitted readers are named in
+the baseline with a reason each. So a NEW domain consumer is covered from its
+first commit, without anyone remembering to add it: undoing 3a by writing a fresh
+consumer is the same regression as undoing it in place, and a hand-maintained
+list of watched crates would have missed it. Crates that cannot make the call are
+not scanned, since doing so could only manufacture false positives from unrelated
+`history()` / `candidates()` methods.
+
+**Three scope corrections came out of review, and they were all the same
+mistake** — deciding scope from text the gate did not understand. The first draft
+substring-matched the manifest, so `wm2-persistence-harness` was pulled in on a
+COMMENT saying it deliberately does not take the dependency, and then carried a
+written justification for an exemption it never needed. `kirra-world-store` was
+listed too, though it cannot depend on itself and is therefore never scanned. And
+`kirra-mission-orchestrator` reaches the store only as a DEV-dependency, which
+`src/` cannot use — its own module docs say it does not depend on `kirra-world*`
+at all. The manifest is now parsed, and the baseline records all three under
+`not_listed_because_never_in_scope` rather than pretending they were decisions.
+
+**The gate now fails on a stale exemption**, which is the general form of that
+mistake. An exemption for a crate the gate never scans is a written
+justification for a decision nobody is making, and that is how a carve-out list
+rots: every entry looks reasoned, and nothing checks whether it is still
+load-bearing. Both stale entries above were found by this check on its first run,
+against the baseline I had just written.
+
+**Both call syntaxes are detected.** `.current(..)` is how anyone would write it,
+but `WorldStore::current(store, ..)` is the same call in UFCS form — also caught,
+along with the aliased and fully-qualified spellings. A gate advertising zero
+tolerance while leaving a syntactic door open is the exact overclaim it exists to
+prevent elsewhere.
 
 **The operational carve-out needs no exception list.** WM_SCOPE names
 `verify_chain`, `schema_version`, backup/export, the retention driver, the
@@ -2689,9 +2713,10 @@ code, so gating `src/` closes the production path completely.
 **Non-vacuity, end to end rather than in a string.** Reintroducing
 `store.current(subject.as_str(), now_ms)?` into the live
 `kirra-proposal-context/src/lib.rs` reds the gate with the file, line and rule;
-removing it greens. And the anti-neutering case is pinned: moving
-`kirra-proposal-context` onto the permitted list fails
-`t08_the_gate_watches_the_repaired_consumer`, and a baseline where *every*
-dependant is permitted fails with *"no crate is in scope — that is how a ratchet
-dies quietly"*. Eight self-test cases, with the same uncollected-case guard the
+removing it greens — in both the method-call and the UFCS spelling. And the
+anti-neutering cases are pinned: moving `kirra-proposal-context` onto the
+permitted list fails `t08_the_gate_watches_the_repaired_consumer`; a baseline
+where *every* dependant is permitted fails with *"no crate is in scope — that is
+how a ratchet dies quietly"*; and re-adding a stale exemption fails the gate
+itself. Twelve self-test cases, with the same uncollected-case guard the
 symbolic-seam suite carries.
