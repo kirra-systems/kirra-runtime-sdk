@@ -2057,6 +2057,81 @@ proving set — not on every conceivable query. The minimum set:
 
 New domain queries can then be added without changing the Tier 3 trust model.
 
+### `KIRRA-WM-CONSUMER-WITNESS-001` — RULED 2026-08-10
+
+> **Every Tier 3 contract change must be exercised by at least one real consumer
+> whose behaviour would fail visibly if the contract became semantically empty.**
+
+The word carrying the rule is *semantically*. Unit coverage catches a contract
+that returns the **wrong** thing; it does not catch one that returns a
+well-formed **nothing**, because a test asserting `Unknown` against an empty
+store passes identically whether the query is correct or broken. That is exactly
+the shape of the `rebuild_entity_projection` bug found building Tier 2.5 — every
+write succeeded, every fold succeeded, and the query returned a perfectly valid
+empty answer that was indistinguishable from "the world knows nothing".
+
+**The witness must fail on the POSITIVE arm.** A consumer that merely *reads* an
+answer and logs it satisfies the letter of this rule and witnesses nothing — the
+same vacuity, one level up. `mission_context` qualifies because a semantically
+empty answer collapses run B onto run A and the closure differential goes red.
+
+### Tier 3 audited against its first real consumer — 2026-08-10
+
+Run before implementing further boxes, because *"what would this consumer force
+us to get right"* is a different question from *"what does the box say"*, and
+where they disagree the consumer holds the evidence. Every claim below was
+checked against the code; two of them contradict what a first reading suggested.
+
+**FINDING 1 — the first real consumer does not use the answer boundary, and
+that is 3a's exact defect.** `mission_context` calls `WorldStore::current`
+directly and reads `ProjectedClaim`'s public `.predicate` / `.object` with no
+validity, no trust and no provenance — verbatim the hole 3a records
+(`…current(...)?[0].payload` compiling with none of them). It also makes the
+consumer a **direct domain read of a projection table**, which 3d says must be
+mechanically gated. So the consumer is currently the violation 3d would forbid.
+
+Not because the boundary is wrong: because of a dependency ceiling chosen without
+noticing the consequence. `WorldAnswer` lives in `kirra-world-service`, and the
+consumer's ceiling was set at `kirra-world` + `kirra-world-store`. That is **not**
+a real barrier — `kirra-world-service` is a library crate (`pub mod read_view`)
+whose own dependencies are exactly those two, so routing through `WorldView::ask`
+leaves the transitive set, and therefore the capability limit, unchanged.
+
+**FINDING 2 — 3e is live, and the default is affirmative rather than absent.**
+`current()` filters the validity WINDOW (`holds_at`: not-yet-in-force and
+past-`valid_to` are both excluded), so the consumer never reads an expired claim.
+But nothing supplies a staleness budget, and `validity_at` with
+`staleness_budget_ms: None` returns **`Validity::Timeless`** — not "unknown
+freshness" but a positive claim of time-independence. "Where was the package last
+seen" is about as recency-sensitive as this domain gets, so a year-old
+observation is currently served with the same standing as a fresh one, under a
+label asserting that is fine. 3e's *"no implicit default for recency-sensitive
+semantics"* has a sharper meaning here than the box implies.
+
+**FINDING 3 — the trust gap is narrower than it first appears.** `world_current`
+folds `claim_status = 'confirmed'` only, so an `LlmCandidate` writer — which may
+only ever produce `Candidate` — cannot reach this consumer at all. The residual
+gap is not exposure to untrusted claims; it is that the consumer never asks for a
+grade, and `grade_at` returns `None` for an unlabelled claim rather than a
+default. Recorded because the alarming version of this finding is the wrong one.
+
+**FINDING 4 — 3c is not yet exercised, and the trigger is identifiable.** One
+projection, one read, so there is no multi-projection coherence question today.
+It becomes live the moment the consumer resolves its subject through identity —
+`package_17` reached via an alias — because that composes `world_current` with the
+entity projection, and the two carry independent checkpoints.
+
+**FINDING 5 — 3g is satisfied vacuously here, for a reason already recorded.**
+`current()` cannot degrade (3a's first exclusion: `compact_range` clamps below any
+generation joined to `world_current`), so a completeness axis on this path would
+be structurally always `Full`. 3g becomes real for this consumer only when it
+asks something that can degrade.
+
+**What the audit changes about the order.** Boxes 3a and 3d have a live consumer
+that violates them today; 3e has a live consumer that is silently mislabelled.
+Those three come before 3b, 3c, 3f and 3h — not because the checklist orders them
+that way, but because something real is currently wrong.
+
 ---
 
 ## 7. Tier 4 — `Explain`, the flagship
