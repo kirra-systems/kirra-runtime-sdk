@@ -1471,7 +1471,13 @@ A continuation of rules 1–3 above, not a replacement: **rule 1 becomes the for
 answer-boundary contract (3a), rule 2 remains the bounded-query rule
 (cross-cutting), rule 3 stands verbatim** as the payload axis's `Unknown`.
 
-- [ ] **3a — Answer envelope + provenance contract.** Payload owns the domain
+- [x] **3a — Answer envelope + provenance contract** — **COMPLETE for the
+      `current()` / `ask()` answer family, 2026-08-10, with the exclusions
+      below.** Not complete for families that do not yet exist; each will have
+      to meet this box again on its own terms, and two of the exclusions below
+      exist *because* those families are absent rather than because the fields
+      are unwanted.
+      Payload owns the domain
       outcome; envelope owns completeness, freshness, provenance and versions.
       **This box already has a falsified predecessor, which is why it exists in
       this shape rather than as a fresh idea:** rule 1 was tested against a real
@@ -1514,12 +1520,42 @@ answer-boundary contract (3a), rule 2 remains the bounded-query rule
         degrade — `as_of`, `history`, lineage retrieval — none of which exist yet.
       * **Version** — no reducer version exists to carry. Minting one here would
         be the decorative metadata 3b forbids; it lands with 3b's enforcement.
-      * **`AnswerRef`** — absent, and blocked on a capability rather than on
+      * **`AnswerRef`** — absent, and blocked on a **capability** rather than on
         effort: `KIRRA-WM-ANSWER-IDENTITY-001` requires re-execution *against the
         same snapshot*, and there is no generation-pinned read of `world_current`
-        to re-execute against. A ref could honestly record the generation
-        observed and let a later ask **detect divergence**, but that is weaker
-        than the ruling states and needs its own decision.
+        to re-execute against. `projection_generation()` can report the
+        coordinate; nothing can read *at* it.
+
+### `KIRRA-WM-ANSWERREF-NAMING-001` — RULED 2026-08-10
+
+> **The name `AnswerRef` is reserved for the ruled guarantee — re-execution
+> against the same snapshot. A weaker capability may be built, but not under
+> that name.**
+
+A ref that records the observed projection coordinate and lets a later ask
+**detect drift** is genuinely useful, and is *not* snapshot replay. Shipping it
+as `AnswerRef` would put the ruled guarantee's name on a type that cannot honour
+it — and the cost is paid later and by someone else: a migration spent teaching
+callers which flavour of `AnswerRef` they were handed, with no way to tell from
+the type.
+
+If the weaker thing is wanted before pinned reads exist, it gets an honestly
+weaker name — `ObservedAnswerRef` or `AnswerCheckpoint` — whose contract reads:
+
+> records the query and the observed projection coordinate; re-execution may
+> **detect** drift, and does **not** promise snapshot replay.
+
+Recorded as a ruling rather than a preference because the pressure to reuse the
+ruled name will come from wanting the checklist to close, which is the same
+pressure that produced every stale claim this box already documents.
+
+- [ ] **Generation-pinned read (prerequisite for the ruled `AnswerRef`).**
+      Scoped separately because it is a **store capability**, not an answer-boundary
+      one: a way to read `world_current` *as of* a projection generation, so a
+      recorded coordinate can actually be re-executed against. Until it exists,
+      `KIRRA-WM-ANSWER-IDENTITY-001` is a ruling with no mechanism behind it —
+      stated plainly here so that gap is visible rather than inferred from
+      `AnswerRef`'s absence.
 - [ ] **3b — Rule / projection versioning.** Declared, behaviour-changing, and
       enforced by corpus + source pin (above). Not decorative metadata.
 - [ ] **3c — Snapshot consistency.** An answer composing several projections
