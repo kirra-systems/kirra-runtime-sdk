@@ -1371,9 +1371,49 @@ it was built for incident review, which has the same separation problem:
 
 **The smallest extension needed, therefore, is one field, not a new artifact:**
 the **kinematic contract identity** (vehicle class, or a digest over the resolved
-`VehicleKinematicsContract`) on the record. Without it, two runs can be shown to
-have had identical perception evidence and still not be shown to have been judged
-against the same envelope. Everything else part 4 requires is already captured.
+`VehicleKinematicsContract`). Without it, two runs can be shown to have had
+identical perception evidence and still not be shown to have been judged against
+the same envelope. Everything else part 4 requires is already captured.
+
+**Which record it goes on is decided by which witness can know it, and that is a
+narrower answer than "the record".** The stage events have three separate
+witnesses, and the contract identity is not available to the two that would be
+convenient:
+
+* The **interceptor** builds the release event by decoding the signed 176-byte V2
+  payload, and refuses anything else — a truncated payload decoded best-effort
+  "would attest fields that were never signed". The class is not in that payload.
+* **No witness on the robot can read `KIRRA_VEHICLE_CLASS`.** It lives in the
+  verifier's env (`kirra.env`, root 0600); `robot/doctor` records this explicitly
+  and infers the class was set only from the verifier being up.
+
+So a class field added to `PerceptionEvent` or `ProposalEvent` would be
+witness-*asserted*, not witness-*known* — the exact thing the release decoder
+refuses to do. **It belongs on `CaptureRecord`, which the verifier itself
+writes**, and it reaches the joined artifact through the `CaptureRecordRef` link
+that `kirra-cycle-record` already defines for precisely this division of labour:
+the joined record proves chain continuity, the verifier capture supports decision
+recomputation, and the two stay separate artifacts joined by reference. That the
+same field also closes `CaptureRecord`'s own gap above is not a coincidence — it
+is the same gap seen from two ends.
+
+**One honest cost, so step 2 is not mis-scoped: the schema change is one field,
+the wiring is not.** `gateway_capture_ref` is `Option`al and additive, and the
+Python emitter does not populate it today — the reference route exists in the Rust
+schema with no producer. Step 2 is therefore *field + producer*, and
+`CaptureRecord`'s wire shape is byte-pinned by two tests, so the pins move
+deliberately rather than incidentally. That is what a pin is for.
+
+**A cheaper route exists and is recorded as rejected-for-now rather than
+unnoticed.** `EffectiveConfig::effective_digest` is a SHA-256 over the boot-config
+snapshot that *includes* `vehicle_class`, is already committed as an
+`EffectiveConfigDigest` audit event at startup, and is already exportable through
+the auditor-tier audit export. Two arms with equal digests provably shared a
+class. It is rejected because it is too coarse in the wrong direction: the digest
+covers every captured config value, so two arms differing in anything incidental
+(a DB path, which a two-arm harness would plausibly vary) produce different
+digests and the check says *something* differed without saying what. A coarse
+check that fires on the harness's own setup trains people to ignore it.
 
 Two things deliberately **not** added:
 
