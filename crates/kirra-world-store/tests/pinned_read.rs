@@ -247,7 +247,63 @@ fn a_compacted_generation_refuses_rather_than_falling_forward() {
     cleanup(&path);
 }
 
+/// **Compaction ABOVE the pinned generation does NOT make it irreproducible.**
+///
+/// The control the rest of the compaction cases cannot supply, and the suite was
+/// VACUOUS without it: an implementation that refused on the mere existence of
+/// any citation — ignoring `lo_generation` entirely — passed every other test
+/// here, because every other compaction fixture removes a span BELOW the pin.
+///
+/// Rebuilding at `g` needs the confirmed events `<= g`. A span removed entirely
+/// above `g` took none of them, so the prefix is intact and the reconstruction
+/// is exact. Refusing here would make the pinned read useless in the one regime
+/// it is most needed: an old, heavily-compacted store where the interesting
+/// coordinates are precisely the ones below the compaction floor.
+#[test]
+fn compaction_above_the_pinned_generation_leaves_it_reproducible() {
+    let path = tmp("above-pin");
+    let mut store = WorldStore::open(&path).expect("open");
+    claim(&mut store, "1", "dock_old", T0);
+    claim(&mut store, "2", "dock_a", T0 + 1);
+    claim(&mut store, "3", "dock_b", T0 + 2);
+    store.fold().expect("fold");
+
+    // Generation 2 is superseded by 3, so it is compactable; 1 is left alone.
+    let outcome = store
+        .compact_range(2, 2, T0 + 5_000)
+        .expect("generation 2 is superseded");
+    assert_eq!(
+        outcome.removed, 1,
+        "the fixture must actually remove an event"
+    );
+
+    // The pin is BELOW everything that was removed, so the prefix survives.
+    assert_eq!(
+        pinned_object(&store, 1).as_deref(),
+        Some("dock_old"),
+        "a span removed above the pin took none of the events the pin folds —          refusing here would be over-refusal, not fail-closed"
+    );
+
+    // And the sibling case still refuses, so this is not a blanket relaxation.
+    assert!(
+        matches!(
+            store.read_at_generation(3).expect("pinned"),
+            PinnedRead::Irreproducible(Irreproducible::Compacted { .. })
+        ),
+        "a pin at or above the removed span must still refuse"
+    );
+
+    drop(store);
+    cleanup(&path);
+}
+
 /// **Compaction ends reproducibility for generations ABOVE the removed span too.**
+///
+/// Read the name from the SPAN's point of view: the pin sits above the span, so
+/// the span is below the pin and its removed events are inside the prefix being
+/// folded. The companion test above is the mirror — span above pin, prefix
+/// intact — and the two together are what make `lo_generation <= g` a decision
+/// rather than an accident.
 ///
 /// Rebuilding at generation 2 folds every confirmed event `<= 2`, and one of
 /// them is gone. The fold cannot be reproduced, whatever its result would have

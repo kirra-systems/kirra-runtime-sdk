@@ -2762,10 +2762,26 @@ may well have been superseded and made no difference, but it cannot be *shown* t
 have made none. Over-refusing costs availability; under-refusing returns a
 silently wrong reconstruction wearing the word "pinned".
 
-Worth stating plainly to whoever sets a retention horizon: **the compaction floor
-is also the floor on how far back answers stay reproducible.** That is a real
-operational consequence of the retention policy, and it was not visible before
-this existed.
+**`KIRRA-WM-REPRODUCIBILITY-HORIZON-001` (recorded here, to be carried into the
+`AnswerRef` contract):**
+
+> **Retention policy sets the historical reproducibility horizon for durable
+> answer references.** An `AnswerRef` is only as durable as the oldest generation
+> still reproducible from retained evidence and citations. "Durable reference"
+> must never be read as "forever replayable".
+
+That is a real operational consequence of the retention horizon and it was not
+visible before this existed: whoever sets a compaction policy is also setting how
+far back a recorded answer can be resolved. It belongs ON the ref's contract
+rather than in a footnote here, because the failure it prevents is someone
+storing refs as an audit artifact and discovering years later that the horizon
+swallowed them.
+
+The precise shape: a span removed BELOW a pinned generation ends its
+reproducibility, because the pin folds that prefix. A span removed entirely ABOVE
+it does not, because the prefix is untouched — both directions are pinned by
+tests, and the pair is what makes `lo_generation <= g` a decision rather than an
+accident.
 
 **A negative generation is an error, not an outcome.** Rule 3's split:
 `Irreproducible` reports facts about the DATA — this was compacted, this has not
@@ -2776,10 +2792,22 @@ reconstructs the empty projection that preceded every event.
 
 | Mutation | Caught by |
 |---|---|
-| fall forward to current state when compacted | both compaction tests |
+| fall forward to current state when compacted | 3 compaction tests |
 | clamp a future generation to the head | `a_generation_ahead_of_the_head_refuses` |
-| read the live table instead of replaying | 4 tests, incl. the positive witness |
+| read the live table instead of replaying | 5 tests, incl. the positive witness |
 | test span containment instead of overlap | both compaction tests |
+| **refuse on ANY citation, ignoring `lo_generation`** | `compaction_above_the_pinned_generation_leaves_it_reproducible` |
+
+**The last row is there because the suite was vacuous without it, and the gap was
+found in review rather than by writing it.** Every other compaction fixture
+removes a span BELOW the pin, so an implementation that refused on the mere
+existence of any citation passed all eight original tests. The missing control is
+the mirror case — a span removed entirely ABOVE the pin leaves the folded prefix
+intact, so the reconstruction is exact and refusing would be over-refusal rather
+than fail-closed. Without it, `lo_generation <= g` was an accident the tests could
+not tell from a blanket refusal, and the pinned read would have been useless in
+the regime it is most needed: an old, heavily-compacted store where the
+interesting coordinates are precisely those below the compaction floor.
 
 The compaction fixture is built so that falling forward returns a *plausible,
 non-empty, wrong* answer — `dock_a` where `dock_old` was the truth — because a

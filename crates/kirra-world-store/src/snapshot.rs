@@ -603,10 +603,18 @@ pub(crate) fn compacted_at_or_below(
 
 /// Fold every confirmed event up to `generation` into the projection it produced.
 ///
-/// The same reducer the live fold uses (`projection::fold_all`), over the same
-/// confirmed-only filter, in the same generation order — so this is not a second
-/// implementation of the projection that could drift from the first. It is the
-/// one implementation, given a bounded input.
+/// The same reducer the live fold uses, over the same confirmed-only filter, in
+/// the same generation order — so this is not a second implementation of the
+/// projection that could drift from the first. It is the one implementation,
+/// given a bounded input.
+///
+/// Applied INCREMENTALLY via `projection::fold_step` rather than collecting into
+/// a `Vec` for `fold_all`. `fold_all` is exactly `fold_step` in a loop, so this
+/// is the identical reduction — it simply does not hold the whole history in
+/// memory at once on the way there, which for a pinned read near the head means
+/// the entire confirmed log. The accumulator is bounded by the KEY count; the
+/// buffer would have been bounded by the EVENT count, and those diverge without
+/// limit as a store ages.
 pub(crate) fn replay_to(
     conn: &Connection,
     generation: i64,
@@ -619,9 +627,12 @@ pub(crate) fn replay_to(
          WHERE generation <= ?1 AND claim_status = 'confirmed'
          ORDER BY generation ASC"
     ))?;
-    let rows = stmt.query_map(params![generation], claim_from_row)?;
-    let claims = rows.collect::<rusqlite::Result<Vec<_>>>()?;
-    Ok(projection::fold_all(claims))
+    let mut acc = BTreeMap::new();
+    let mut rows = stmt.query(params![generation])?;
+    while let Some(row) = rows.next()? {
+        projection::fold_step(&mut acc, claim_from_row(row)?);
+    }
+    Ok(acc)
 }
 
 pub(crate) fn table_exists(conn: &Connection, name: &str) -> Result<bool, StoreError> {
