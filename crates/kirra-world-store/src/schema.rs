@@ -112,6 +112,7 @@ pub const CHAIN_ALGORITHM: &str = "kirra-audit-hash/compute_record_hash_v2";
 /// | 2 | the four orthogonal trust axes, additive | 2026-08-07 |
 /// | 3 | the `subject_kind` discriminant | `KIRRA-WM-CANDIDATE-ID-001` |
 /// | 4 | the `entity_id_mint` ledger | `WM_SCOPE.md` §5 |
+/// | 5 | the object-requires-predicate trigger | `KIRRA-WM-CLAIM-SHAPES-001` |
 pub const SCHEMA_VERSION: i64 = 5;
 
 /// **v2 — the four orthogonal trust axes, added additively.**

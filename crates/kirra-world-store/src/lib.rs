@@ -926,14 +926,21 @@ fn sha256_hex(bytes: &[u8]) -> String {
 }
 
 /// SHA-256 of the **effective** schema text — [`schema::SCHEMA_V1`] followed by
-/// [`schema::SCHEMA_V2_MIGRATION`] — recorded in `world_store_meta` so a store
+/// every migration in order, currently through
+/// [`schema::SCHEMA_V5_MIGRATION`] — recorded in `world_store_meta` so a store
 /// can prove which exact schema produced it, not merely which version number
 /// someone claimed.
 ///
-/// A store migrated from v1 is re-stamped with this value, so a born-v2 store
-/// and a migrated one carry the **same** digest. That is correct and
-/// deliberate: they have the same effective schema, and a digest that
-/// distinguished them would be recording history rather than structure.
+/// **This list is part of the function's contract, so it is stated as a range
+/// rather than an enumeration that goes stale.** It named only v1 and v2 from
+/// v3 onward, and the digest it described had not matched the digest it computed
+/// for two migrations — exactly the drift the digest exists to detect, in the
+/// documentation of the thing detecting it.
+///
+/// A store migrated from an older version is re-stamped with this value, so a
+/// born-current store and a migrated one carry the **same** digest. That is
+/// correct and deliberate: they have the same effective schema, and a digest
+/// that distinguished them would be recording history rather than structure.
 /// [`schema_digest_v1`] remains available for reading a store that has not been
 /// migrated.
 #[must_use]
