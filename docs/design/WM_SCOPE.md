@@ -2127,10 +2127,75 @@ generation joined to `world_current`), so a completeness axis on this path would
 be structurally always `Full`. 3g becomes real for this consumer only when it
 asks something that can degrade.
 
+**FINDING 6 — the answer boundary cannot express the claim the consumer reads.
+The migration was stopped here rather than completed.**
+
+Finding 1's fix looked mechanical: point `mission_context` at `WorldView::ask`.
+Checking the mapping before writing it showed it is not.
+
+```rust
+// read_view.rs — WorldView::bind
+value: claim.payload.clone(),
+```
+
+`WorldAnswer` carries `subject` · `predicate` · `value(= payload)` and **drops
+`object` entirely**. But `mission_context` matches candidates against the claim's
+`object` (`dock_b`), and the store's projection carries `object` and `payload` as
+separate columns. The boundary models a **subject–predicate–payload** claim; the
+projection stores **subject–predicate–object–payload**.
+
+**What a mechanical translation would have done.** In this consumer's fixture the
+payload is `"{}"`, so the rewrite would have compared candidates against `"{}"`,
+matched nothing, and collapsed run B onto run A. It would have compiled. Both
+negative controls would still have passed — a context-blind producer shows no
+difference either way, and an unplaceable destination changes nothing either way.
+Only the positive assertion would have failed, which is exactly why
+`KIRRA-WM-CONSUMER-WITNESS-001` insists the witness fail on the positive arm.
+
+**So this is a gap in the 3a contract, not in the consumer.** A triple-shaped
+fact whose object *names an entity* — `package_17 last_seen_at dock_b` — cannot
+be expressed through the answer boundary at all. That is the clearest evidence
+yet that the boundary was specified without a consumer: nothing had ever needed
+to read an object, so nothing noticed the field was gone.
+
+**The question it forces, which is a contract question rather than a code one:**
+is `object` first-class, or is a relationship-to-an-entity meant to live inside
+`payload` for the caller to parse? The projection has both columns and the
+consumer uses `object`, so the store already answers *first-class* — and a
+boundary that drops it is lossy in a way no caller can work around.
+
+**And it pulls 3c forward.** If `object` is first-class and names an entity, then
+comparing it as a raw string is the wrong operation — it should resolve through
+the 2d identity graph, which composes `world_current` with the entity projection.
+Those carry independent checkpoints, so 3c's snapshot-consistency question
+arrives with the very first correct implementation of this query, earlier than
+finding 4 predicted.
+
 **What the audit changes about the order.** Boxes 3a and 3d have a live consumer
-that violates them today; 3e has a live consumer that is silently mislabelled.
-Those three come before 3b, 3c, 3f and 3h — not because the checklist orders them
-that way, but because something real is currently wrong.
+that violates them today; 3e has a live consumer that is silently mislabelled;
+and 3a additionally cannot represent the fact that the consumer reads. The revised
+sequence, each step forced by the consumer rather than by the checklist:
+
+1. **3a** — make `WorldAnswer` faithfully represent the stored claim: add
+   first-class `object`, keep `value()` as `payload`, leave subject / predicate /
+   validity / axes / grade / provenance unchanged. Migrate `mission_context` onto
+   `WorldView::ask`, **requiring the staleness budget at construction** so 3e's
+   no-implicit-default rule arrives with it rather than as a later discipline.
+   Keep `NoClaim` and `NoneAdmissible` distinguishable — today both collapse to
+   "no preference", losing exactly what Tier 3 exists to retain. Propagate the
+   categorical grade into `ContextHint` (a grade is categorical, not a magnitude,
+   so the symbolic-seam gate is unaffected). **Do not** resolve object identity
+   inside `WorldAnswer`.
+2. **3c** — the composed read now exists: `WorldAnswer.object` → identity
+   resolution → one snapshot coordinate. Prove subject/object resolution cannot
+   mix projection generations: same snapshot, or explicitly degraded/refused.
+   No approximate "close enough".
+3. **3d** — the ratchet, so 3a cannot be undone six PRs later. Direct projection
+   reads by domain consumers fail mechanically, with **the exact pre-fix
+   `mission_context` pattern as the negative fixture** rather than a synthetic
+   approximation — the same discipline as the symbolic-seam gate's control 3, and
+   it gives the gate a real provenance story: this bypass existed, was repaired,
+   and cannot return.
 
 ---
 
