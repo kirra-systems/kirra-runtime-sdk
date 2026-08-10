@@ -1515,10 +1515,101 @@ building the forbidden route.
 
 **What closure needs** is one more ruling: the production **proposal-orchestration
 boundary** — a seam through which symbolic context enters real proposal generation
-*without* the existing planner gaining a dependency on Kirra World. Its acceptance
-criterion is dependency direction, and its structural rule is the same shape as
-this section's: the orchestration host may not name or produce authoritative
-checker-input types. That ruling is not made here.
+*without* the existing planner gaining a dependency on Kirra World. It is made
+directly below.
+
+### `KIRRA-WM-ORCHESTRATION-BOUNDARY-001` — RULED 2026-08-10
+
+> **A production orchestration layer may consume `kirra-proposal-context` and
+> pass symbolic preferences into proposal generation, but the proposal producer
+> itself must remain World-blind, and no type crossing the seam may encode
+> checker bounds.**
+
+The clause that does the work is *"the proposal producer itself must remain
+World-blind."* The orchestration layer holds **both** edges — to Kirra World's
+consumer and to the planner — and neither the planner nor anything below it ever
+gains a world dependency. Direction is the whole mechanism:
+
+```text
+kirra-world → kirra-proposal-context → ORCHESTRATION HOST → kirra-planner → proposal
+                                                                                │
+──────────────────────────────────────────────────────────────────── checker boundary
+                                            CorridorSource / contract inputs → checker
+```
+
+**A new crate again, and the dependency direction is why.** Simulated before
+ruling rather than argued: a host depending on both `kirra-proposal-context` and
+`kirra-planner` was added to the workspace and the fence's own predicates run
+over it.
+
+| package | reaches `kirra-world*` |
+|---|---|
+| `kirra-mission-orchestrator` (the host) | **true** |
+| `kirra-sidecars` | false |
+| `kirra-planner` | false |
+| `kirra-core`, `kirra-map`, `kirra-taj`, `kirra-ros2-adapter` | false |
+
+The fence reported INTACT with the edge present, closure still 19 of 56. Every
+`CorridorSource` implementor stays world-free because the arrow points *from* the
+host *to* the planner: `kirra-sidecars → kirra-planner` is unchanged, and nothing
+depends on the host.
+
+### The one hop past the seam that needed its own rule
+
+`PlanInput` carries `Goal { target: Pose }`, and a `Pose` is coordinates. So
+somewhere between a symbolic `dock_b` and a real plan, a symbol becomes numbers.
+That hop is not optional, and leaving it unruled would quietly undo the symbolic
+seam one call later.
+
+> **The symbol→coordinate resolution must come from the mission/map
+> configuration, never from Kirra World.**
+
+Kirra World may say *which* destination; it may not say *where* that destination
+is. The orchestrator resolves the chosen symbol against coordinates it already
+held, so world knowledge selects among numbers that already existed rather than
+authoring one. Without this, "symbolic only" would hold at the seam and be lost
+at the first hop past it — and a world-authored `Pose` is a world-authored
+number sitting one type away from the planner's input.
+
+Note what this does *not* claim: `Goal` is a proposal input, not a checker input.
+The checker bounds the trajectory the planner emits; it never reads the goal. The
+rule exists because the discipline should not evaporate the moment it becomes
+inconvenient, not because a goal is a bound.
+
+**Two further consequences,** both following from "may not name or produce
+authoritative checker-input types":
+
+* The host may not construct, wrap, or modify the `CorridorSource` it passes
+  through to `PlanInput`. It forwards the map it was given.
+* The host may not read a checker verdict and re-plan against its numeric
+  content. Reading *that* a proposal was refused is operational; reading *by how
+  much* is reading a bound.
+
+### Tier 2.5 closure conditions — the eight, fixed
+
+Tier 2.5 closes when all eight hold, over one production path:
+
+1. The production host depends on `kirra-proposal-context`.
+2. It passes symbolic context into a **real** proposal producer.
+3. The proposal producer remains World-blind.
+4. `kirra-planner` gains no Kirra World dependency.
+5. `kirra-sidecars` remains World-free transitively.
+6. Fence B stays green with the new production edge.
+7. A differential scenario proves World-present vs World-absent changes the
+   proposal.
+8. The checker-bound evidence and contract identity are **unchanged** across that
+   pair — `evidence_digest` and `contract_digest` identical, `proposal_digest`
+   different.
+
+Criterion 8 is the one the whole milestone is for, and it is only assertable
+because #1423 put the resolved-contract identity on the record. Criteria 7 and 8
+must be asserted over the **same** pair of runs; asserted separately, 7 would pass
+on a run pair that also moved the bounds.
+
+Which preserves, mechanically rather than as a slogan:
+
+> **Kirra World may change what is proposed. It may not change the inputs from
+> which the checker derives what is permitted.**
 
 ---
 
