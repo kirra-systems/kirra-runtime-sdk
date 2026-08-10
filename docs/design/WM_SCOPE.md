@@ -2005,8 +2005,10 @@ pressure that produced every stale claim this box already documents.
       `as_known_at` over a multi-projection answer is otherwise approximately a
       lie. `IdentityView` already records the single-snapshot argument for one
       walk; this is that argument across projections.
-- [ ] **3d — Typed query engine.** The only supported path for **domain
-      questions**. Operational reads are explicitly carved out — `verify_chain`,
+- [~] **3d — Typed query engine.** The RATCHET half is ✅ **DONE 2026-08-10**
+      (`ci/check_world_answer_boundary.py`); the typed engine itself is still
+      open — see *"3d's ratchet closed ahead of its engine"* below. The only
+      supported path for **domain questions**. Operational reads are explicitly carved out — `verify_chain`,
       `schema_version`, backup/export, the retention driver, the compaction
       planner and the WM-2 measurement harness all legitimately read below it,
       and a rule that forbade them would be false on the day it was written.
@@ -2237,12 +2239,11 @@ sequence, each step forced by the consumer rather than by the checklist:
    `WorldAnswer.object` → identity resolution → one snapshot coordinate. Closed
    on the STRONG arm (one snapshot) rather than the degraded one, and the
    subject is deliberately excluded — see below for both reasons.
-3. **3d** — the ratchet, so 3a cannot be undone six PRs later. Direct projection
-   reads by domain consumers fail mechanically, with **the exact pre-fix
-   `mission_context` pattern as the negative fixture** rather than a synthetic
-   approximation — the same discipline as the symbolic-seam gate's control 3, and
-   it gives the gate a real provenance story: this bypass existed, was repaired,
-   and cannot return.
+3. **3d** — ✅ **RATCHET DONE 2026-08-10.** Direct projection reads by domain
+   consumers fail mechanically, with the exact pre-fix `mission_context` pattern
+   as the negative fixture. The typed query engine it will eventually guard is
+   still to be built; the gate does not wait for it, because the bypass it stops
+   is reachable today.
 
 ### 3a closed against its consumer — 2026-08-10
 
@@ -2632,3 +2633,90 @@ one-off mutation — `the_unguarded_composition_observes_the_fold_it_should_not`
 runs the identical interleaving through the ordinary `&self` readers and asserts
 it DOES observe the concurrent fold. If that control ever goes
 green-by-agreement, the snapshot test has stopped being asked a real question.
+
+
+### 3d's ratchet closed ahead of its engine — 2026-08-10
+
+Box 3d has two halves: a typed query engine, and a mechanical gate making it the
+only path for domain questions. **The gate shipped first, deliberately.** The
+engine is a design still to be done; the bypass it will guard is one autocomplete
+away right now, and 3a's repair is worth exactly as much as the thing stopping it
+from being undone.
+
+`ci/check_world_answer_boundary.py` + `ci/world_answer_boundary_baseline.json`,
+wired into the guardrails job with its self-test.
+
+**The rule.** A crate that asks the world DOMAIN questions goes through
+`kirra_world_service::WorldView`. It may not call the projection-read API on
+`WorldStore` (`current`, `current_all`, `as_of`, `history`, `candidates`,
+`read_snapshot`, `identity_view*`, `resolve_at`, `load_entity_projection`).
+
+**The negative fixture is the code that shipped**, quoted verbatim from
+`0ad203ee` rather than approximated — `store.current(..)` followed by
+`c.predicate.as_deref()` / `c.object.as_deref()`. A gate whose fixture is a
+synthetic `store.current()` proves it can find a string, not that it would have
+found *this* bug. Same discipline as the symbolic-seam gate's control 3, and it
+gives the gate a provenance story: this bypass existed, was repaired, and cannot
+return. The self-test also pins the *positive* case — the repaired function still
+NAMES `&WorldStore` and passes it to `WorldView::new`, and a gate that flagged
+that would be unusable.
+
+**Scope is self-maintaining, which is the part that matters in six months.**
+Every crate whose `src/` can reach `kirra-world-store` — a normal or build
+dependency, parsed from the manifest — is checked; permitted readers are named in
+the baseline with a reason each. So a NEW domain consumer is covered from its
+first commit, without anyone remembering to add it: undoing 3a by writing a fresh
+consumer is the same regression as undoing it in place, and a hand-maintained
+list of watched crates would have missed it. Crates that cannot make the call are
+not scanned, since doing so could only manufacture false positives from unrelated
+`history()` / `candidates()` methods.
+
+**Three scope corrections came out of review, and they were all the same
+mistake** — deciding scope from text the gate did not understand. The first draft
+substring-matched the manifest, so `wm2-persistence-harness` was pulled in on a
+COMMENT saying it deliberately does not take the dependency, and then carried a
+written justification for an exemption it never needed. `kirra-world-store` was
+listed too, though it cannot depend on itself and is therefore never scanned. And
+`kirra-mission-orchestrator` reaches the store only as a DEV-dependency, which
+`src/` cannot use — its own module docs say it does not depend on `kirra-world*`
+at all. The manifest is now parsed, and the baseline records all three under
+`not_listed_because_never_in_scope` rather than pretending they were decisions.
+
+**The gate now fails on a stale exemption**, which is the general form of that
+mistake. An exemption for a crate the gate never scans is a written
+justification for a decision nobody is making, and that is how a carve-out list
+rots: every entry looks reasoned, and nothing checks whether it is still
+load-bearing. Both stale entries above were found by this check on its first run,
+against the baseline I had just written.
+
+**Both call syntaxes are detected.** `.current(..)` is how anyone would write it,
+but `WorldStore::current(store, ..)` is the same call in UFCS form — also caught,
+along with the aliased and fully-qualified spellings. A gate advertising zero
+tolerance while leaving a syntactic door open is the exact overclaim it exists to
+prevent elsewhere.
+
+**The operational carve-out needs no exception list.** WM_SCOPE names
+`verify_chain`, `schema_version`, backup/export, the retention driver, the
+compaction planner and the WM-2 harness as legitimate readers below the engine,
+and says a rule forbidding them "would be false on the day it was written". None
+of them is in the domain-read method list, so none is ever matched. The carve-out
+is achieved by scoping the *symbols* rather than exempting *callers*, so there is
+nothing to keep in sync as those subsystems grow.
+
+**`src/` only, and the reason is not laziness.** Several tests read rows directly
+on purpose — `answer_boundary.rs` plants `world_current` rows with raw SQL to
+reach a state the sanctioned write path cannot produce, which is how the
+fail-closed behaviour is proven at all. Gating tests would block the tests that
+prove the boundary works. The bypass lived in `src/`, and `src/` cannot call test
+code, so gating `src/` closes the production path completely.
+
+**Non-vacuity, end to end rather than in a string.** Reintroducing
+`store.current(subject.as_str(), now_ms)?` into the live
+`kirra-proposal-context/src/lib.rs` reds the gate with the file, line and rule;
+removing it greens — in both the method-call and the UFCS spelling. And the
+anti-neutering cases are pinned: moving `kirra-proposal-context` onto the
+permitted list fails `t08_the_gate_watches_the_repaired_consumer`; a baseline
+where *every* dependant is permitted fails with *"no crate is in scope — that is
+how a ratchet dies quietly"*; and re-adding a stale exemption fails the gate
+itself. Twelve self-test cases, with the same uncollected-case guard the
+symbolic-seam suite carries.
