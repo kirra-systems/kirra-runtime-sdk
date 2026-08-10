@@ -2303,6 +2303,19 @@ plants the state by writing `world_current` directly; what that proves is that
 the *mapping* does not collapse, not that the store can be made to serve a
 rejected claim.
 
+**An expired fact is refused, not labelled** — caught in review. The first draft
+folded `Validity::Expired` into `FactValidity::Timeless` while its own comment
+said doing so would be a lie. It would have been: `Timeless` is a positive claim
+that age does not matter, which is the strongest possible misstatement about a
+fact that has run out. There is no honest symbol for an expired fact, so
+`FactValidity` has no variant for one and `mission_context` returns
+`NoneAdmissible` instead of describing it. Same for a claim graded
+`Inadmissible`. Both arms are unreachable today — `WorldView::is_admissible`
+filters them first — and both are kept for the reason `UnknownReason::
+NoneAdmissible` is kept: the guarantee is emergent rather than a stated
+contract, and *"cannot happen"* is exactly when a mapping gets written
+carelessly. Neither can be exercised end-to-end, and no test pretends to.
+
 ---
 
 ## 7. Tier 4 — `Explain`, the flagship

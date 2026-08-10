@@ -142,6 +142,12 @@ pub enum FactGrade {
 }
 
 /// The freshness of a world fact, mirrored symbolically.
+///
+/// **There is deliberately no variant for an EXPIRED fact.** An expired fact is
+/// not fresh, not stale, and emphatically not time-independent, so any label
+/// would be a misstatement; `mission_context` refuses such a fact as
+/// [`WorldSilence::NoneAdmissible`] instead of describing it. The absent variant
+/// is what makes that refusal the only expressible outcome.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FactValidity {
     /// Within the caller's staleness budget.
@@ -367,23 +373,48 @@ pub fn mission_context(
     priority.push(preferred.clone());
     priority.extend(candidates.iter().filter(|c| *c != preferred).cloned());
 
+    // Both mappings below FAIL CLOSED on the one state that has no honest
+    // symbol, rather than reaching for the nearest one.
+    //
+    // Neither arm can be reached today: `WorldView::is_admissible` refuses
+    // `Expired` and `Inadmissible` before an answer is ever built, and the
+    // filters that guarantee it are pinned by
+    // `kirra-world-store/tests/inadmissible_never_read.rs`. They are here
+    // because that guarantee is emergent — it composes out of three mechanisms
+    // added for unrelated reasons — and *"cannot happen"* is exactly when a
+    // mapping gets written carelessly.
+    //
+    // An earlier draft folded `Expired` into `Timeless` while its own comment
+    // said doing so would be a lie. It would have been: `Timeless` is a positive
+    // claim that age does not matter, which is the strongest possible
+    // misstatement about a fact that has run out. There is no honest
+    // `FactValidity` for an expired fact — it is not fresh, not stale, and
+    // emphatically not time-independent — so the correct move is not to label it
+    // but to REFUSE it. The world's own `trust_grade` already rules an expired
+    // claim `Inadmissible`, so refusing here agrees with the world rather than
+    // inventing a policy.
     let grade = match answer.grade() {
         Some(TrustGrade::Strong) => FactGrade::Graded("strong"),
         Some(TrustGrade::Adequate) => FactGrade::Graded("adequate"),
         Some(TrustGrade::Weak) => FactGrade::Graded("weak"),
-        // Cannot reach here — `is_admissible` filters it at the boundary — but
-        // mapped rather than collapsed, so a future change to that filter
-        // surfaces as a visible grade instead of a silent misreport.
-        Some(TrustGrade::Inadmissible) => FactGrade::Graded("inadmissible"),
+        Some(TrustGrade::Inadmissible) => {
+            return Ok(ProposalContext::silent(
+                candidates,
+                WorldSilence::NoneAdmissible,
+            ))
+        }
         None => FactGrade::Ungraded,
     };
     let freshness = match answer.validity() {
         Validity::Fresh => FactValidity::Fresh,
         Validity::Stale => FactValidity::Stale,
-        // `Expired` cannot reach here — the boundary filters it — but mapping it
-        // to `Timeless` would be a lie, so it is grouped with the honest
-        // "no judgement was made" rather than with "fresh".
-        Validity::Timeless | Validity::Expired => FactValidity::Timeless,
+        Validity::Timeless => FactValidity::Timeless,
+        Validity::Expired => {
+            return Ok(ProposalContext::silent(
+                candidates,
+                WorldSilence::NoneAdmissible,
+            ))
+        }
     };
 
     Ok(ProposalContext {
