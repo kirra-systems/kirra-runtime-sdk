@@ -1997,7 +1997,8 @@ pressure that produced every stale claim this box already documents.
       `AnswerRef`'s absence.
 - [ ] **3b — Rule / projection versioning.** Declared, behaviour-changing, and
       enforced by corpus + source pin (above). Not decorative metadata.
-- [ ] **3c — Snapshot consistency.** An answer composing several projections
+- [x] **3c — Snapshot consistency.** ✅ **DONE 2026-08-10** — see *"3c closed
+      against its consumer"* below. An answer composing several projections
       (identity, claims, relationships, summaries) must read them at ONE coherent
       point, or report each coordinate explicitly. Projections carry independent
       checkpoints and can sit at different heads, so an envelope naming a single
@@ -2232,10 +2233,10 @@ sequence, each step forced by the consumer rather than by the checklist:
    is categorical, not a magnitude, so the symbolic-seam gate is unaffected).
    **Do not** resolve object identity inside `WorldAnswer`. See *"3a closed
    against its consumer"* below.
-2. **3c** — the composed read now exists: `WorldAnswer.object` → identity
-   resolution → one snapshot coordinate. Prove subject/object resolution cannot
-   mix projection generations: same snapshot, or explicitly degraded/refused.
-   No approximate "close enough".
+2. **3c** — ✅ **DONE 2026-08-10.** The composed read now exists:
+   `WorldAnswer.object` → identity resolution → one snapshot coordinate. Closed
+   on the STRONG arm (one snapshot) rather than the degraded one, and the
+   subject is deliberately excluded — see below for both reasons.
 3. **3d** — the ratchet, so 3a cannot be undone six PRs later. Direct projection
    reads by domain consumers fail mechanically, with **the exact pre-fix
    `mission_context` pattern as the negative fixture** rather than a synthetic
@@ -2536,3 +2537,98 @@ not by duration.
 
 It is not a ruling. Tier 0 is where rulings live, and four of them are still
 open.
+
+
+### 3c closed against its consumer — 2026-08-10
+
+The audit predicted 3c would arrive with the first *correct* implementation of
+`mission_context`'s query, and it did: once `object` is first-class and names an
+entity, comparing it as a raw string is the wrong operation.
+
+**Closed on the strong arm.** The box allows *"one coherent point, OR report each
+coordinate explicitly"*. The second arm was available cheaply and is strictly
+weaker — it turns a concurrent fold into a refused answer where the first turns
+it into a correct one. Every projection is a table in ONE SQLite database and
+every fold commits atomically, so a single read transaction sees the same set of
+commits for all of them. `WorldStore::read_snapshot` is that transaction;
+coherence is by construction, not drift detection after the fact.
+
+| Change | Where |
+|---|---|
+| `ReadSnapshot` — one read transaction over every projection | `kirra-world-store::snapshot` |
+| `SnapshotCoordinate` / `ProjectionCoordinate` — generation + state digest | `kirra-world-store::snapshot` |
+| `ReadSnapshot::identity_is_current` — is identity behind the LOG? | `kirra-world-store::snapshot` |
+| `ObjectIdentity` + `WorldAnswer::object_identity` | `kirra-world-service::read_view` |
+| `ComposedLookup` — the answer and its coordinate, inseparable | `kirra-world-service::read_view` |
+| `WorldSilence::ObjectUnresolved(ObjectResolution)` | `kirra-proposal-context` |
+
+**Two traps found in the machinery, both load-bearing, neither guessed.**
+
+1. **The generations are not comparable across projections.** `world_current`
+   and `subject_summary` advance their checkpoint past every event *considered*;
+   the entity fold advances only to the last *adjudication* it folded. Append one
+   ordinary claim and the checkpoints separate, with both folds complete and
+   nothing wrong. The intuitive way to "prove" snapshot consistency — assert the
+   coordinates are equal — would therefore report constant false drift on a
+   healthy store, and the fix someone reaches for under deadline is to delete the
+   check. `the_two_projection_generations_differ_on_a_healthy_store` pins it as a
+   fact so that tightening gets a red test naming the reason.
+2. **`identity_view` mislabelled its own snapshot.** It read the rows and then
+   the generation in two unrelated statements, so a fold landing between them
+   stamped the view with a generation newer than the rows it held. It now takes
+   both from one snapshot.
+
+**The staleness check is against the LOG, not the projection — and the first
+draft had it wrong in both directions.** Gating on *"has the entity projection
+been folded"* refuses every object-bearing claim on a store that simply has no
+adjudications (most stores, and an availability failure bought for no safety),
+**and admits the genuinely dangerous case** — a projection folded once with
+merges recorded since is not unfolded, so it would have resolved against
+known-stale data and called it success. The Tier 2.5 closure differential caught
+the first half by going red; the second half was found while fixing it.
+`identity_is_current` asks whether identity has consumed every adjudication the
+log holds, which is the question that separates the two.
+
+**The SUBJECT is deliberately not resolved, and this is a limitation rather than
+an oversight.** `world_current` is keyed by the subject string *as written*, so
+rewriting a queried alias to its canonical id would look up a key nothing was
+ever stored under and return **fewer** claims than asking plainly. Reading the
+whole equivalence class and merging it is the operation that would be correct,
+and it is a query design of its own. Resolving the subject "for symmetry" would
+have been a regression wearing the box's name.
+
+**What this is NOT.** `SnapshotCoordinate` is not an `AnswerRef`. A snapshot is
+coherent for as long as it is held and cannot be re-entered once dropped;
+re-executing against a *recorded* coordinate still needs a generation-pinned read
+of `world_current`, which still does not exist and still has its own open box
+above. `KIRRA-WM-ANSWERREF-NAMING-001` reserves the name for the day that closes,
+and this deliberately does not take it.
+
+**The seam stayed symbolic, and it cost a mirror.** The world's `ObjectIdentity`
+carries `Resolved { hops: usize }`, and its refusal reasons carry
+`TraversalBudgetExceeded { limit: usize }`. Re-exporting it into
+`kirra-proposal-context` would have put primitive numerics on the seam and given
+it somewhere to put a number — the one thing `KIRRA-WM-SYMBOLIC-SEAM-001` exists
+to prevent. `ObjectResolution` mirrors it symbolically on the `FactGrade`
+precedent, with a lock-step test walking the real `RefusalReason` enum so the
+tags stay total and pairwise distinct.
+
+**Non-vacuity.** Four mutations were run and each is caught by exactly one test,
+leaving the others green:
+
+| Mutation | Caught by |
+|---|---|
+| fall back to the raw object when the graph is stale | `a_stale_identity_graph_refuses_…` |
+| ignore resolution, match the stored object | `a_merged_object_resolves_to_the_candidate_it_became` |
+| assume identity is always current | `a_stale_identity_graph_refuses_…` |
+| two refusal reasons share one tag | `every_refusal_reason_has_its_own_tag` |
+
+The stale-graph test is the sharp one: the literal match would **succeed** there,
+so a refusal that only fired when the literal match also failed would be
+indistinguishable from doing nothing.
+
+The store-level guarantee carries a permanent negative control rather than a
+one-off mutation — `the_unguarded_composition_observes_the_fold_it_should_not`
+runs the identical interleaving through the ordinary `&self` readers and asserts
+it DOES observe the concurrent fold. If that control ever goes
+green-by-agreement, the snapshot test has stopped being asked a real question.

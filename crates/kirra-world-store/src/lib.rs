@@ -89,6 +89,7 @@ pub mod projection;
 pub mod retention_driver;
 pub mod retention_sweeper;
 pub mod schema;
+pub mod snapshot;
 pub mod subject_projection;
 
 pub use compaction::{Citation, CompactionOutcome, DegradedSummary, Resolution, TemporalAnswer};
@@ -1558,66 +1559,7 @@ impl WorldStore {
         &self,
     ) -> Result<std::collections::BTreeMap<String, entity_projection::ProjectedEntity>, StoreError>
     {
-        if !self.has_entity_projection()? {
-            return Ok(std::collections::BTreeMap::new());
-        }
-        let mut stmt = self.conn.prepare(
-            "SELECT entity_id, lifecycle, redirect, origin, contradicted, contradiction
-             FROM entities_projection ORDER BY entity_id ASC",
-        )?;
-        let mut out = std::collections::BTreeMap::new();
-        let mut rows = stmt.query([])?;
-        while let Some(r) = rows.next()? {
-            let id: String = r.get(0)?;
-            let token: String = r.get(1)?;
-            let redirect: Option<String> = r.get(2)?;
-            let origin: Option<String> = r.get(3)?;
-            let contradicted: i64 = r.get(4)?;
-            let detail: Option<String> = r.get(5)?;
-            let contradiction = match (contradicted != 0, detail.as_deref()) {
-                (false, _) => None,
-                (true, Some(raw)) => Some(
-                    entity_projection::contradiction_from_json(raw).map_err(|e| {
-                        StoreError::CorruptEntityProjectionRow {
-                            detail: format!("{id}: {e}"),
-                        }
-                    })?,
-                ),
-                // Flagged contradicted with nothing recorded: the fold always
-                // writes both, so this is a row edited underneath the store.
-                (true, None) => {
-                    return Err(StoreError::CorruptEntityProjectionRow {
-                        detail: format!("{id}: contradicted with no contradiction recorded"),
-                    })
-                }
-            };
-            let lifecycle = entity_projection::lifecycle_from_columns(
-                &token,
-                redirect.as_deref(),
-                origin.as_deref(),
-            )
-            .map_err(|e| StoreError::CorruptEntityProjectionRow {
-                detail: format!("{id}: {e}"),
-            })?;
-            let entity =
-                EntityId::new(&id).map_err(|e| StoreError::CorruptEntityProjectionRow {
-                    detail: format!("{id}: inadmissible entity id: {e:?}"),
-                })?;
-            out.insert(
-                id,
-                entity_projection::ProjectedEntity {
-                    entity,
-                    lifecycle,
-                    // Read back structurally. An earlier draft stored a
-                    // rendered sentence and rebuilt a placeholder here, which
-                    // would have pointed an operator at generation 0 for every
-                    // contradiction -- an invented value wearing a real field's
-                    // name.
-                    contradiction,
-                },
-            );
-        }
-        Ok(out)
+        snapshot::load_entity_projection_on(&self.conn)
     }
 
     /// **A snapshot of the entity projection, resolvable in place.**
@@ -1632,11 +1574,19 @@ impl WorldStore {
     /// back faithfully. **The refusal happens here, once**, rather than during
     /// the walk — see [`entity_projection::IdentityView`] for why resolving
     /// over a per-query reader would turn a read failure into "no such entity".
+    ///
+    /// # The rows and the label come from one snapshot
+    ///
+    /// This used to read the rows and then the generation in two unrelated
+    /// statements, so a fold landing between them stamped the view with a
+    /// generation newer than the rows it held — a snapshot mislabelled as a
+    /// later state of the world, which is precisely what
+    /// [`IdentityView::generation`] is relied upon to mean. It now takes both
+    /// from one read transaction.
+    ///
+    /// [`IdentityView::generation`]: entity_projection::IdentityView::generation
     pub fn identity_view(&self) -> Result<entity_projection::IdentityView, StoreError> {
-        Ok(entity_projection::IdentityView::new(
-            self.load_entity_projection()?,
-            self.entity_projection_generation()?,
-        ))
+        self.read_snapshot()?.identity_view()
     }
 
     /// **The identity graph as it stood at a past instant** — §6.3, Tier 2 2d.
@@ -2629,21 +2579,33 @@ impl WorldStore {
     /// state survives retention**, so a device that has compacted its way back
     /// under budget still knows where everything is.
     pub fn current(&self, subject: &str, now_ms: i64) -> Result<Vec<ProjectedClaim>, StoreError> {
-        if !self.has_projections()? {
-            return Ok(Vec::new());
-        }
-        let mut stmt = self.conn.prepare(&format!(
-            "SELECT {CLAIM_COLUMNS} FROM world_current WHERE subject = ?1 ORDER BY predicate_key"
-        ))?;
-        let rows = stmt.query_map(params![subject], claim_from_row)?;
-        let mut out = Vec::new();
-        for c in rows {
-            let c = c?;
-            if c.holds_at(now_ms) {
-                out.push(c);
-            }
-        }
-        Ok(out)
+        snapshot::current_on(&self.conn, subject, now_ms)
+    }
+
+    /// **A coherent read across every projection** — Tier 3 box 3c.
+    ///
+    /// Composing an answer from more than one projection through the ordinary
+    /// `&self` readers can observe a fold landing between two calls and answer
+    /// from two states of the world. Reads taken through the returned
+    /// [`snapshot::ReadSnapshot`] cannot: it holds one SQLite read transaction,
+    /// so every projection is seen at the same set of commits.
+    ///
+    /// Drop it as soon as the composed read is done — see
+    /// [`snapshot::ReadSnapshot`] on the WAL read-mark it holds.
+    pub fn read_snapshot(&self) -> Result<snapshot::ReadSnapshot<'_>, StoreError> {
+        Ok(snapshot::ReadSnapshot::new(
+            self.conn.unchecked_transaction()?,
+        ))
+    }
+
+    /// Where every projection stands right now, read outside any snapshot.
+    ///
+    /// For reporting and diagnostics. A composed ANSWER should carry the
+    /// coordinate of the snapshot it was read from
+    /// ([`snapshot::ReadSnapshot::coordinate`]), not one sampled separately —
+    /// sampling separately is the two-statement race this box exists to close.
+    pub fn projection_coordinate(&self) -> Result<snapshot::SnapshotCoordinate, StoreError> {
+        snapshot::coordinate_on(&self.conn)
     }
 
     /// The whole projected state at `now_ms`, in key order.
