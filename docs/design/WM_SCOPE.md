@@ -1479,11 +1479,47 @@ answer-boundary contract (3a), rule 2 remains the bounded-query rule
       are public, so `…current("robot-01", now)?[0].payload` compiles with no
       validity, trust or handle, and `validity_at`/`grade_at` are methods a caller
       must remember. The fix is an **answer-boundary type with no constructor
-      that omits validity, trust or provenance**. The named next hop is
-      `WorldAnswer::provenance()` returning `EvidenceDigest`, **blocked on
-      #1388**; unblocking it is this box's first move. The honest bound stands:
+      that omits validity, trust or provenance**. The honest bound stands:
       such a type closes the hole at *retrieval*, not against a caller who
       destructures and passes the value onward alone.
+
+      **Substantially BUILT already — corrected 2026-08-10.** This entry said the
+      next hop was *"`WorldAnswer::provenance()` returning `EvidenceDigest`,
+      **blocked on #1388**"*. That was true when written and went stale the day
+      **#1388 merged (2026-08-07)**, which is the PR that *built* the boundary.
+      It was then carried forward into this box on 2026-08-09 without being
+      checked, and read by the next reader — twice — as a live blocker. Recorded
+      at length because the failure is the one this tier exists to prevent, in
+      the document that defines the tier.
+
+      What `kirra-world-service::read_view` ships **today**: `WorldAnswer` with
+      `WorldView::ask` as its only constructor, **validity resolved at
+      construction** (the whole difference from `ProjectedClaim`), the trust
+      **axes** carried beside the collapsed grade, `provenance()` **already
+      returning `&EvidenceDigest`**, and `WorldLookup::Unknown` as a success
+      variant. Staleness is **already reported, not swallowed**: `is_admissible`
+      filters on `Expired` and `Inadmissible` only, so a stale claim is served
+      carrying `Validity::Stale` — pinned by test.
+
+      What is genuinely absent, and the one that must NOT be added:
+
+      * **Completeness is deliberately absent at THIS boundary, and adding it
+        would be a defect.** `ask` is built on [`WorldStore::current`], whose own
+        docs refuse a `TemporalAnswer` because *"compaction can never degrade
+        it"* — `compact_range` clamps its window below any generation joined to
+        `world_current`, so the events `current` reads are exactly the ones
+        compaction is forbidden to remove. A completeness field here is
+        structurally always `Full`, and *"would suggest the check is doing
+        something"*. It becomes real when the boundary serves a query that **can**
+        degrade — `as_of`, `history`, lineage retrieval — none of which exist yet.
+      * **Version** — no reducer version exists to carry. Minting one here would
+        be the decorative metadata 3b forbids; it lands with 3b's enforcement.
+      * **`AnswerRef`** — absent, and blocked on a capability rather than on
+        effort: `KIRRA-WM-ANSWER-IDENTITY-001` requires re-execution *against the
+        same snapshot*, and there is no generation-pinned read of `world_current`
+        to re-execute against. A ref could honestly record the generation
+        observed and let a later ask **detect divergence**, but that is weaker
+        than the ruling states and needs its own decision.
 - [ ] **3b — Rule / projection versioning.** Declared, behaviour-changing, and
       enforced by corpus + source pin (above). Not decorative metadata.
 - [ ] **3c — Snapshot consistency.** An answer composing several projections
