@@ -11,12 +11,17 @@
 //! proposal-producing function fed by that context produces a different proposal.
 //!
 //! WHAT IT DOES NOT PROVE: that a PRODUCTION behaviour path changed. The producer
-//! below is test-local and deliberately so — the production orchestration
-//! boundary has not been ruled, and wiring `kirra-planner` to Kirra World would
-//! create `kirra-sidecars → kirra-planner → kirra-world*` on a crate that
-//! implements `CorridorSource`, which the fence's check 4 should refuse. Building
-//! that route to make this test look stronger would be building the forbidden
-//! route. So: Tier 2.5 EVIDENCE, not Tier 2.5 closure. §5.5's Goal 1 stays open.
+//! below is test-local and deliberately so — wiring `kirra-planner` to Kirra
+//! World would create `kirra-sidecars → kirra-planner → kirra-world*` on a crate
+//! that implements `CorridorSource`, which the fence's check 4 should refuse.
+//! Building that route to make this test look stronger would be building the
+//! forbidden route.
+//!
+//! That production claim is made elsewhere and is not this file's to make:
+//! `kirra-mission-orchestrator`'s closure differential (#1426) drives the real
+//! `plan_for_intent` through the boundary `KIRRA-WM-ORCHESTRATION-BOUNDARY-001`
+//! rules, which is what closed §5.5's Goal 1. This file stays the SEAM's
+//! evidence — the narrower claim, kept narrow.
 //!
 //! THE THREE CONTROLS, and why the first alone would be vacuous:
 //!
@@ -111,6 +116,10 @@ fn context_world_silent() -> ProposalContext {
         &id("last_seen_at"),
         &candidates(),
         T0,
+        // The freshness contract is REQUIRED (3e). `None` here is a decision,
+        // not a default: this fixture's claim is recorded at the query instant,
+        // so its age is not what the test is about.
+        None,
     )
     .expect("context");
     drop(store);
@@ -129,6 +138,10 @@ fn context_world_knows() -> ProposalContext {
         &id("last_seen_at"),
         &candidates(),
         T0,
+        // The freshness contract is REQUIRED (3e). `None` here is a decision,
+        // not a default: this fixture's claim is recorded at the query instant,
+        // so its age is not what the test is about.
+        None,
     )
     .expect("context");
     drop(store);
@@ -253,6 +266,10 @@ fn an_unrelated_world_fact_does_not_change_the_proposal() {
         &id("last_seen_at"),
         &candidates(),
         T0,
+        // The freshness contract is REQUIRED (3e). `None` here is a decision,
+        // not a default: this fixture's claim is recorded at the query instant,
+        // so its age is not what the test is about.
+        None,
     )
     .expect("context");
     drop(store);
@@ -276,6 +293,10 @@ fn a_claim_outside_the_candidate_set_is_ignored() {
         &id("last_seen_at"),
         &candidates(),
         T0,
+        // The freshness contract is REQUIRED (3e). `None` here is a decision,
+        // not a default: this fixture's claim is recorded at the query instant,
+        // so its age is not what the test is about.
+        None,
     )
     .expect("context");
     drop(store);

@@ -173,6 +173,10 @@ fn context_from(object: Option<&str>, name: &str) -> ProposalContext {
         &id("last_seen_at"),
         &candidates(),
         T0,
+        // The freshness contract is REQUIRED (3e). `None` here is a decision,
+        // not a default: this fixture's claim is recorded at the query instant,
+        // so its age is not what the test is about.
+        None,
     )
     .expect("context");
     drop(store);
