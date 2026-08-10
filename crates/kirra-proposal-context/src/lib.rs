@@ -56,8 +56,11 @@
 
 #![forbid(unsafe_code)]
 
+use kirra_world::resolution::RefusalReason;
 use kirra_world::trust::{TrustGrade, Validity};
-use kirra_world_service::read_view::{AskError, UnknownReason, WorldLookup, WorldView};
+use kirra_world_service::read_view::{
+    AskError, ObjectIdentity, UnknownReason, WorldLookup, WorldView,
+};
 use kirra_world_store::WorldStore;
 
 /// An opaque symbolic identity — a destination, a task, a package, a relation.
@@ -202,8 +205,8 @@ impl ProposalContext {
     /// collapsing them is precisely the information loss Tier 3 exists to
     /// prevent.
     #[must_use]
-    pub fn silence(&self) -> Option<WorldSilence> {
-        self.silence
+    pub fn silence(&self) -> Option<&WorldSilence> {
+        self.silence.as_ref()
     }
 
     /// The trust grade of the fact this context acted on, if it acted on one.
@@ -287,7 +290,7 @@ impl From<AskError> for ContextError {
 /// what Tier 3 exists to retain: *never heard of it* and *heard of it but not
 /// servable* are different facts about the world, and a consumer that cannot
 /// tell them apart cannot report which one it hit.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WorldSilence {
     /// No current claim for this subject at this clock.
     NoClaim,
@@ -297,6 +300,90 @@ pub enum WorldSilence {
     /// candidates the caller offered. The world spoke; it just did not name
     /// anything on the menu.
     NoCandidateMatched,
+    /// **A claim named this relation, and its object could not be resolved to
+    /// something safe to compare** — box 3c's fail-closed arm.
+    ///
+    /// Distinct from [`Self::NoCandidateMatched`], which says the world named
+    /// something not on the menu. This says the world named something and the
+    /// identity graph could not tell us what it was: behind the log, recording a
+    /// contradiction, or resolving the object to more than one entity.
+    ObjectUnresolved(ObjectResolution),
+}
+
+/// Why a claim's object could not be turned into something safe to compare.
+///
+/// **A mirror of the world's `ObjectIdentity`, not a re-export**, for the reason
+/// [`FactGrade`] is a mirror — and here it is load-bearing rather than
+/// stylistic. The world's type carries `Resolved { hops: usize }`, and its
+/// refusal reasons carry `TraversalBudgetExceeded { limit: usize }`.
+/// Re-exporting it would put primitive numerics on this crate's public surface
+/// and give the symbolic seam somewhere to put a number, which is the one thing
+/// the seam rule exists to prevent. Those numbers are real and useful — they are
+/// simply not this seam's to carry, and they remain available at the answer
+/// boundary where an operator reads them.
+///
+/// Successors ARE carried: an entity id is a symbol, and naming which entities
+/// an object turned out to be is the difference between a usable report and
+/// "something went wrong".
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ObjectResolution {
+    /// The identity graph has not consumed every adjudication the log holds, so
+    /// any resolution would be known-stale.
+    GraphStale,
+    /// The object resolved to more than one live entity, and picking one would
+    /// be a guess.
+    Ambiguous {
+        /// The entities the object turned out to be, as the events name them.
+        successors: Vec<ContextId>,
+    },
+    /// The recorded history contradicts itself.
+    ///
+    /// CATEGORICAL — a named reason, never a magnitude, so the seam rule is
+    /// unaffected.
+    Contradictory(&'static str),
+}
+
+impl ObjectResolution {
+    /// The categorical tag for one of the world's refusal reasons.
+    ///
+    /// Public so the lock-step test can walk the real enum and assert the tags
+    /// are total and pairwise distinct. Exhaustive on purpose: adding a variant
+    /// to `RefusalReason` must break this match rather than fall into a
+    /// catch-all that silently reports the new reason as an old one — and the
+    /// test catches the half a compiler cannot, two variants quietly sharing one
+    /// tag, which compiles and then misreports forever.
+    #[must_use]
+    pub fn contradiction_tag(reason: &RefusalReason) -> &'static str {
+        match reason {
+            RefusalReason::RedirectCycle { .. } => "redirect_cycle",
+            RefusalReason::TraversalBudgetExceeded { .. } => "traversal_budget_exceeded",
+            RefusalReason::DanglingRedirect { .. } => "dangling_redirect",
+            RefusalReason::EmptySupersession { .. } => "empty_supersession",
+            RefusalReason::ContradictoryHistory { .. } => "contradictory_history",
+        }
+    }
+}
+
+/// Translate the world's `ObjectIdentity` into this seam's symbolic mirror.
+///
+/// Only the non-matchable variants can reach here — `ObjectIdentity::matchable`
+/// has already returned `Some` for the rest — so the matchable arms map to a
+/// nearest honest report rather than being unreachable-panicked. A wrong report
+/// is recoverable; a panic in a proposal producer is not.
+fn mirror_resolution(identity: &ObjectIdentity) -> ObjectResolution {
+    match identity {
+        ObjectIdentity::Unresolvable => ObjectResolution::GraphStale,
+        ObjectIdentity::Ambiguous { successors } => ObjectResolution::Ambiguous {
+            successors: successors.iter().filter_map(ContextId::new).collect(),
+        },
+        ObjectIdentity::Refused(reason) => {
+            ObjectResolution::Contradictory(ObjectResolution::contradiction_tag(reason))
+        }
+        ObjectIdentity::NoObject
+        | ObjectIdentity::Malformed
+        | ObjectIdentity::NotAnEntity
+        | ObjectIdentity::Resolved { .. } => ObjectResolution::Contradictory("unclassified"),
+    }
 }
 
 /// Derive proposal-shaping context from what Kirra World knows about `subject`.
@@ -340,7 +427,7 @@ pub fn mission_context(
 ) -> Result<ProposalContext, ContextError> {
     let view = WorldView::new(store, staleness_budget_ms);
 
-    let answers = match view.ask(subject.as_str(), now_ms)? {
+    let answers = match view.ask(subject.as_str(), now_ms)?.into_lookup() {
         WorldLookup::Answered(answers) => answers,
         WorldLookup::Unknown(reason) => {
             let silence = match reason {
@@ -351,16 +438,37 @@ pub fn mission_context(
         }
     };
 
+    // Set when a claim named this relation but its object could not be turned
+    // into something safe to compare. Tracked separately from "nothing matched"
+    // because they are different facts: the world DID answer, and the answer
+    // could not be used.
+    let mut unresolved: Option<ObjectResolution> = None;
+
     let matched = answers.iter().find_map(|a| {
         if a.predicate()? != relation.as_str() {
             return None;
         }
         // The OBJECT, not the payload: the fact is a relationship, and the
-        // object is what it points at.
-        let object = a.object()?;
+        // object is what it points at — resolved through the identity graph,
+        // because an object that names an entity is not a string. `matchable`
+        // is what makes the fail-closed cases fail closed; comparing the raw
+        // object here would silently ignore every merge the world has recorded.
+        let Some(object) = a.object_identity().matchable(a.object()) else {
+            unresolved.get_or_insert_with(|| mirror_resolution(a.object_identity()));
+            return None;
+        };
         let candidate = candidates.iter().find(|c| c.as_str() == object)?;
         Some((candidate, a))
     });
+
+    if matched.is_none() {
+        if let Some(identity) = unresolved {
+            return Ok(ProposalContext::silent(
+                candidates,
+                WorldSilence::ObjectUnresolved(identity),
+            ));
+        }
+    }
 
     let Some((preferred, answer)) = matched else {
         return Ok(ProposalContext::silent(

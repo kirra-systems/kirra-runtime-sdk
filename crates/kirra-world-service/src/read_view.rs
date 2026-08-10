@@ -87,6 +87,10 @@
 //! rather than in one it does not.
 
 use kirra_world::evidence::{DigestError, EvidenceDigest};
+use kirra_world::reference::EntityId;
+use kirra_world::resolution::{resolve, RefusalReason, ResolutionOutcome};
+use kirra_world_store::entity_projection::IdentityView;
+use kirra_world_store::snapshot::SnapshotCoordinate;
 use kirra_world_store::{ProjectedClaim, StoreError, TrustAxes, TrustGrade, Validity, WorldStore};
 
 /// Why an ask could not be answered at all.
@@ -196,6 +200,7 @@ pub struct WorldAnswer {
     subject: String,
     predicate: Option<String>,
     object: Option<String>,
+    object_identity: ObjectIdentity,
     value: String,
     validity: Validity,
     axes: Option<TrustAxes>,
@@ -232,14 +237,26 @@ impl WorldAnswer {
     /// shape aliases a payload-only claim in `world_current`'s
     /// `(subject, '')` slot and destroys it.
     ///
-    /// **This is the stored object, uninterpreted.** It is not resolved through
-    /// the identity graph, even when it names an entity: that resolution
-    /// composes two projections with independent checkpoints, which is 3c's
-    /// snapshot-consistency question and not something an answer boundary may
-    /// answer silently.
+    /// **This is the stored object, uninterpreted.** For what it resolves to
+    /// through the identity graph, see [`WorldAnswer::object_identity`] — the
+    /// two are kept separate so a caller can always see what was actually
+    /// written, not only what it now means.
     #[must_use]
     pub fn object(&self) -> Option<&str> {
         self.object.as_deref()
+    }
+
+    /// **What the object resolves to through the identity graph** — box 3c.
+    ///
+    /// Resolved in the SAME snapshot as the claim itself, so this can never
+    /// describe a different state of the world than [`WorldAnswer::object`] was
+    /// read from.
+    ///
+    /// Prefer [`ObjectIdentity::matchable`] over matching on the variants by
+    /// hand: it is what makes the fail-closed cases fail closed.
+    #[must_use]
+    pub fn object_identity(&self) -> &ObjectIdentity {
+        &self.object_identity
     }
 
     /// The claim's predicate, `None` for predicate-less claims.
@@ -329,6 +346,109 @@ pub enum WorldLookup {
     Unknown(UnknownReason),
 }
 
+/// **What a claim's object turned out to be** — Tier 3 box 3c.
+///
+/// A claim's object often names an entity, and an entity's identity is itself a
+/// projection: merges, splits and retirements are recorded as adjudications and
+/// folded into the entity graph. So comparing an object as a raw string answers
+/// the wrong question the moment anything has been merged.
+///
+/// Six variants for four caller behaviours, because collapsing them is the
+/// defect box 3a was opened for: *match literally*, *match the canonical
+/// entity*, *fail closed*, and *the graph could not be consulted at all* are
+/// four different situations, and an operator debugging the fourth needs it not
+/// to look like the first.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ObjectIdentity {
+    /// The claim carries no object. Nothing to resolve.
+    NoObject,
+    /// **The identity graph is BEHIND the log: adjudications are recorded that
+    /// it has not folded, so any resolution would be known-stale.**
+    ///
+    /// Not "the graph is empty" — an empty graph on a store with no
+    /// adjudications is perfectly current, and objects there stand for
+    /// themselves. This is the case where merges, splits or retirements *have*
+    /// been recorded and the projection has not caught up, so resolving would
+    /// answer from data already known to be superseded.
+    ///
+    /// Fail-closed rather than falling back to the raw string, because the
+    /// fallback is silent: it would look exactly like resolution succeeding and
+    /// finding nothing to redirect, which is the one answer a stale graph
+    /// cannot support.
+    Unresolvable,
+    /// The object is not a well-formed entity id, so it cannot name one.
+    Malformed,
+    /// The graph was consulted and holds no such entity.
+    ///
+    /// Nothing is wrong: not every object is an adjudicated entity. The object
+    /// stands for itself.
+    NotAnEntity,
+    /// Resolved to one live entity.
+    Resolved {
+        /// The canonical id. Equal to the stored object when nothing redirected
+        /// it.
+        entity: String,
+        /// Redirect edges traversed. `0` means nothing was followed.
+        hops: usize,
+    },
+    /// The id was partitioned and its successors did not reconverge.
+    Ambiguous {
+        /// The live entities the object turned out to be.
+        successors: Vec<String>,
+    },
+    /// The recorded history contradicts itself.
+    Refused(RefusalReason),
+}
+
+impl ObjectIdentity {
+    /// The id a consumer should match against, if matching is safe at all.
+    ///
+    /// `None` for every variant where matching would be a guess: an
+    /// unconsultable graph, a contradictory history, or an object that turned
+    /// out to be more than one thing. Fail-closed by construction — a consumer
+    /// cannot reach a candidate comparison for those cases without deliberately
+    /// going around this method.
+    pub fn matchable<'a>(&'a self, stored_object: Option<&'a str>) -> Option<&'a str> {
+        match self {
+            Self::Resolved { entity, .. } => Some(entity),
+            Self::NotAnEntity | Self::Malformed => stored_object,
+            Self::NoObject | Self::Unresolvable | Self::Ambiguous { .. } | Self::Refused(_) => None,
+        }
+    }
+}
+
+/// **A lookup and the point it was read at** — Tier 3 box 3c.
+///
+/// The coordinate is bundled rather than returned separately, on the precedent
+/// [`HistoricalAnswer`] set: a caller must not be able to hold the answer
+/// without holding which state of the world produced it. Sampling the
+/// coordinate in a second call would also reintroduce the very race this box
+/// closes — the answer would name a point it was not read at.
+///
+/// [`HistoricalAnswer`]: kirra_world_store::entity_projection::HistoricalAnswer
+#[derive(Debug, Clone)]
+pub struct ComposedLookup {
+    lookup: WorldLookup,
+    coordinate: SnapshotCoordinate,
+}
+
+impl ComposedLookup {
+    /// What was found.
+    pub fn lookup(&self) -> &WorldLookup {
+        &self.lookup
+    }
+
+    /// Take ownership of what was found.
+    pub fn into_lookup(self) -> WorldLookup {
+        self.lookup
+    }
+
+    /// Where every projection stood when this was read.
+    pub fn coordinate(&self) -> &SnapshotCoordinate {
+        &self.coordinate
+    }
+}
+
 /// A read-only view onto the world.
 ///
 /// Read-only is structural, not a convention: this type holds a `&WorldStore`
@@ -363,11 +483,41 @@ impl<'a> WorldView<'a> {
     ///
     /// Only on a storage fault. An empty or wholly-inadmissible result is
     /// [`WorldLookup::Unknown`], which is a **success**.
-    pub fn ask(&self, subject: &str, now_ms: i64) -> Result<WorldLookup, AskError> {
-        let claims = self.store.current(subject, now_ms)?;
+    /// # This is a composed read, and it is coherent by construction
+    ///
+    /// Claims and identity are two independently-folded projections. Both are
+    /// read through ONE [`ReadSnapshot`], so an answer can never pair a claim
+    /// from one state of the world with an identity resolution from another.
+    /// The point they were read at rides back on the result — see
+    /// [`ComposedLookup`].
+    ///
+    /// [`ReadSnapshot`]: kirra_world_store::snapshot::ReadSnapshot
+    ///
+    /// # The SUBJECT is deliberately not resolved
+    ///
+    /// Only the object is resolved through the identity graph. Resolving the
+    /// subject would be a regression, not an improvement: `world_current` is
+    /// keyed by the subject string **as written**, so rewriting a queried alias
+    /// to its canonical id would look up a key nothing was ever stored under and
+    /// return *fewer* claims than asking plainly. Reading the whole equivalence
+    /// class and merging it is the operation that would actually be correct, and
+    /// that is a query design of its own rather than something to slip in here.
+    pub fn ask(&self, subject: &str, now_ms: i64) -> Result<ComposedLookup, AskError> {
+        let snapshot = self.store.read_snapshot()?;
+        let coordinate = snapshot.coordinate()?;
+        let claims = snapshot.current(subject, now_ms)?;
+
         if claims.is_empty() {
-            return Ok(WorldLookup::Unknown(UnknownReason::NoClaim));
+            return Ok(ComposedLookup {
+                lookup: WorldLookup::Unknown(UnknownReason::NoClaim),
+                coordinate,
+            });
         }
+
+        // Loaded once for the whole answer, from the same snapshot as the
+        // claims. Per-claim reads would be both slower and incoherent.
+        let identity = snapshot.identity_view()?;
+        let identity_is_current = snapshot.identity_is_current()?;
 
         let clock = now_ms.max(0).unsigned_abs();
         let mut answers: Vec<WorldAnswer> = Vec::new();
@@ -375,13 +525,15 @@ impl<'a> WorldView<'a> {
             .iter()
             .filter(|c| Self::is_admissible(c, clock, self.staleness_budget_ms))
         {
-            answers.push(self.bind(c, clock)?);
+            answers.push(self.bind(c, clock, &identity, identity_is_current)?);
         }
 
-        if answers.is_empty() {
-            return Ok(WorldLookup::Unknown(UnknownReason::NoneAdmissible));
-        }
-        Ok(WorldLookup::Answered(answers))
+        let lookup = if answers.is_empty() {
+            WorldLookup::Unknown(UnknownReason::NoneAdmissible)
+        } else {
+            WorldLookup::Answered(answers)
+        };
+        Ok(ComposedLookup { lookup, coordinate })
     }
 
     /// Expired, or graded `Inadmissible`, is not servable.
@@ -403,7 +555,13 @@ impl<'a> WorldView<'a> {
     ///
     /// Fallible only on the provenance handle, which is the one field that
     /// carries an invariant the row cannot enforce.
-    fn bind(&self, claim: &ProjectedClaim, clock: u64) -> Result<WorldAnswer, AskError> {
+    fn bind(
+        &self,
+        claim: &ProjectedClaim,
+        clock: u64,
+        identity: &IdentityView,
+        identity_is_current: bool,
+    ) -> Result<WorldAnswer, AskError> {
         let provenance = EvidenceDigest::new(claim.chain_digest.clone()).map_err(|cause| {
             AskError::CorruptProvenance {
                 subject: claim.subject.clone(),
@@ -414,6 +572,11 @@ impl<'a> WorldView<'a> {
         Ok(WorldAnswer {
             subject: claim.subject.clone(),
             predicate: claim.predicate.clone(),
+            object_identity: Self::resolve_object(
+                claim.object.as_deref(),
+                identity,
+                identity_is_current,
+            ),
             object: claim.object.clone(),
             value: claim.payload.clone(),
             validity: claim.validity_at(clock, self.staleness_budget_ms),
@@ -422,5 +585,43 @@ impl<'a> WorldView<'a> {
             provenance,
             event_id: claim.event_id.clone(),
         })
+    }
+
+    /// Resolve one claim's object through the identity graph.
+    ///
+    /// The staleness check comes FIRST and is not an optimisation. `resolve`
+    /// answers `Unknown` for an id the graph does not hold — and a graph that
+    /// has not folded the adjudications naming that id does not hold it either,
+    /// so a stale graph and an honest "not an entity" are the same answer from
+    /// the resolver. Only the log can tell them apart, which is why
+    /// [`ReadSnapshot::identity_is_current`] is consulted rather than the
+    /// projection's own emptiness.
+    ///
+    /// [`ReadSnapshot::identity_is_current`]: kirra_world_store::snapshot::ReadSnapshot::identity_is_current
+    fn resolve_object(
+        object: Option<&str>,
+        identity: &IdentityView,
+        identity_is_current: bool,
+    ) -> ObjectIdentity {
+        let Some(object) = object else {
+            return ObjectIdentity::NoObject;
+        };
+        if !identity_is_current {
+            return ObjectIdentity::Unresolvable;
+        }
+        let Ok(id) = EntityId::new(object) else {
+            return ObjectIdentity::Malformed;
+        };
+        match resolve(identity, &id) {
+            ResolutionOutcome::Located { entity, hops } => ObjectIdentity::Resolved {
+                entity: entity.as_str().to_string(),
+                hops,
+            },
+            ResolutionOutcome::Ambiguous { successors } => ObjectIdentity::Ambiguous {
+                successors: successors.iter().map(|e| e.as_str().to_string()).collect(),
+            },
+            ResolutionOutcome::Unknown => ObjectIdentity::NotAnEntity,
+            ResolutionOutcome::Refused(reason) => ObjectIdentity::Refused(reason),
+        }
     }
 }

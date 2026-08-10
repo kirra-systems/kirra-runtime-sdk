@@ -129,7 +129,7 @@ fn an_unknown_subject_reports_no_claim() {
     let store = WorldStore::open(&path).expect("open");
 
     let ctx = ask(&store, T0, None);
-    assert_eq!(ctx.silence(), Some(WorldSilence::NoClaim));
+    assert_eq!(ctx.silence(), Some(&WorldSilence::NoClaim));
     assert_eq!(ctx.preferred_destination(), None);
     // Silence is not emptiness: the candidates still cross the seam, in the
     // caller's own order.
@@ -148,7 +148,7 @@ fn an_off_menu_object_reports_no_candidate_matched() {
     record(&mut store, "dock_zzz", T0, None);
 
     let ctx = ask(&store, T0, None);
-    assert_eq!(ctx.silence(), Some(WorldSilence::NoCandidateMatched));
+    assert_eq!(ctx.silence(), Some(&WorldSilence::NoCandidateMatched));
     assert_eq!(ctx.preferred_destination(), None);
 
     drop(store);
@@ -176,7 +176,7 @@ fn a_different_relation_reports_no_candidate_matched() {
         None,
     )
     .expect("context");
-    assert_eq!(ctx.silence(), Some(WorldSilence::NoCandidateMatched));
+    assert_eq!(ctx.silence(), Some(&WorldSilence::NoCandidateMatched));
 
     drop(store);
     let _ = std::fs::remove_file(&path);
@@ -224,12 +224,12 @@ fn a_rejected_claim_reports_none_admissible_not_no_claim() {
     let ctx = ask(&store, T0, None);
     assert_eq!(
         ctx.silence(),
-        Some(WorldSilence::NoneAdmissible),
+        Some(&WorldSilence::NoneAdmissible),
         "a claim the boundary refuses to serve must not read as an unknown subject"
     );
     assert_ne!(
         ctx.silence(),
-        Some(WorldSilence::NoClaim),
+        Some(&WorldSilence::NoClaim),
         "collapsing these is the information loss box 3a exists to close"
     );
     assert_eq!(ctx.preferred_destination(), None);

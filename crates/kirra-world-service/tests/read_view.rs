@@ -129,7 +129,7 @@ fn an_answer_carries_validity_trust_and_provenance() {
     seed(&mut s, 1, "cup-1", None, Some(&a), ClaimStatus::Confirmed);
 
     let view = WorldView::new(&s, Some(60_000));
-    let WorldLookup::Answered(answers) = view.ask("cup-1", T0).expect("ask") else {
+    let WorldLookup::Answered(answers) = view.ask("cup-1", T0).expect("ask").into_lookup() else {
         panic!("expected an answer");
     };
     assert_eq!(answers.len(), 1);
@@ -192,7 +192,7 @@ fn an_answer_carries_the_axes_not_only_the_collapsed_grade() {
     seed(&mut s, 1, "cup-1", None, Some(&a), ClaimStatus::Confirmed);
 
     let view = WorldView::new(&s, Some(60_000));
-    let WorldLookup::Answered(answers) = view.ask("cup-1", T0).expect("ask") else {
+    let WorldLookup::Answered(answers) = view.ask("cup-1", T0).expect("ask").into_lookup() else {
         panic!("expected an answer");
     };
     let got = answers[0]
@@ -244,10 +244,10 @@ fn two_claims_can_share_a_grade_for_different_reasons() {
 
     let view = WorldView::new(&s, Some(60_000));
 
-    let WorldLookup::Answered(a1) = view.ask("a", T0).expect("ask") else {
+    let WorldLookup::Answered(a1) = view.ask("a", T0).expect("ask").into_lookup() else {
         panic!("expected an answer");
     };
-    let WorldLookup::Answered(a2) = view.ask("b", T0).expect("ask") else {
+    let WorldLookup::Answered(a2) = view.ask("b", T0).expect("ask").into_lookup() else {
         panic!("expected an answer");
     };
 
@@ -277,7 +277,7 @@ fn an_unlabelled_claim_has_no_grade_rather_than_a_default() {
     seed(&mut s, 1, "cup-1", None, None, ClaimStatus::Confirmed);
 
     let view = WorldView::new(&s, Some(60_000));
-    let WorldLookup::Answered(answers) = view.ask("cup-1", T0).expect("ask") else {
+    let WorldLookup::Answered(answers) = view.ask("cup-1", T0).expect("ask").into_lookup() else {
         panic!("expected an answer");
     };
     assert_eq!(answers[0].grade(), None);
@@ -308,7 +308,7 @@ fn an_unknown_subject_is_a_success_not_an_error() {
         "absence of knowledge must not use the error channel"
     );
     assert!(matches!(
-        out.expect("ok"),
+        out.expect("ok").into_lookup(),
         WorldLookup::Unknown(UnknownReason::NoClaim)
     ));
 }
@@ -338,11 +338,11 @@ fn an_expired_claim_is_not_served() {
 
     let view = WorldView::new(&s, Some(60_000));
     assert!(matches!(
-        view.ask("cup-1", T0 + 500).expect("ask"),
+        view.ask("cup-1", T0 + 500).expect("ask").into_lookup(),
         WorldLookup::Answered(_)
     ));
     assert!(matches!(
-        view.ask("cup-1", T0 + 5_000).expect("ask"),
+        view.ask("cup-1", T0 + 5_000).expect("ask").into_lookup(),
         WorldLookup::Unknown(UnknownReason::NoClaim)
     ));
 }
@@ -368,7 +368,7 @@ fn an_inadmissible_claim_never_reaches_the_boundary() {
 
     let view = WorldView::new(&s, Some(60_000));
     assert!(matches!(
-        view.ask("cup-1", T0).expect("ask"),
+        view.ask("cup-1", T0).expect("ask").into_lookup(),
         WorldLookup::Unknown(UnknownReason::NoClaim)
     ));
 }
@@ -398,13 +398,14 @@ fn the_staleness_budget_belongs_to_the_asking_caller() {
     let later = T0 + 120_000;
 
     let impatient = WorldView::new(&s, Some(60_000));
-    let WorldLookup::Answered(a1) = impatient.ask("cup-1", later).expect("ask") else {
+    let WorldLookup::Answered(a1) = impatient.ask("cup-1", later).expect("ask").into_lookup()
+    else {
         panic!("expected an answer");
     };
     assert_eq!(a1[0].validity(), Validity::Stale);
 
     let patient = WorldView::new(&s, Some(600_000));
-    let WorldLookup::Answered(a2) = patient.ask("cup-1", later).expect("ask") else {
+    let WorldLookup::Answered(a2) = patient.ask("cup-1", later).expect("ask").into_lookup() else {
         panic!("expected an answer");
     };
     assert_eq!(a2[0].validity(), Validity::Fresh);
@@ -443,7 +444,7 @@ fn an_unreadable_provenance_handle_is_refused_rather_than_served() {
     // corruption and not by the fixture never having worked.
     let view = WorldView::new(&s, Some(60_000));
     assert!(matches!(
-        view.ask("cup-1", T0).expect("ask"),
+        view.ask("cup-1", T0).expect("ask").into_lookup(),
         WorldLookup::Answered(_)
     ));
 
@@ -506,7 +507,7 @@ fn the_error_identifies_which_of_a_subject_s_rows_is_damaged() {
     // Two rows, both answerable, so the refusal below is caused by the
     // corruption rather than by a fixture that never worked.
     let view = WorldView::new(&s, Some(60_000));
-    let WorldLookup::Answered(before) = view.ask("cup-1", T0).expect("ask") else {
+    let WorldLookup::Answered(before) = view.ask("cup-1", T0).expect("ask").into_lookup() else {
         panic!("expected answers");
     };
     assert_eq!(before.len(), 2, "one row per predicate");
@@ -573,7 +574,7 @@ fn a_corrupt_handle_is_not_reported_as_absence_of_knowledge() {
     let view = WorldView::new(&s, Some(60_000));
     let out = view.ask("cup-1", T0);
     assert!(
-        !matches!(out, Ok(WorldLookup::Unknown(_))),
+        !matches!(&out, Ok(c) if matches!(c.lookup(), WorldLookup::Unknown(_))),
         "damage must not be reported as absence"
     );
     assert!(matches!(out, Err(AskError::CorruptProvenance { .. })));
