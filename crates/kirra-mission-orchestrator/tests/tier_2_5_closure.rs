@@ -22,11 +22,17 @@
 //!
 //! HOW "THE SAME EVIDENCE" IS ESTABLISHED, and why it is stronger than a digest
 //! comparison: both runs are handed ONE `&dyn CorridorSource` and ONE
-//! `&[PerceivedObject]`, and the host forwards them with
-//! `PlanInput { goal, ..world.clone() }` — the same idiom the production Mick
-//! bridge uses, which re-borrows rather than rebuilds. So the two runs do not
-//! merely have EQUAL checker inputs; there is only ever one of each, and
-//! `ptr::eq` says so. A digest could only have shown the bytes matched.
+//! `&[PerceivedObject]`. The host builds no `PlanInput` — it passes the caller's
+//! straight to `plan_for_intent`, which does the goal override internally as
+//! `PlanInput { goal, ..world.clone() }`; that clone copies the `&` fields, so
+//! the corridor and objects are RE-BORROWED rather than rebuilt.
+//!
+//! Worth being precise about, because the closure argument rests on it: the
+//! re-borrow is performed by PRODUCTION planner code, not by the host or by this
+//! test. So the two runs do not merely have EQUAL checker inputs; there is only
+//! ever one of each, `ptr::eq` says so, and no edit to the host can replace that
+//! without changing `kirra-planner`. A digest could only have shown the bytes
+//! matched.
 
 use kirra_core::capture::contract_digest_hex;
 use kirra_core::corridor::{CorridorSource, MockCorridorSource, Point};

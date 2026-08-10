@@ -1628,12 +1628,17 @@ conditions hold.
 | 8 | checker inputs unchanged across that pair | corridor + objects are the **same borrow** (`ptr::eq`) |
 
 **Criterion 8 came out stronger than specified.** The plan was to digest the
-bound-derivation inputs and compare them. That is not needed: the host forwards
-the caller's world with `PlanInput { goal, ..world.clone() }` — the idiom the
-production Mick bridge already uses — so both runs receive *one*
-`&dyn CorridorSource` and *one* `&[PerceivedObject]`. The runs do not merely have
-equal checker inputs; there is only ever one of each, and `ptr::eq` says so. A
-digest could only have shown the bytes matched.
+bound-derivation inputs and compare them. That is not needed. The host builds no
+`PlanInput` at all — it passes the caller's straight to `plan_for_intent`, which
+performs the goal override itself as `PlanInput { goal, ..world.clone() }`, and
+that clone copies the `&` fields rather than rebuilding what they point at. Both
+runs therefore receive *one* `&dyn CorridorSource` and *one* `&[PerceivedObject]`.
+
+The attribution matters, so it is stated precisely: **the re-borrow is performed
+by production planner code, not by the host.** The runs do not merely have equal
+checker inputs; there is only ever one of each, `ptr::eq` says so, and no future
+edit to the host can replace that without changing `kirra-planner`'s own bridge.
+A digest could only have shown the bytes matched.
 
 **The contract half is discharged by construction, and the first draft of the
 test got this wrong.** It compared `contract_digest_hex(&contract)` against

@@ -49,8 +49,11 @@
 // § TWO THINGS THIS CRATE MAY NOT DO
 //
 //   * It may not construct, wrap, or modify the `CorridorSource` it forwards.
-//     It re-borrows the caller's world untouched (`..world.clone()`), which is
-//     the same idiom the production Mick bridge already uses.
+//     It does not build a `PlanInput` at all: it hands the caller's `&PlanInput`
+//     straight to `plan_for_intent`, which performs the
+//     `PlanInput { goal, ..world.clone() }` goal-override itself. The re-borrow
+//     therefore happens in PRODUCTION planner code this crate does not own —
+//     which is a stronger guarantee than doing it here would be.
 //   * It may not read a checker verdict and re-plan against its NUMERIC content.
 //     Reading *that* a proposal was refused is operational state; reading
 //     "refused by 0.42 m/s" is consuming checker-bound information, and tuning
@@ -121,12 +124,15 @@ pub enum ContextApplication {
 
 /// Plan with world-derived symbolic preference applied to the GOAL only.
 ///
-/// `world` is forwarded untouched except for the goal — the same
-/// `PlanInput { goal, ..world.clone() }` idiom the production Mick bridge uses,
-/// which re-borrows the caller's corridor and objects rather than copying or
-/// rebuilding them. That is what makes "the checker's inputs are unchanged"
-/// structural here rather than merely asserted: across two runs there is ONE
-/// corridor borrow and ONE object slice, not two equal ones.
+/// `world` is handed to `plan_for_intent` UNCHANGED — this function builds no
+/// `PlanInput`. The goal override happens inside that production bridge, as
+/// `PlanInput { goal, ..world.clone() }`, whose clone copies the `&` fields and
+/// so re-borrows the caller's corridor and objects rather than rebuilding them.
+///
+/// That is what makes "the checker's inputs are unchanged" structural rather
+/// than asserted: across two runs there is ONE corridor borrow and ONE object
+/// slice, not two equal ones — and the re-borrow is performed by planner code
+/// this crate does not own, so no edit here can quietly replace it.
 ///
 /// The proposal producer is `plan_for_intent` — the unmodified production
 /// bridge, which knows nothing about Kirra World.
