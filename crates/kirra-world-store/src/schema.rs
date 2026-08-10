@@ -112,7 +112,7 @@ pub const CHAIN_ALGORITHM: &str = "kirra-audit-hash/compute_record_hash_v2";
 /// | 2 | the four orthogonal trust axes, additive | 2026-08-07 |
 /// | 3 | the `subject_kind` discriminant | `KIRRA-WM-CANDIDATE-ID-001` |
 /// | 4 | the `entity_id_mint` ledger | `WM_SCOPE.md` §5 |
-pub const SCHEMA_VERSION: i64 = 4;
+pub const SCHEMA_VERSION: i64 = 5;
 
 /// **v2 — the four orthogonal trust axes, added additively.**
 ///
@@ -311,4 +311,56 @@ CREATE TABLE IF NOT EXISTS entity_id_mint (
     entity_id    TEXT    PRIMARY KEY,
     minted_at_ms INTEGER NOT NULL
 );
+"#;
+
+/// **v5 — `KIRRA-WM-CLAIM-SHAPES-001`: an object-bearing claim requires a
+/// predicate.**
+///
+/// # The three valid claim shapes
+///
+/// | `predicate` | `object` | shape |
+/// |---|---|---|
+/// | `None` | `None` | payload-only claim |
+/// | `Some` | `None` | predicate + payload claim |
+/// | `Some` | `Some` | subject-predicate-object + payload claim |
+/// | `None` | `Some` | **INVALID** — refused by this trigger |
+///
+/// # Why the fourth is refused rather than merely unsupported
+///
+/// `world_current` keys on `(subject, predicate_key)` where `predicate_key` is
+/// the predicate or `''`. A `predicate = NULL, object = <x>` row therefore
+/// occupies the SAME slot as a payload-only claim about that subject, and the
+/// later of the two silently replaces the earlier. That was measured, not
+/// theorised: appending a payload-only claim and then an object-without-
+/// predicate claim for one subject leaves exactly one row, and the payload-only
+/// claim is gone.
+///
+/// So the shape is **projection-destructive** — the store would admit two
+/// semantically distinct claims that the deterministic projection cannot tell
+/// apart, and one of them disappears with no signal.
+///
+/// # Why a TRIGGER and not a `CHECK`
+///
+/// SQLite's `ALTER TABLE` cannot add a constraint to existing columns; only
+/// `ADD COLUMN` (which is how v2 and v3 carried their inline `CHECK`s). A real
+/// `CHECK` here would require the 12-step table rebuild — create, copy every
+/// row, drop, rename — on the hash-chained append-only log, which is the one
+/// table whose value is that it is never rewritten. A `BEFORE INSERT` trigger
+/// enforces the same rule at the SQL layer, so **raw SQL cannot route around
+/// it**, while remaining additive in the style of v4's `CREATE TABLE`.
+///
+/// # Historical rows are left alone, deliberately
+///
+/// A trigger constrains future inserts and touches nothing already written. Any
+/// pre-existing invalid row therefore survives migration unchanged rather than
+/// being coerced — repairing a hash-chained log is a different and much larger
+/// decision. [`super::WorldStore::invalid_shape_rows`] makes such rows visible
+/// so they are a finding rather than a silence.
+pub const SCHEMA_V5_MIGRATION: &str = r#"
+CREATE TRIGGER IF NOT EXISTS world_events_object_requires_predicate
+BEFORE INSERT ON world_events
+WHEN NEW.object IS NOT NULL AND NEW.predicate IS NULL
+BEGIN
+    SELECT RAISE(ABORT, 'KIRRA-WM-CLAIM-SHAPES-001: an object-bearing claim requires a predicate');
+END;
 "#;
