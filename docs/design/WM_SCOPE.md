@@ -1439,6 +1439,87 @@ Two things deliberately **not** added:
   perception-config change is *detected* (the digests differ) but not *explained*.
   That is a diagnosability gap, not a soundness gap, and part 4 needs soundness.
 
+### `KIRRA-WM-SYMBOLIC-SEAM-001` — RULED 2026-08-10
+
+> **World-derived proposal context is SYMBOLIC ONLY. Its public API may carry
+> identities, relations, ordering, categorical state, and opaque references; it
+> may not carry numeric quantities that could encode checker bounds.**
+
+This is strictly stronger than the placement ruling, and the difference is worth
+stating because the weaker version is the one that sounds sufficient.
+`KIRRA-WM-CONSUMER-PLACEMENT-001` constrains **where** the consumer sits — a
+property of the dependency graph, true today, and one `use` away from false. This
+constrains **what the seam can hold**. Every checker bound in this codebase is a
+magnitude with physical units, and a type with nowhere to put a magnitude cannot
+carry one however much a future caller wants it to.
+
+**Integers are banned too, not only floats.** `speed_mm_s: u32` is a bound in
+disguise, and it is the *more* likely accident: someone reaching for integer
+millimetres is usually being careful about precision. The enforcement inverts the
+burden — no primitive numeric field on a public type, with individual allowlist
+entries requiring a written non-physical justification. A quantity with units
+cannot write that justification.
+
+Enforced by `ci/check_proposal_context_symbolic.py`. Its allowlist is **empty**,
+which is the strongest state it can be in.
+
+**Honest limit, stated rather than discovered later:** the gate checks values that
+*cross* the seam — fields of public types — not function parameters. `now_ms` is a
+bitemporal query instant; the store cannot be read without one and it is never
+carried on the context. A producer could in principle take a bound as an argument
+and encode it into an id string. Nothing here would catch that, and nothing cheap
+would.
+
+### Tier 2.5 — evidence recorded, closure still open
+
+`crates/kirra-proposal-context` exists: the sanctioned consumer, whose only Kirra
+dependencies are `kirra-world` and `kirra-world-store`. Deliberately **not**
+`kirra-core` — that is where `CorridorSource` and `VehicleKinematicsContract`
+live, and a crate that can *name* a checker-bound type is one refactor from
+producing one.
+
+**What the differential harness shows** (`tests/differential.rs`), with the three
+controls that make it non-vacuous:
+
+1. World silent vs world knowing `package_17 last_seen_at dock_b` yields a
+   different symbolic context, and a proposal-producing function fed by it
+   chooses a different destination. *(the positive result)*
+2. **A context-BLIND producer shows no difference.** Without this, the positive
+   result could hold because the two runs differed incidentally, and the harness
+   would report success having tested nothing about the seam.
+3. **The gate refuses a synthetic bound** — `ci/test_proposal_context_symbolic.py`
+   feeds the real scanner nine bound-bearing shapes and fails if it stays quiet.
+   This one already earned its keep: it caught a hole in the first
+   implementation, where a single-line struct variant
+   (`Envelope { lateral_accel_mps2: f64 }`) matched none of the field patterns.
+   The scanner now reads whole lines inside a public type body, because
+   enumerating declaration shapes is only ever as good as the list, and the list
+   was already wrong once.
+
+**The fence positive control fires.** `check_kirra_world_bidirectional_fence.py`
+passes **with the new world edge present**: 55 workspace packages now, Fence B's
+closure still 19, and the consumer outside it. That is the first time the fence
+has been observed saying *yes* to a legitimate route.
+
+**And what this does NOT show, which is why Tier 2.5 stays open.** The proposal
+producer in the harness is test-local. Nothing in production consumes the context,
+so no production behaviour path has changed — and §5.5's Goal 1 requires a host
+whose *removal changes observable proposal behaviour*. This is Tier 2.5
+**evidence**, not Tier 2.5 closure.
+
+The reason the shortcut was refused rather than taken: wiring `kirra-planner` to
+Kirra World would create `kirra-sidecars → kirra-planner → kirra-world*`, and
+`kirra-sidecars` implements `CorridorSource`, so check 4's conjunction should
+refuse it. Building that route to make the evidence look stronger would be
+building the forbidden route.
+
+**What closure needs** is one more ruling: the production **proposal-orchestration
+boundary** — a seam through which symbolic context enters real proposal generation
+*without* the existing planner gaining a dependency on Kirra World. Its acceptance
+criterion is dependency direction, and its structural rule is the same shape as
+this section's: the orchestration host may not name or produce authoritative
+checker-input types. That ruling is not made here.
+
 ---
 
 ## 6. Tier 3 — The query engine

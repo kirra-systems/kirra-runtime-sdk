@@ -1600,6 +1600,30 @@ jobs:
         run: |
           python3 ci/test_kirra_world_bidirectional_fence.py
           python3 ci/check_kirra_world_bidirectional_fence.py --verbose
+      - name: Proposal-context symbolic-seam gate (Tier 2.5)
+        # THE RULE: World-derived proposal context is SYMBOLIC ONLY — identities,
+        # relations, ordering, categorical state, opaque references. It may not
+        # carry numeric quantities that could encode checker bounds.
+        #
+        # This is the CAPABILITY half of Tier 2.5's placement ruling. The fence
+        # above proves the consumer crate is not in the safety closure and
+        # implements no CorridorSource; that is a property of the dependency
+        # graph, and it is true today. This gate is about what the seam's TYPES
+        # can hold: a speed cap cannot be smuggled through a boundary with
+        # nowhere to put a number, whatever a future caller wants.
+        #
+        # Integers are banned too, not just floats. `speed_mm_s: u32` is a bound
+        # in disguise and is the MORE likely accident, because someone reaching
+        # for integer millimetres is usually trying to be careful.
+        #
+        # Self-test first, and it is not ceremony: the negative cases ARE Tier
+        # 2.5's control 3. A capability gate never shown to refuse anything is
+        # indistinguishable from a no-op, and would let the acceptance proof cite
+        # a limit that does not exist. Writing those cases already caught one
+        # real hole (a single-line struct variant the field regexes missed).
+        run: |
+          python3 ci/test_proposal_context_symbolic.py
+          python3 ci/check_proposal_context_symbolic.py
       - name: Kirra World domain-logic gate (ADR-0042 Decision 5)
         # THE RULE: no Kirra World domain implementation may merge until
         # ADR-0042's safety-assurance scope ruling is assigned to a named owner
