@@ -1624,6 +1624,35 @@ jobs:
         run: |
           python3 ci/test_proposal_context_symbolic.py
           python3 ci/check_proposal_context_symbolic.py
+      - name: Answer-boundary gate (Tier 3 box 3d)
+        # THE RULE: a crate that asks the world DOMAIN questions goes through
+        # kirra_world_service::WorldView, not the projection-read API on
+        # WorldStore.
+        #
+        # The bypass is not hypothetical and the fixture is not synthetic — it
+        # is the code that shipped. `mission_context` read ProjectedClaim's
+        # public fields straight off `store.current(..)` (no validity, no trust
+        # axes, no provenance, no identity resolution) until boxes 3a (#1430)
+        # and 3c (#1431) repaired it. Repairing a bypass without gating it means
+        # repairing it again: `store.current(..)` is one autocomplete away, it
+        # compiles, and it returns plausible data.
+        #
+        # Scope is self-maintaining — every crate DEPENDING on kirra-world-store
+        # is checked, so a NEW consumer is covered from its first commit without
+        # anyone remembering to add it. Undoing 3a by writing a fresh consumer is
+        # the same regression as undoing it in place.
+        #
+        # Operational reads (verify_chain, schema_version, backup/export,
+        # retention, compaction, the WM-2 harness) are carved out BY
+        # CONSTRUCTION: they are not in the domain-read method list, so they are
+        # never matched and there is no exception list to rot.
+        #
+        # Self-test first, and it carries the anti-neutering case: if the
+        # repaired consumer is ever moved onto the permitted list, the gate is
+        # watching nothing and says so.
+        run: |
+          python3 ci/check_world_answer_boundary.py --self-test
+          python3 ci/check_world_answer_boundary.py
       - name: Kirra World domain-logic gate (ADR-0042 Decision 5)
         # THE RULE: no Kirra World domain implementation may merge until
         # ADR-0042's safety-assurance scope ruling is assigned to a named owner

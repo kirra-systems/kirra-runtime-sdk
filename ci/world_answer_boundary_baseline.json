@@ -1,0 +1,14 @@
+{
+  "rule": "A crate that asks the world DOMAIN questions must go through kirra_world_service::WorldView, not the projection-read API on WorldStore. Tier 3 box 3d; see docs/design/WM_SCOPE.md.",
+  "gate": "ci/check_world_answer_boundary.py",
+  "max_violations": 0,
+  "why_zero": "This is not an aspiration being ratcheted down. The one real violation -- mission_context reading ProjectedClaim's public fields off store.current(..) -- was repaired by boxes 3a (#1430) and 3c (#1431), so the tree is already clean. The ceiling starts at 0 and has nowhere to go.",
+  "permitted_readers": {
+    "kirra-world-store": "Owns the projection tables. Gating the crate that defines them would be circular.",
+    "kirra-world-service": "IS the answer boundary. Its whole job is to read a projection and wrap it in validity, trust axes, provenance and identity resolution -- this is the one crate that must call these methods.",
+    "wm2-persistence-harness": "ADR-0041 measurement instrument. WM_SCOPE names the WM-2 harness as a legitimate reader below the engine: it measures storage behaviour, which is not a domain question.",
+    "wm2-schema-growth": "ADR-0041 D-20 measurement instrument, same carve-out as the persistence harness."
+  },
+  "on_adding_a_permitted_reader": "Do not. A new domain consumer going through the boundary needs no entry here, and one that cannot is the regression this gate exists to catch. If an entry is genuinely required, it belongs in review with the reason written above -- which is why this is a JSON file with a prose field rather than a regex in the gate.",
+  "violations": []
+}
