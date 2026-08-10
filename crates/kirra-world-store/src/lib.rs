@@ -196,6 +196,28 @@ pub enum StoreError {
     LlmCannotConfirm,
     /// SD-4, refused early for the same reason.
     SpatialClaimNeedsFrame,
+    /// `KIRRA-WM-CLAIM-SHAPES-001` — an object-bearing claim requires a
+    /// predicate.
+    ///
+    /// **Why this is refused rather than tolerated.** `world_current` keys on
+    /// `(subject, predicate_key)` with `predicate_key = predicate` or `''`, so a
+    /// `predicate = NULL, object = Some(_)` claim occupies the SAME slot as a
+    /// payload-only claim about that subject. The two mean entirely different
+    /// things, and the later one silently replaces the earlier — measured, not
+    /// theorised: appending a payload-only claim and then an object-without-
+    /// predicate claim for one subject leaves exactly one row, and the
+    /// payload-only claim is gone.
+    ///
+    /// So the shape is not merely unsupported, it is **projection-destructive**:
+    /// the store would admit two semantically distinct claims that the
+    /// deterministic projection cannot tell apart. The three valid shapes are
+    /// payload-only, predicate + payload, and predicate + object + payload.
+    ObjectWithoutPredicate {
+        /// The claim's subject, so the refusal names the row.
+        subject: String,
+        /// The object that had no predicate to hang from.
+        object: String,
+    },
     /// A [`SubjectRef::Unbound`] was offered as a label.
     ///
     /// `Unbound` carries no id and `subject` is `NOT NULL`, so labelling such a
@@ -335,6 +357,13 @@ impl std::fmt::Display for StoreError {
                 f,
                 "a spatial claim requires frame_id (ADR-0042 Decision 2; \
                  KIRRA-WM2-SCHEMA-001 SD-4)"
+            ),
+            Self::ObjectWithoutPredicate { subject, object } => write!(
+                f,
+                "an object-bearing claim requires a predicate: subject={subject:?} \
+                 object={object:?} has no predicate, and would occupy the same \
+                 world_current slot as a payload-only claim about that subject \
+                 (KIRRA-WM-CLAIM-SHAPES-001)"
             ),
             Self::UnboundSubjectNotStorable => write!(
                 f,
@@ -897,14 +926,21 @@ fn sha256_hex(bytes: &[u8]) -> String {
 }
 
 /// SHA-256 of the **effective** schema text — [`schema::SCHEMA_V1`] followed by
-/// [`schema::SCHEMA_V2_MIGRATION`] — recorded in `world_store_meta` so a store
+/// every migration in order, currently through
+/// [`schema::SCHEMA_V5_MIGRATION`] — recorded in `world_store_meta` so a store
 /// can prove which exact schema produced it, not merely which version number
 /// someone claimed.
 ///
-/// A store migrated from v1 is re-stamped with this value, so a born-v2 store
-/// and a migrated one carry the **same** digest. That is correct and
-/// deliberate: they have the same effective schema, and a digest that
-/// distinguished them would be recording history rather than structure.
+/// **This list is part of the function's contract, so it is stated as a range
+/// rather than an enumeration that goes stale.** It named only v1 and v2 from
+/// v3 onward, and the digest it described had not matched the digest it computed
+/// for two migrations — exactly the drift the digest exists to detect, in the
+/// documentation of the thing detecting it.
+///
+/// A store migrated from an older version is re-stamped with this value, so a
+/// born-current store and a migrated one carry the **same** digest. That is
+/// correct and deliberate: they have the same effective schema, and a digest
+/// that distinguished them would be recording history rather than structure.
 /// [`schema_digest_v1`] remains available for reading a store that has not been
 /// migrated.
 #[must_use]
@@ -913,6 +949,7 @@ pub fn schema_digest() -> String {
     effective.push_str(schema::SCHEMA_V2_MIGRATION);
     effective.push_str(schema::SCHEMA_V3_MIGRATION);
     effective.push_str(schema::SCHEMA_V4_MIGRATION);
+    effective.push_str(schema::SCHEMA_V5_MIGRATION);
     sha256_hex(effective.as_bytes())
 }
 
@@ -966,6 +1003,7 @@ impl WorldStore {
             tx.execute_batch(schema::SCHEMA_V2_MIGRATION)?;
             tx.execute_batch(schema::SCHEMA_V3_MIGRATION)?;
             tx.execute_batch(schema::SCHEMA_V4_MIGRATION)?;
+            tx.execute_batch(schema::SCHEMA_V5_MIGRATION)?;
             tx.execute(
                 "INSERT INTO world_store_meta (key, value) VALUES ('schema_version', ?1)",
                 params![SCHEMA_VERSION.to_string()],
@@ -1061,6 +1099,13 @@ impl WorldStore {
         if from < 4 {
             tx.execute_batch(schema::SCHEMA_V4_MIGRATION)?;
         }
+        // Same shape once more. v5 installs the KIRRA-WM-CLAIM-SHAPES-001
+        // trigger; it touches no existing row, so a store carrying the invalid
+        // shape migrates cleanly and keeps it — visible via
+        // `invalid_shape_rows`, never silently coerced.
+        if from < 5 {
+            tx.execute_batch(schema::SCHEMA_V5_MIGRATION)?;
+        }
 
         // Digest before version, inside the transaction. The order no longer
         // guards a crash window — the transaction does — but it still reads in
@@ -1098,6 +1143,35 @@ impl WorldStore {
             .as_deref()
             .and_then(|v| v.parse::<i64>().ok())
             .unwrap_or(1))
+    }
+
+    /// Events carrying the `KIRRA-WM-CLAIM-SHAPES-001` invalid shape —
+    /// `object` present with no `predicate` — as `(generation, subject)`.
+    ///
+    /// **Reports; never repairs.** The v5 trigger stops new ones, but a store
+    /// written before it existed may already contain some, and coercing them
+    /// would mean rewriting a hash-chained append-only log — a much larger
+    /// decision than this migration is entitled to make. So they survive, and
+    /// this method is what makes them a *finding* rather than a silence.
+    ///
+    /// An operator seeing a non-empty result should know what it implies: each
+    /// such row shares `world_current`'s `(subject, '')` slot with any
+    /// payload-only claim about the same subject, so one of the two is already
+    /// absent from the current projection.
+    ///
+    /// Empty on any store created at v5 or later, which the trigger guarantees.
+    pub fn invalid_shape_rows(&self) -> Result<Vec<(i64, String)>, StoreError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT generation, subject FROM world_events
+             WHERE object IS NOT NULL AND predicate IS NULL
+             ORDER BY generation",
+        )?;
+        let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
     }
 
     /// The chain digest of the newest event, or [`GENESIS`].
@@ -1147,6 +1221,15 @@ impl WorldStore {
         }
         if e.kind == "spatial" && e.frame_id.is_none() {
             return Err(StoreError::SpatialClaimNeedsFrame);
+        }
+        // `KIRRA-WM-CLAIM-SHAPES-001`: an object-bearing claim requires a
+        // predicate. Refused here so the error names the RULE, and again by the
+        // v5 trigger so raw SQL cannot route around this check.
+        if e.object.is_some() && e.predicate.is_none() {
+            return Err(StoreError::ObjectWithoutPredicate {
+                subject: e.subject.to_owned(),
+                object: e.object.unwrap_or_default().to_owned(),
+            });
         }
         // The label must agree with the value it labels. Checked here rather
         // than by a `CHECK`, because SQLite cannot compare a column against a

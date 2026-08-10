@@ -2057,6 +2057,51 @@ proving set — not on every conceivable query. The minimum set:
 
 New domain queries can then be added without changing the Tier 3 trust model.
 
+### `KIRRA-WM-CLAIM-SHAPES-001` — RULED 2026-08-10
+
+> **An object-bearing claim requires a predicate. `predicate = None,
+> object = Some(_)` is invalid and is rejected at admission and by schema
+> constraint.**
+
+| `predicate` | `object` | shape |
+|---|---|---|
+| `None` | `None` | payload-only claim |
+| `Some` | `None` | predicate + payload claim |
+| `Some` | `Some` | subject–predicate–object + payload claim |
+| `None` | `Some` | **INVALID** |
+
+**The evidence is stronger than "this shape feels odd."** `world_current` keys on
+`(subject, predicate_key)` where `predicate_key` is the predicate or `''`, so an
+object-without-predicate claim occupies the **same slot** as a payload-only claim
+about that subject. Measured, not theorised — appending a payload-only claim and
+then an object-without-predicate claim for one subject left exactly one row, and
+the payload-only claim was gone. The shape is not merely unsupported, it is
+**projection-destructive**: the store admitted two semantically distinct claims
+the deterministic projection cannot tell apart, and one vanished without a signal.
+
+**Enforced at two layers, because one is not enough.** Admission refuses it with
+an error naming the rule; the **v5 trigger** makes SQLite itself refuse, so a raw
+`INSERT` cannot route around a polite decoder. Both were mutation-verified:
+neutering the trigger fails only the raw-SQL test, and neutering the admission
+check fails only the admission and aliasing tests — so neither layer is carrying
+the other. (With admission off, the trigger still refuses the row; the *error
+type* changes, the *refusal* does not.)
+
+**A trigger rather than a `CHECK`, and the reason is not preference.** SQLite's
+`ALTER TABLE` cannot add a constraint to existing columns — only `ADD COLUMN`,
+which is how v2 and v3 carried their inline checks. A real `CHECK` would require
+the 12-step table rebuild on the hash-chained append-only log, the one table
+whose value is that it is never rewritten. A `BEFORE INSERT` trigger enforces the
+same rule at the same layer while staying additive.
+
+**Historical rows are reported, never repaired.** A trigger constrains future
+inserts and touches nothing already written, so a store carrying the invalid
+shape migrates cleanly and keeps it — repairing a hash-chained log is a far
+larger decision than a migration is entitled to make.
+`WorldStore::invalid_shape_rows` makes such rows a finding rather than a silence.
+Nothing in the workspace relied on the invalid shape: every `predicate: None`
+construction site was checked and all pair it with `object: None`.
+
 ### `KIRRA-WM-CONSUMER-WITNESS-001` — RULED 2026-08-10
 
 > **Every Tier 3 contract change must be exercised by at least one real consumer
