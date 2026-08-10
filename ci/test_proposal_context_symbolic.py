@@ -7,11 +7,18 @@ refuse anything is indistinguishable from a no-op, and it would be worse than
 nothing: it would let the Tier 2.5 acceptance proof cite a capability limit that
 does not exist.
 
-So the negative half is the point. Each `t0N_rejects_*` case feeds the real
-scanner synthetic source containing a quantity a planner could act on, and fails
-if the gate stays quiet. The `t1N_accepts_*` cases guard the other failure mode —
-a gate so eager that the intended symbolic design cannot be written, which would
-simply get it switched off.
+So the negative half is the point. Each `*_rejects_*` case feeds the real scanner
+synthetic source containing a quantity a planner could act on, and fails if the
+gate stays quiet. The `*_accepts_*` cases guard the other failure mode — a gate so
+eager that the intended symbolic design cannot be written, which would simply get
+it switched off.
+
+Three holes in the scanner have been found by writing these cases rather than by
+reading the scanner: a single-line struct variant that matched none of the field
+regexes; a `#[cfg(test)]` exit condition that could never fire, silencing every
+line after the first test module; and a declaration line carrying a const generic.
+Each is now a case below. The pattern is consistent enough to name: enumerating
+the syntactic shapes a magnitude can take is only ever as good as the list.
 
 Run:  python3 ci/test_proposal_context_symbolic.py
 """
@@ -178,6 +185,66 @@ def t09_rejects_usize_and_isize() -> None:
     )
 
 
+def t16_rejects_a_bound_declared_after_a_test_module() -> None:
+    """The `#[cfg(test)]` exit condition must actually fire.
+
+    The first scanner reset on `depth < test_mod_depth`, which can never be true:
+    `test_mod_depth` is the depth AT the attribute, the module body raises depth
+    by one, and closing it returns depth to exactly that value — never below. So
+    one `#[cfg(test)]` anywhere in a file silenced the scanner for the rest of it,
+    and a public type declared afterwards was never examined.
+
+    Today's crate happens to put its test module last, so nothing slipped. That
+    is luck, not a property, and this case removes the luck.
+    """
+    expect_rejected(
+        "t16_rejects_a_bound_declared_after_a_test_module",
+        """
+        #[cfg(test)]
+        mod tests {
+            pub struct Fixture {
+                pub whatever: f64,
+            }
+        }
+
+        pub struct ProposalContext {
+            pub speed_mps: f64,
+        }
+        """,
+        "a bound declared AFTER a `#[cfg(test)]` module",
+    )
+
+
+def t17_rejects_a_const_generic_on_the_declaration_line() -> None:
+    """A magnitude can ride the declaration itself, not only a field.
+
+    `pub struct Ctx<const N: usize>` carries a numeric across the seam without a
+    single numeric token appearing on any field line. Same lesson as the
+    struct-variant hole: scan the text, do not enumerate the shapes.
+    """
+    expect_rejected(
+        "t17_rejects_a_const_generic_on_the_declaration_line",
+        """
+        pub struct ProposalContext<const N: usize> {
+            hints: [ContextHint; 4],
+        }
+        """,
+        "`<const N: usize>` on the declaration line",
+    )
+
+
+def t18_rejects_a_defaulted_numeric_type_parameter() -> None:
+    expect_rejected(
+        "t18_rejects_a_defaulted_numeric_type_parameter",
+        """
+        pub struct ProposalContext<T = u32> {
+            value: T,
+        }
+        """,
+        "a defaulted numeric type parameter",
+    )
+
+
 # ---------------------------------------------------------------------------
 # The positive half — the intended design must remain writable.
 # ---------------------------------------------------------------------------
@@ -305,8 +372,23 @@ def t15_a_planted_bound_in_the_real_crate_would_be_caught() -> None:
 
 ALL = [v for k, v in sorted(globals().items()) if k.startswith("t") and k[1:3].isdigit()]
 
+# A case that is not COLLECTED is the most literal form of a test that cannot
+# fail. Three were written as `t0a`/`t0b`/`t0c`, which the `t` + two-digit filter
+# above silently skipped -- they sat in the file looking like coverage and ran
+# never. This makes that impossible: every callable named `t<something>` must end
+# up in ALL, or the suite refuses to run.
+_UNCOLLECTED = [
+    k
+    for k, v in globals().items()
+    if k.startswith("t") and callable(v) and getattr(v, "__module__", None) == __name__ and v not in ALL
+]
+
 
 def main() -> int:
+    if _UNCOLLECTED:
+        print(f"FAIL: these cases are never run: {sorted(_UNCOLLECTED)}")
+        print("      names must be `t` + two digits to be collected")
+        return 1
     for fn in ALL:
         try:
             fn()

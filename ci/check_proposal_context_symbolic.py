@@ -115,30 +115,45 @@ def scan_source(text: str, path: str) -> list[str]:
     in_test_mod = False
     test_mod_depth: int | None = None
 
+    entered_test_body = False
+
     for lineno, raw in enumerate(text.splitlines(), start=1):
         line = raw
 
         # `#[cfg(test)]` modules are not part of the public seam.
+        #
+        # THE EXIT CONDITION IS THE SUBTLE HALF, and the first version got it
+        # wrong: it reset on `depth < test_mod_depth`, which can never fire.
+        # `test_mod_depth` is the depth AT the attribute (say 0), the module body
+        # raises depth to 1, and closing it returns depth to exactly 0 -- never
+        # below. So once a file contained one `#[cfg(test)]`, every line after it
+        # was treated as test-only and went unscanned, including public types
+        # declared later in the same file. Tracking that the body was actually
+        # ENTERED, and exiting on `<=`, is what closes it.
         if re.match(r"^\s*#\[cfg\(test\)\]", line):
             in_test_mod = True
             test_mod_depth = depth
-        if in_test_mod and test_mod_depth is not None and depth < test_mod_depth:
-            in_test_mod = False
-            test_mod_depth = None
+            entered_test_body = False
 
         decl = TYPE_DECL.match(line)
         if decl and not in_test_mod:
             current_type = decl.group(2)
             depth_at_decl = depth
-            # A tuple struct declares its payload on the same line.
-            tup = TUPLE_PAYLOAD.search(line)
-            if tup and "{" not in line:
-                for num in numeric_types_in(tup.group(2)):
-                    if (current_type, "0") not in ALLOWLIST:
-                        violations.append(
-                            f"{path}:{lineno}: `{current_type}` tuple payload is `{num}` "
-                            f"-- a magnitude cannot cross the seam"
-                        )
+            # THE DECLARATION LINE IS PART OF THE TYPE.
+            #
+            # Scanned in full, not just for a tuple payload: a const generic
+            # (`pub struct Ctx<const N: usize>`) or a defaulted type parameter
+            # (`pub struct Ctx<T = u32>`) carries a numeric across the seam
+            # without any numeric token ever appearing on a field line. Same
+            # lesson as the struct-variant hole -- scan the text, do not
+            # enumerate the shapes it can take.
+            for num in numeric_types_in(line):
+                if (current_type, "0") in ALLOWLIST:
+                    continue
+                violations.append(
+                    f"{path}:{lineno}: `{current_type}` declaration carries `{num}` in "
+                    f"`{line.strip()}` -- a magnitude cannot cross the seam"
+                )
         elif current_type and not in_test_mod and depth_at_decl is not None and depth > depth_at_decl:
             # Scan the WHOLE LINE, not a field pattern.
             #
@@ -169,6 +184,17 @@ def scan_source(text: str, path: str) -> list[str]:
                     )
 
         depth += line.count("{") - line.count("}")
+
+        # Test-module exit, evaluated AFTER the depth update so the closing brace
+        # of `mod tests { ... }` is accounted for on the line that carries it.
+        if in_test_mod and test_mod_depth is not None:
+            if depth > test_mod_depth:
+                entered_test_body = True
+            elif entered_test_body:
+                in_test_mod = False
+                test_mod_depth = None
+                entered_test_body = False
+
         if current_type and depth_at_decl is not None and depth <= depth_at_decl:
             current_type = None
             depth_at_decl = None
