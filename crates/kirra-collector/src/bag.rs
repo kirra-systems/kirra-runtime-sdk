@@ -371,6 +371,7 @@ mod db3_tests {
             mrc: false,
             posture: "NOMINAL".to_string(),
             derate_enabled: false,
+            contract_digest: None,
         };
         let JoinOutcome::Joined(m) = join_record(&rec, &r, 100) else {
             panic!("expected a join against the db3 bag");
@@ -610,6 +611,7 @@ mod mcap_tests {
             mrc: false,
             posture: "NOMINAL".to_string(),
             derate_enabled: false,
+            contract_digest: None,
         };
         let JoinOutcome::Joined(m) = join_record(&rec, &r, 100) else {
             panic!("expected a join against the mcap bag");

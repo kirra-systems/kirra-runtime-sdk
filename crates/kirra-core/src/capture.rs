@@ -41,7 +41,9 @@ use std::time::Instant;
 
 use tokio::sync::mpsc;
 
-use crate::kinematics_contract::{EnforceAction, ProposedVehicleCommand};
+use crate::kinematics_contract::{
+    EnforceAction, ProposedVehicleCommand, VehicleKinematicsContract,
+};
 use crate::FleetPosture;
 
 // The capture record wire schema lives in the governor-free
@@ -98,8 +100,77 @@ pub enum TrajectoryDecision {
     MrcFallback,
 }
 
+/// Domain-separation tag for [`contract_digest_hex`]. Bumping this string is the
+/// declared way to invalidate every previously recorded contract digest; it must
+/// change if the field set or the field ORDER below changes, because either would
+/// silently give the same envelope a different identity.
+pub const CONTRACT_DIGEST_DOMAIN: &[u8] = b"KIRRA-CONTRACT-V1";
+
+/// Identity of the RESOLVED kinematic contract a verdict was judged against:
+/// domain-tagged SHA-256 over the IEEE bits of every field, in declaration
+/// order. 64 lowercase hex chars.
+///
+/// This is the envelope the command was actually bounded by — on the Nominal arm
+/// that is the class profile with the perception-derate cap already applied, so
+/// it is strictly more informative than the vehicle class (which selects a
+/// contract) or `derate_enabled` (which records only that a cap composed, never
+/// its value).
+///
+/// `to_bits` rather than a float format: the point is a BIT-identical comparison
+/// across two runs, and a decimal rendering would let two different envelopes
+/// share a digest. `-0.0` and `0.0` therefore differ, as do distinct NaN
+/// payloads — correct for an identity, and unreachable for a valid contract.
+///
+/// The `Option` is length-tagged (`0` / `1` + value) rather than encoded by
+/// presence alone, so `None` can never collide with a `Some` whose bits happen to
+/// start with the following field's.
+#[must_use]
+pub fn contract_digest_hex(contract: &VehicleKinematicsContract) -> String {
+    use sha2::{Digest, Sha256};
+    let mut h = Sha256::new();
+    h.update(CONTRACT_DIGEST_DOMAIN);
+    // Declaration order. Adding a field here without bumping the domain tag is
+    // the failure this constant exists to make explicit.
+    for value in [
+        contract.max_speed_mps,
+        contract.max_accel_mps2,
+        contract.max_brake_mps2,
+        contract.max_steering_deg,
+        contract.max_steering_rate_deg_s,
+        contract.min_follow_distance_m,
+        contract.max_lateral_accel_mps2,
+        contract.wheelbase_m,
+        contract.width_m,
+        contract.length_m,
+        contract.overhang_front_m,
+        contract.overhang_rear_m,
+    ] {
+        h.update(value.to_bits().to_le_bytes());
+    }
+    match contract.odd_speed_cap_mps {
+        None => h.update([0u8]),
+        Some(cap) => {
+            h.update([1u8]);
+            h.update(cap.to_bits().to_le_bytes());
+        }
+    }
+    let digest = h.finalize();
+    let mut out = String::with_capacity(64);
+    for byte in digest {
+        // Hand-rolled rather than pulling `hex` into the lean foundation for
+        // one call site.
+        out.push(char::from_digit(u32::from(byte >> 4), 16).expect("nibble < 16"));
+        out.push(char::from_digit(u32::from(byte & 0x0f), 16).expect("nibble < 16"));
+    }
+    out
+}
+
 /// Build a record from the already-computed gateway verdict + context. Pure;
 /// performs no I/O. Called at the gateway emit site (off the verdict path).
+///
+/// `contract` is the RESOLVED envelope the verdict was produced against — the
+/// caller must pass the same value it handed the checker, not a re-derivation,
+/// or the recorded digest attests an envelope that did not bound the command.
 ///
 /// Free function (not an inherent method) because `CaptureRecord` now lives in
 /// `kirra-capture-schema` — the orphan rule forbids an inherent impl here. The
@@ -114,6 +185,7 @@ pub fn record_from_verdict(
     posture: FleetPosture,
     proposed: &ProposedVehicleCommand,
     derate_enabled: bool,
+    contract: &VehicleKinematicsContract,
 ) -> CaptureRecord {
     let (outcome, deny_code, safe_value) = match verdict {
         EnforceAction::Allow => (CaptureOutcome::Allow, None, None),
@@ -157,6 +229,7 @@ pub fn record_from_verdict(
         mrc: matches!(posture, FleetPosture::Degraded),
         posture: posture_token(posture).to_string(),
         derate_enabled,
+        contract_digest: Some(contract_digest_hex(contract)),
     }
 }
 
@@ -206,6 +279,14 @@ pub fn record_from_trajectory_verdict(
             || matches!(posture, FleetPosture::Degraded),
         posture: posture_token(posture).to_string(),
         derate_enabled,
+        // DELIBERATELY absent on the slow loop. The trajectory verdict is not
+        // bounded by a single `VehicleKinematicsContract` — it composes
+        // containment, per-pose kinematics, RSS and the occlusion/redundancy
+        // caps — so there is no one envelope a digest here could honestly name.
+        // Recording the fast-loop contract would attest an envelope this verdict
+        // was not judged against, which is exactly the guess this crate refuses
+        // to make; `None` says "not recorded" and the consumer fails closed.
+        contract_digest: None,
     }
 }
 
@@ -314,6 +395,13 @@ mod tests {
         }
     }
 
+    /// The reference envelope these builder tests record against. They assert the
+    /// verdict→record MAPPING, not the envelope, so any concrete contract serves —
+    /// the digest's own behaviour is pinned separately below.
+    fn contract() -> VehicleKinematicsContract {
+        VehicleKinematicsContract::nominal_reference_profile()
+    }
+
     #[test]
     fn record_from_verdict_maps_each_arm() {
         let c = cmd();
@@ -324,6 +412,7 @@ mod tests {
             FleetPosture::Nominal,
             &c,
             false,
+            &contract(),
         );
         assert_eq!(allow.outcome, CaptureOutcome::Allow);
         assert_eq!(allow.deny_code, None);
@@ -338,6 +427,7 @@ mod tests {
             FleetPosture::Nominal,
             &c,
             true,
+            &contract(),
         );
         assert_eq!(cl.outcome, CaptureOutcome::ClampLinear);
         assert_eq!(cl.safe_value, Some(5.0));
@@ -350,6 +440,7 @@ mod tests {
             FleetPosture::Degraded,
             &c,
             false,
+            &contract(),
         );
         assert_eq!(cs.outcome, CaptureOutcome::ClampSteering);
         assert_eq!(cs.safe_value, Some(3.0));
@@ -363,6 +454,7 @@ mod tests {
             FleetPosture::Nominal,
             &c,
             false,
+            &contract(),
         );
         assert_eq!(dn.outcome, CaptureOutcome::Deny);
         assert_eq!(dn.deny_code.as_deref(), Some("NAN_INF_LINEAR_VELOCITY"));
@@ -380,6 +472,7 @@ mod tests {
             FleetPosture::Nominal,
             &c,
             false,
+            &contract(),
         );
         assert_eq!(cb.outcome, CaptureOutcome::ClampLinear);
         assert_eq!(cb.safe_value, Some(6.25));
@@ -477,6 +570,7 @@ mod tests {
             FleetPosture::Nominal,
             &cmd(),
             false,
+            &contract(),
         );
         let gw_json = serde_json::to_string(&gw).unwrap();
         assert!(gw_json.contains("\"source\":\"COMMAND_GATEWAY\""));
@@ -522,11 +616,234 @@ mod tests {
             FleetPosture::Nominal,
             &cmd(),
             false,
+            &contract(),
         );
         assert!(tx.try_send(rec.clone()).is_ok());
         match tx.try_send(rec) {
             Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {}
             other => panic!("expected Full at capacity, got {other:?}"),
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // contract_digest_hex — the identity of the RESOLVED envelope (Tier 2.5)
+    // -----------------------------------------------------------------------
+
+    /// Every field of the contract, as a named mutator. Used by the non-vacuity
+    /// sweep below: a digest that ignores a field would let two different
+    /// envelopes share an identity, which is the one thing it must never do.
+    #[allow(clippy::type_complexity)]
+    fn field_mutators() -> Vec<(&'static str, fn(&mut VehicleKinematicsContract))> {
+        vec![
+            ("max_speed_mps", |c| c.max_speed_mps += 1.0),
+            ("max_accel_mps2", |c| c.max_accel_mps2 += 1.0),
+            ("max_brake_mps2", |c| c.max_brake_mps2 += 1.0),
+            ("max_steering_deg", |c| c.max_steering_deg += 1.0),
+            ("max_steering_rate_deg_s", |c| {
+                c.max_steering_rate_deg_s += 1.0
+            }),
+            ("min_follow_distance_m", |c| c.min_follow_distance_m += 1.0),
+            ("max_lateral_accel_mps2", |c| {
+                c.max_lateral_accel_mps2 += 1.0
+            }),
+            ("wheelbase_m", |c| c.wheelbase_m += 1.0),
+            ("width_m", |c| c.width_m += 1.0),
+            ("length_m", |c| c.length_m += 1.0),
+            ("overhang_front_m", |c| c.overhang_front_m += 1.0),
+            ("overhang_rear_m", |c| c.overhang_rear_m += 1.0),
+            ("odd_speed_cap_mps", |c| c.odd_speed_cap_mps = Some(7.5)),
+        ]
+    }
+
+    /// NON-VACUITY: changing ANY field changes the digest. A digest that misses a
+    /// field would make the Tier 2.5 differential proof unsound in the worst
+    /// direction — the bounds could move while the check reported them equal.
+    #[test]
+    fn every_contract_field_participates_in_the_digest() {
+        let base = VehicleKinematicsContract::nominal_reference_profile();
+        let base_digest = contract_digest_hex(&base);
+        for (name, mutate) in field_mutators() {
+            let mut mutated = base;
+            mutate(&mut mutated);
+            assert_ne!(
+                contract_digest_hex(&mutated),
+                base_digest,
+                "mutating `{name}` must change the contract digest"
+            );
+        }
+    }
+
+    /// Each mutated field yields a DISTINCT digest from every other — not merely
+    /// "different from base". Catches a digest that folds two fields together
+    /// (e.g. summing before hashing), which the per-field test alone would miss.
+    #[test]
+    fn distinct_field_changes_yield_distinct_digests() {
+        let base = VehicleKinematicsContract::nominal_reference_profile();
+        let mut seen: Vec<(String, String)> = Vec::new();
+        for (name, mutate) in field_mutators() {
+            let mut mutated = base;
+            mutate(&mut mutated);
+            let digest = contract_digest_hex(&mutated);
+            if let Some((other, _)) = seen.iter().find(|(_, d)| *d == digest) {
+                panic!("`{name}` and `{other}` produced the same digest");
+            }
+            seen.push((name.to_string(), digest));
+        }
+    }
+
+    /// Deterministic and 64 lowercase hex chars — the shape the wire field and
+    /// every cross-run comparison assume.
+    #[test]
+    fn the_digest_is_deterministic_and_well_formed() {
+        let c = VehicleKinematicsContract::nominal_reference_profile();
+        let a = contract_digest_hex(&c);
+        assert_eq!(a, contract_digest_hex(&c), "must be deterministic");
+        assert_eq!(a.len(), 64, "{a}");
+        assert!(
+            a.chars()
+                .all(|ch| ch.is_ascii_hexdigit() && !ch.is_ascii_uppercase()),
+            "must be lowercase hex: {a}"
+        );
+    }
+
+    /// The `Option` is length-tagged, so `None` and `Some` are never confusable.
+    #[test]
+    fn an_absent_odd_cap_is_distinguishable_from_a_present_one() {
+        let mut none = VehicleKinematicsContract::nominal_reference_profile();
+        none.odd_speed_cap_mps = None;
+        let mut some = none;
+        some.odd_speed_cap_mps = Some(0.0);
+        assert_ne!(
+            contract_digest_hex(&none),
+            contract_digest_hex(&some),
+            "None must not collide with Some(0.0)"
+        );
+    }
+
+    /// THE PROPERTY TIER 2.5 DEPENDS ON: the perception-derate cap is part of the
+    /// envelope's identity. `derate_enabled` records only THAT a cap composed;
+    /// the digest records WHICH envelope resulted, so two runs whose caps differ
+    /// cannot report identical bounds.
+    #[test]
+    fn the_perception_derate_cap_changes_the_digest() {
+        use crate::perception_monitor::apply_perception_cap;
+        let base = VehicleKinematicsContract::nominal_reference_profile();
+        let uncapped = apply_perception_cap(&base, None);
+        let capped = apply_perception_cap(&base, Some(3.0));
+        assert_eq!(
+            contract_digest_hex(&uncapped),
+            contract_digest_hex(&base),
+            "no cap must leave the envelope identity untouched"
+        );
+        assert_ne!(
+            contract_digest_hex(&capped),
+            contract_digest_hex(&base),
+            "a composed cap must change the envelope identity"
+        );
+        // And two DIFFERENT caps are two different envelopes.
+        let capped_tighter = apply_perception_cap(&base, Some(2.0));
+        assert_ne!(
+            contract_digest_hex(&capped),
+            contract_digest_hex(&capped_tighter)
+        );
+    }
+
+    /// The Nominal and MRC profiles are different envelopes, so the digest
+    /// separates the two posture arms without needing the posture field.
+    #[test]
+    fn nominal_and_mrc_profiles_have_different_digests() {
+        assert_ne!(
+            contract_digest_hex(&VehicleKinematicsContract::nominal_reference_profile()),
+            contract_digest_hex(&VehicleKinematicsContract::mrc_fallback_profile())
+        );
+    }
+
+    /// The domain tag is actually mixed in — a bare hash of the fields is a
+    /// different value, so the tag cannot be dropped without this failing.
+    #[test]
+    fn the_domain_tag_is_part_of_the_digest() {
+        use sha2::{Digest, Sha256};
+        let c = VehicleKinematicsContract::nominal_reference_profile();
+        let mut untagged = Sha256::new();
+        for value in [
+            c.max_speed_mps,
+            c.max_accel_mps2,
+            c.max_brake_mps2,
+            c.max_steering_deg,
+            c.max_steering_rate_deg_s,
+            c.min_follow_distance_m,
+            c.max_lateral_accel_mps2,
+            c.wheelbase_m,
+            c.width_m,
+            c.length_m,
+            c.overhang_front_m,
+            c.overhang_rear_m,
+        ] {
+            untagged.update(value.to_bits().to_le_bytes());
+        }
+        untagged.update([0u8]);
+        let untagged_hex: String = untagged
+            .finalize()
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
+        assert_ne!(
+            contract_digest_hex(&c),
+            untagged_hex,
+            "the domain tag must contribute"
+        );
+    }
+
+    /// The gateway builder records the digest of the contract it was HANDED —
+    /// not a re-derivation. This is what makes the recorded envelope the one that
+    /// actually bounded the command.
+    #[test]
+    fn the_gateway_record_carries_the_digest_of_the_passed_contract() {
+        use crate::perception_monitor::apply_perception_cap;
+        // A capped contract, deliberately NOT equal to any class default, so a
+        // re-derivation inside the builder would produce a different value.
+        let capped = apply_perception_cap(
+            &VehicleKinematicsContract::nominal_reference_profile(),
+            Some(4.25),
+        );
+        let rec = record_from_verdict(
+            0,
+            1000,
+            &EnforceAction::Allow,
+            FleetPosture::Nominal,
+            &cmd(),
+            true,
+            &capped,
+        );
+        assert_eq!(
+            rec.contract_digest.as_deref(),
+            Some(contract_digest_hex(&capped).as_str())
+        );
+    }
+
+    /// The slow-loop builder records NO digest. No single `VehicleKinematicsContract`
+    /// bounds a trajectory verdict, so naming one would attest an envelope the
+    /// verdict was not judged against.
+    #[test]
+    fn the_slow_loop_record_carries_no_contract_digest() {
+        let traj = TrajectoryCaptureExt {
+            asset_id: "ego".to_string(),
+            trajectory_id: 1,
+            objects_ms: 10,
+            point_count: 2,
+            object_count: 0,
+            first_pose: None,
+            last_pose: None,
+            target_speed_mps: Some(1.0),
+        };
+        let rec = record_from_trajectory_verdict(
+            0,
+            1000,
+            TrajectoryDecision::Accept,
+            FleetPosture::Nominal,
+            traj,
+            false,
+        );
+        assert_eq!(rec.contract_digest, None);
     }
 }

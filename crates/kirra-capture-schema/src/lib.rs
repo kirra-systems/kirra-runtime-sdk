@@ -145,6 +145,25 @@ pub struct CaptureRecord {
     pub posture: String,
     /// Whether the perception derate was enabled (so passes are attributable).
     pub derate_enabled: bool,
+    /// Digest of the RESOLVED kinematic contract this verdict was judged
+    /// against — 64 lowercase hex chars, domain-tagged SHA-256 over every field
+    /// of the in-force `VehicleKinematicsContract`, computed by
+    /// `kirra_core::capture::contract_digest_hex`.
+    ///
+    /// WHY A DIGEST AND NOT THE VEHICLE CLASS. The class selects a contract; it
+    /// is not the contract. On the Nominal arm the enforced envelope is the
+    /// class profile with the perception-derate cap ALREADY APPLIED, so two
+    /// records from one class can be judged against different envelopes. The
+    /// digest is of what actually bounded the command, which makes it the thing
+    /// a two-run comparison can hold fixed — and it subsumes `derate_enabled`,
+    /// which records only THAT a cap composed, never its value.
+    ///
+    /// ADDITIVE. `Option` + skip-when-absent, so every record written before
+    /// this field existed still parses and its JSON is byte-unchanged. Absence
+    /// means "the envelope in force was not recorded" — never a wrong envelope,
+    /// so a consumer that requires it fails closed by asking for `Some`.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub contract_digest: Option<String>,
 }
 
 #[cfg(test)]
@@ -171,6 +190,10 @@ mod tests {
             mrc: false,
             posture: "NOMINAL".to_string(),
             derate_enabled: false,
+            // Absent, so the pinned wire string below stays BYTE-IDENTICAL to the
+            // pre-`contract_digest` shape. That equality is the additivity proof:
+            // every record written before this field existed still round-trips.
+            contract_digest: None,
         }
     }
 
@@ -205,6 +228,19 @@ mod tests {
             mrc: true,
             posture: "DEGRADED".to_string(),
             derate_enabled: false,
+            // Slow-loop records never carry one — see `record_from_trajectory`.
+            contract_digest: None,
+        }
+    }
+
+    /// A gateway record WITH the resolved-contract digest — the shape every
+    /// gateway emit produces from now on.
+    fn gateway_record_with_contract_digest() -> CaptureRecord {
+        CaptureRecord {
+            contract_digest: Some(
+                "3f1a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f8".to_string(),
+            ),
+            ..gateway_clamp_record()
         }
     }
 
@@ -247,6 +283,65 @@ mod tests {
             let s2 = serde_json::to_string(&back).unwrap();
             assert_eq!(s1, s2, "re-serialized JSON must be byte-identical");
         }
+    }
+
+    /// The with-digest wire shape, pinned. `contract_digest` is the LAST field
+    /// and renders as a plain JSON string; everything before it is byte-identical
+    /// to `gateway_record_wire_shape_is_pinned`, which is what makes the field
+    /// purely additive rather than a reshuffle.
+    #[test]
+    fn gateway_record_with_contract_digest_wire_shape_is_pinned() {
+        let s = serde_json::to_string(&gateway_record_with_contract_digest()).unwrap();
+        assert_eq!(
+            s,
+            r#"{"decision_seq":0,"t_mono_ns":0,"t_wall_ms":1000,"source":"COMMAND_GATEWAY","proposed":{"linear_velocity_mps":40.0,"current_velocity_mps":40.0,"steering_angle_deg":0.0,"current_steering_angle_deg":0.0,"delta_time_s":0.1},"outcome":"CLAMP_LINEAR","deny_code":null,"safe_value":35.0,"mrc":false,"posture":"NOMINAL","derate_enabled":false,"contract_digest":"3f1a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f8"}"#
+        );
+    }
+
+    /// The additivity proof, stated as an equality rather than asserted in prose:
+    /// the with-digest JSON is EXACTLY the without-digest JSON with one field
+    /// appended before the closing brace. If a future edit reorders fields or
+    /// changes a prior field's rendering, this fails even if both pins above were
+    /// updated in lockstep to match.
+    #[test]
+    fn the_digest_field_is_appended_and_changes_nothing_before_it() {
+        let without = serde_json::to_string(&gateway_clamp_record()).unwrap();
+        let with = serde_json::to_string(&gateway_record_with_contract_digest()).unwrap();
+        let prefix = without.strip_suffix('}').expect("object");
+        assert_eq!(
+            with,
+            format!(
+                "{prefix},\"contract_digest\":\"3f1a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f8\"}}"
+            )
+        );
+    }
+
+    /// A record written BEFORE this field existed — no `contract_digest` key at
+    /// all — still deserializes, and reads as absent rather than as some default
+    /// digest. This is the compatibility half of the additive claim: the pins
+    /// above prove new writers do not move the old bytes; this proves old bytes
+    /// still parse in a new reader.
+    #[test]
+    fn a_pre_digest_record_still_parses_and_reads_as_absent() {
+        let pre_digest = r#"{"decision_seq":0,"t_mono_ns":0,"t_wall_ms":1000,"source":"COMMAND_GATEWAY","proposed":{"linear_velocity_mps":40.0,"current_velocity_mps":40.0,"steering_angle_deg":0.0,"current_steering_angle_deg":0.0,"delta_time_s":0.1},"outcome":"CLAMP_LINEAR","deny_code":null,"safe_value":35.0,"mrc":false,"posture":"NOMINAL","derate_enabled":false}"#;
+        let rec: CaptureRecord = serde_json::from_str(pre_digest).expect("parses");
+        assert_eq!(
+            rec.contract_digest, None,
+            "absent must read as absent — a defaulted digest would attest an \
+             envelope the record never recorded"
+        );
+        assert_eq!(rec, gateway_clamp_record());
+    }
+
+    /// Round-trip with the digest present, including re-serialization equality —
+    /// the same lossless guarantee the other two sources already carry.
+    #[test]
+    fn round_trip_is_lossless_with_the_digest_present() {
+        let original = gateway_record_with_contract_digest();
+        let s1 = serde_json::to_string(&original).unwrap();
+        let back: CaptureRecord = serde_json::from_str(&s1).unwrap();
+        assert_eq!(back, original);
+        assert_eq!(serde_json::to_string(&back).unwrap(), s1);
     }
 
     /// The collector can deserialize a gateway line that OMITS `traj` and a

@@ -152,10 +152,18 @@ pub fn replay_record(rec: &CaptureRecord, class: VehicleClass) -> ReplayResult {
         current_steering_angle_deg: p.current_steering_angle_deg,
     };
 
-    // The SAME verdict computation the deployed gateway arm runs.
+    // The SAME verdict computation the deployed gateway arm runs. The contract is
+    // bound before the call so the record below carries the envelope this replay
+    // actually used — derate-enabled records are classified out above, so the
+    // Nominal contract here is the uncapped class profile the emit site had.
+    let contract = match posture {
+        FleetPosture::Nominal => contract_for(class),
+        FleetPosture::Degraded => mrc_fallback_for(class),
+        FleetPosture::LockedOut => unreachable!("classified above"),
+    };
     let verdict = match posture {
-        FleetPosture::Nominal => validate_vehicle_command(&cmd, &contract_for(class)),
-        FleetPosture::Degraded => enforce_degraded_decel_to_stop(&cmd, &mrc_fallback_for(class)),
+        FleetPosture::Nominal => validate_vehicle_command(&cmd, &contract),
+        FleetPosture::Degraded => enforce_degraded_decel_to_stop(&cmd, &contract),
         FleetPosture::LockedOut => unreachable!("classified above"),
     };
 
@@ -167,6 +175,7 @@ pub fn replay_record(rec: &CaptureRecord, class: VehicleClass) -> ReplayResult {
         posture,
         &cmd,
         rec.derate_enabled,
+        &contract,
     );
 
     let recorded = VerdictImage::of(rec);
@@ -261,8 +270,11 @@ fn recompute_image(
         FleetPosture::Degraded => enforce_degraded_decel_to_stop(cmd, contract),
         FleetPosture::LockedOut => unreachable!("classified before this point"),
     };
-    // seq / t_wall / derate do not affect the compared fields.
-    VerdictImage::of(&record_from_verdict(0, 0, &verdict, posture, cmd, false))
+    // seq / t_wall / derate / contract do not affect the compared fields — the
+    // probe compares two `VerdictImage`s, which carry no digest.
+    VerdictImage::of(&record_from_verdict(
+        0, 0, &verdict, posture, cmd, false, contract,
+    ))
 }
 
 /// ulp distance between two SAME-SIGN finite f64s (the recorded and recomputed
@@ -456,11 +468,14 @@ mod tests {
                 steering_angle_deg: std::hint::black_box(*steer),
                 current_steering_angle_deg: std::hint::black_box(*cur_steer),
             };
+            let contract = match posture {
+                FleetPosture::Nominal => contract_for(class),
+                FleetPosture::Degraded => mrc_fallback_for(class),
+                FleetPosture::LockedOut => unreachable!(),
+            };
             let verdict = match posture {
-                FleetPosture::Nominal => validate_vehicle_command(&cmd, &contract_for(class)),
-                FleetPosture::Degraded => {
-                    enforce_degraded_decel_to_stop(&cmd, &mrc_fallback_for(class))
-                }
+                FleetPosture::Nominal => validate_vehicle_command(&cmd, &contract),
+                FleetPosture::Degraded => enforce_degraded_decel_to_stop(&cmd, &contract),
                 FleetPosture::LockedOut => unreachable!(),
             };
             let rec = record_from_verdict(
@@ -470,6 +485,7 @@ mod tests {
                 *posture,
                 &cmd,
                 false,
+                &contract,
             );
             out.push_str(&serde_json::to_string(&rec).expect("serialize record"));
             out.push('\n');
@@ -594,8 +610,17 @@ mod tests {
             steering_angle_deg: 20.0,
             current_steering_angle_deg: 0.0,
         };
-        let verdict = validate_vehicle_command(&p6_cmd, &contract_for(class));
-        let rec = record_from_verdict(0, 0, &verdict, FleetPosture::Nominal, &p6_cmd, false);
+        let contract = contract_for(class);
+        let verdict = validate_vehicle_command(&p6_cmd, &contract);
+        let rec = record_from_verdict(
+            0,
+            0,
+            &verdict,
+            FleetPosture::Nominal,
+            &p6_cmd,
+            false,
+            &contract,
+        );
         assert_eq!(
             rec.outcome,
             CaptureOutcome::ClampSteering,
@@ -653,8 +678,17 @@ mod tests {
             steering_angle_deg: 30.0,
             current_steering_angle_deg: -30.0,
         };
-        let verdict = validate_vehicle_command(&p5_cmd, &contract_for(class));
-        let rec = record_from_verdict(0, 0, &verdict, FleetPosture::Nominal, &p5_cmd, false);
+        let contract = contract_for(class);
+        let verdict = validate_vehicle_command(&p5_cmd, &contract);
+        let rec = record_from_verdict(
+            0,
+            0,
+            &verdict,
+            FleetPosture::Nominal,
+            &p5_cmd,
+            false,
+            &contract,
+        );
         assert_eq!(
             rec.outcome,
             CaptureOutcome::ClampSteering,

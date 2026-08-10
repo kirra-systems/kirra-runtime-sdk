@@ -43,6 +43,9 @@ fn gateway(seq: u64, t_wall_ms: u64, outcome: CaptureOutcome) -> CaptureRecord {
         mrc: false,
         posture: "NOMINAL".to_string(),
         derate_enabled: false,
+        // The collector reads records it did not write, including pre-digest
+        // ones; `None` is the shape it must keep handling.
+        contract_digest: None,
     }
 }
 
@@ -78,6 +81,9 @@ fn trajectory(seq: u64, t_wall_ms: u64, traj_id: u64, outcome: CaptureOutcome) -
         mrc: matches!(outcome, CaptureOutcome::Deny),
         posture: "NOMINAL".to_string(),
         derate_enabled: false,
+        // The collector reads records it did not write, including pre-digest
+        // ones; `None` is the shape it must keep handling.
+        contract_digest: None,
     }
 }
 

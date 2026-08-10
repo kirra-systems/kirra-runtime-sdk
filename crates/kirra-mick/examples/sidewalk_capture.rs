@@ -160,6 +160,10 @@ fn run_phase(
             mrc,
             posture: "NOMINAL".to_string(),
             derate_enabled: false,
+            // Slow-loop record: no single envelope bounded this verdict, so the
+            // contract digest is absent here exactly as it is on the real
+            // slow-loop emit (`record_from_trajectory`).
+            contract_digest: None,
         });
         bus.push(serde_json::json!({
             "t_wall_ms": *clock_ms, "doer_version": DOER_VERSION, "asset_id": "courier",
