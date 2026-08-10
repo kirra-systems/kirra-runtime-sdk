@@ -2173,7 +2173,7 @@ finding 4 predicted.
 
 **What the audit changes about the order.** Boxes 3a and 3d have a live consumer
 that violates them today; 3e has a live consumer that is silently mislabelled;
-and 3a additionally cannot represent the fact that consumer reads. The revised
+and 3a additionally cannot represent the fact that the consumer reads. The revised
 sequence, each step forced by the consumer rather than by the checklist:
 
 1. **3a** — make `WorldAnswer` faithfully represent the stored claim: add
