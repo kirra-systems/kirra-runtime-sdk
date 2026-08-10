@@ -27,7 +27,7 @@ publish = false  # proprietary (see COPYRIGHT) — not for crates.io
 # need the foundation (the planner, the lane map, parko, the governor-service). The
 # `capture` module's JSONL writer pulls tokio + serde_json + tracing + the wire schema;
 # the SDK and the ROS2 adapter enable this feature (de-monolith Stage 7).
-capture = ["dep:tokio", "dep:serde_json", "dep:kirra-capture-schema"]
+capture = ["dep:tokio", "dep:serde_json", "dep:kirra-capture-schema", "dep:sha2"]
 
 [dependencies]
 # The posture types are wire-serialized (federation reports, the SSE stream). serde is
@@ -51,6 +51,10 @@ tracing = "0.1"
 tokio = { version = "1", features = ["sync", "rt", "macros"], optional = true }
 serde_json = { version = "1", optional = true }
 kirra-capture-schema = { path = "../kirra-capture-schema", optional = true }
+# `contract_digest_hex` — the identity of the resolved envelope a verdict was
+# judged against. Same 0.11 pin as the root crate and the Taj evidence digest, so
+# it adds no lockfile entry; capture-only, so the lean default build is unchanged.
+sha2 = { version = "0.11", optional = true }
 
 [dev-dependencies]
 # The containment unit tests (Stage 4, moved verbatim) assert the byte-stable

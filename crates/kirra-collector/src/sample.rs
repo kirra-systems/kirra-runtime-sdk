@@ -69,6 +69,7 @@ mod tests {
             mrc: false,
             posture: "NOMINAL".to_string(),
             derate_enabled: false,
+            contract_digest: None,
         }
     }
 

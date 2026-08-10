@@ -435,7 +435,14 @@ pub async fn enforce_actuator_safety_envelope(
     // Issue #70: Nominal runs the full envelope; Degraded runs the
     // decel-to-stop-and-HOLD gate (non-increasing speed + no re-initiation)
     // over the MRC envelope. LockedOut was already short-circuited above.
-    let verdict = match posture {
+    // The RESOLVED contract is returned alongside the verdict so the capture emit
+    // below records the envelope that ACTUALLY bounded this command rather than
+    // re-deriving one. Re-derivation would be the drift bug the digest exists to
+    // catch: on the Nominal arm the enforced envelope carries the perception-derate
+    // tightening, which a second `contract_for(class)` call would not reproduce.
+    // `VehicleKinematicsContract` is `Copy` and already materialized inside each
+    // arm, so this is a move out of arm scope, not new work on the verdict path.
+    let (verdict, enforced_contract) = match posture {
         FleetPosture::Nominal => {
             // KIRRA-OCCY-PMON-002 composition: read the perception-derate cap
             // O(1) (3-state resolver — None when the monitor is disabled, MRC
@@ -449,11 +456,15 @@ pub async fn enforce_actuator_safety_envelope(
             // (robotaxi = the frozen reference instance, byte-identical). Set once
             // at startup, fail-closed; O(1) OnceLock read on the verdict path.
             let contract = apply_perception_cap(&contract_for(global_vehicle_class()), eff_cap);
-            validate_vehicle_command(&proposed_cmd, &contract)
+            (validate_vehicle_command(&proposed_cmd, &contract), contract)
         }
         // #312: the MRC fallback is the same class's degraded sibling.
         FleetPosture::Degraded => {
-            enforce_degraded_decel_to_stop(&proposed_cmd, &mrc_fallback_for(global_vehicle_class()))
+            let contract = mrc_fallback_for(global_vehicle_class());
+            (
+                enforce_degraded_decel_to_stop(&proposed_cmd, &contract),
+                contract,
+            )
         }
         FleetPosture::LockedOut => unreachable!("LockedOut short-circuited above"),
     };
@@ -481,6 +492,7 @@ pub async fn enforce_actuator_safety_envelope(
             posture,
             &proposed_cmd,
             svc.perception_monitor_enabled,
+            &enforced_contract,
         );
         match tx.try_send(rec) {
             Ok(()) => {}
