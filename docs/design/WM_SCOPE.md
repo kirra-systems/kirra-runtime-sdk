@@ -1177,13 +1177,79 @@ future consumer rediscovers it after writing the same code.
 `kirra-world-service` is **the only crate that depends on `kirra-world*` and
 implements no `CorridorSource`** — its entire dependency list is `kirra-world`
 and `kirra-world-store`. It is outside every barred set: not a safety-closure
-member, not a corridor producer, nothing transitive to drag in. The host
+member, not a corridor producer, nothing transitive to drag in. The **hosting**
 question is therefore already answered by construction.
 
 **Hosting is not consuming, and this is the trap.** Nothing depends on
 `kirra-world-service` today except workspace membership, so it carries the same
 *built for nobody* problem one level up. A service crate is a transport surface;
 this milestone needs something that turns world knowledge into behaviour.
+
+### Where a consumer could live — the survey, run rather than argued
+
+The placement question was settled by executing the fence's own predicates over
+the workspace manifests, not by reading crate names. What that produced:
+
+* **54 workspace packages.** Fence B's safety closure — the transitive
+  dependencies of the 10 `SAFETY_ROOTS` — is **19** of them; 35 sit outside it.
+* The behaviour-shaping crates are **not** caught by Fence B. `kirra-planner`,
+  `kirra-map`, `kirra-taj`, `kirra-sidecars` and `kirra-mick` are all outside the
+  safety closure. What bars them is the *other* gate: `check_4_trait_impls`, whose
+  conjunction is *implements `CorridorSource`* ∧ *`pkg_reaches_world`*. The
+  production `CorridorSource` implementors are `kirra-core`, `kirra-map`,
+  `kirra-ros2-adapter`, `kirra-sidecars` and `kirra-taj`.
+* **Two of the five are barred directly and three transitively**, which is worth
+  separating because only the first kind is obvious from the crate itself.
+  `kirra-map` and `kirra-taj` implement `CorridorSource`, so a world edge on
+  either satisfies the conjunction on the spot. `kirra-planner` and `kirra-mick`
+  implement nothing — they are barred because `kirra-sidecars` *does* implement it
+  and depends on both (its full list is `kirra-core`, `kirra-planner`,
+  `kirra-trajectory`, `kirra-taj`, `kirra-mick`), so a world edge added at either
+  makes `kirra-sidecars` reach world and the gate fires there. That is the
+  transitivity direction §9 relies on, confirmed rather than assumed.
+* **27 packages pass both gates mechanically.** Nearly all are harnesses, benches,
+  fuzz targets or proof crates. A consumer placed in one of them would satisfy
+  goal 1 *vacuously* — the fence would say yes to a crate that ships no behaviour,
+  which is precisely the acceptance that carries no information.
+
+So the survey does not converge on an existing host. Every crate that would make
+goal 4 real is barred by the corridor conjunction, and every crate that is
+mechanically clear would make goal 1 vacuous. That is not a gap in the survey; it
+is the answer the survey produced.
+
+### `KIRRA-WM-CONSUMER-PLACEMENT-001` — RULED 2026-08-10
+
+> **Tier 2.5 requires a dedicated non-authoritative consumer crate whose sole
+> role is to translate Kirra World knowledge into proposal-shaping inputs. It may
+> influence what is proposed, but it may not implement or feed `CorridorSource`,
+> checker bounds, release authority, or actuation.**
+
+The shape:
+
+```
+Kirra World → world-consumer / mission-context crate → proposal-shaping context → planner / mission logic
+```
+
+**The key is that it outputs proposal context, not bounds.** The crate sits
+upstream of the doer and downstream of nothing safety-authoritative. It is the
+named home the gap section says does not exist — created, rather than discovered,
+because the survey above shows there is nothing to discover.
+
+This restates, at crate granularity, the invariant Tier 2.5 exists to defend:
+
+> **Kirra World may change what is proposed. It may not change the inputs from
+> which the checker derives what is permitted.**
+
+Two consequences worth stating so they are not rediscovered:
+
+* **"Non-authoritative" is a dependency fact, not an intent.** The crate is
+  non-authoritative because the two gates say so with the edge present — not
+  because its documentation says it only advises.
+* **A new crate is the weaker-coupling choice, not the heavier one.** Adding the
+  world edge to an existing behaviour crate would put every *other* thing that
+  crate does inside the blast radius of a future world-authority argument. A
+  single-purpose crate keeps the surface the fence must defend equal to the
+  surface that actually consumes.
 
 ### Two consumers, proving different things
 
@@ -1207,21 +1273,117 @@ contract it never tested.
 
 - [ ] **Name the non-authoritative host** for world knowledge, and record why it
       is outside the checker's closure rather than merely believed to be.
+      *Placement ruled* (`KIRRA-WM-CONSUMER-PLACEMENT-001`): a **new** crate,
+      because the survey found no existing one that satisfies both halves.
+      **The box stays open, and the reason is the non-vacuity condition on it:**
+      the named host must be one whose removal would change observable proposal
+      behaviour. A host that passes the fence only because it does nothing
+      satisfies the *letter* of this goal and none of its purpose. Naming is
+      therefore half of it; goal 4's differential proof is what earns the other
+      half, and this box closes when that proof runs — not when the crate exists.
 - [ ] **Define the one-way seam** from Kirra World into operational software.
+      The seam's type-level obligation: what crosses it is *proposal context*, and
+      nothing in its output type is admissible as a checker bound.
 - [ ] **Prove the consumer cannot influence the checker — mechanically.** The
       acceptance criterion is that
       `ci/check_kirra_world_bidirectional_fence.py` passes **with the new
       dependency edge present**, not an argument in a document.
+- [ ] **Prove the consumer changes proposals and only proposals — differentially.**
+      Two runs over one scenario, world-consumer off and on: the proposals must
+      differ (else goal 1 is vacuous) *and* the checker's bound-derivation inputs
+      must be bit-identical (else the invariant is breached).
 - [ ] **Exercise the Tier 3 contracts with a real caller** (the typed one).
 - [ ] **Capture every contract that breaks** before the API is expanded.
 
-### What goal 3 buys beyond itself
+### The acceptance proof — four parts, and why each is separate
 
-The fence has so far only ever been observed **refusing**. A fence that only
-refuses is indistinguishable from one that refuses everything, so its acceptances
-carry no information yet. This milestone is the first evidence it can say *yes*
-to a legitimate route — the same non-vacuity discipline this document applies to
-tests, applied to the fence.
+Each part fails in a way the other three cannot detect. That is the reason they
+are not collapsed into one criterion.
+
+1. **Fence positive control.** `check_kirra_world_bidirectional_fence.py` passes
+   with the new edge present. *Negative control:* the fence's existing refusals —
+   the 2026-08-07 attempt recorded in §9 — prove it can say no. Both directions
+   are required; the fence has so far only ever been observed refusing, and a gate
+   that only refuses is indistinguishable from one that refuses everything.
+2. **Corridor-conjunction control.** The consumer crate implements no
+   `CorridorSource` and appears in no `CorridorSource` implementor's closure. This
+   is checked by contents (gate t24's technique), not by dependency direction —
+   an inverted implementation would be invisible to a closure walk.
+3. **Behavioural non-vacuity.** Turning the consumer off changes what is proposed.
+   Without this, parts 1 and 2 are satisfied by a crate that does nothing.
+4. **Bound-derivation invariance.** Across the same two runs, the inputs the
+   checker derives its bounds from are **bit-identical**. Parts 3 and 4 are the
+   two halves of the invariant and must be asserted over the *same* pair of runs;
+   asserted separately, part 3 would pass on a run pair that also moved the bounds.
+
+### The differential proof's substrate — what `kirra-replay` does and does not give us
+
+Inspected before designing the harness, because reusing existing capture is
+strictly better than minting a new artifact if the fields are there. **The
+question asked was: does the captured record expose the checker's authoritative
+bound-derivation inputs separately enough to compare two runs bit-identically,
+independent of proposal/verdict differences?**
+
+**`kirra-replay` itself: no, and not for a fixable reason.** Its comparator is
+`VerdictImage` — `{outcome, deny_code, safe_value_bits, mrc}` — and its entire
+contract is *same inputs → same verdict*. Part 4 needs the opposite framing:
+inputs deliberately differ on the proposal axis, so `ReplayResult::Divergent`
+would fire on exactly the case the proof is designed to produce. Reusing it would
+invert the meaning of its alarm.
+
+**`kirra-capture-schema`'s `CaptureRecord`: no.** Three specific shortfalls:
+
+* **Proposal and bound-derivation inputs are commingled.** All five fields sit in
+  one `ProposedCommandSnapshot`. `linear_velocity_mps` / `steering_angle_deg` are
+  the proposal; `current_velocity_mps`, `current_steering_angle_deg` and
+  `delta_time_s` are the ego state and time base the envelope is computed against
+  (P5b's rate ceiling and P3/P4's accel bound read them directly). Splitting them
+  would be a harness-side naming convention, not a property of the record — and a
+  field added later carries no signal about which side it belongs on.
+* **The contract identity is absent entirely.** `VehicleClass` reaches the checker
+  as `contract_for(class)`, and `kirra-replay` takes it as a CLI argument. Nothing
+  in the record pins which envelope was in force, so the artifact cannot *prove*
+  two runs used the same one — which is the single most important thing part 4
+  must hold fixed.
+* **The derate cap is a bool.** `derate_enabled` records that a perception cap
+  composed, never its value. `kirra-replay` is honest about this and classifies
+  such records `NotReplayable`; that honesty is exactly why the field cannot be
+  used as evidence of an unchanged bound.
+
+**`kirra-cycle-record`'s `JoinedCycleRecord`: yes, and it is already the right
+shape.** It separates the three axes the proof needs, which is not a coincidence —
+it was built for incident review, which has the same separation problem:
+
+* **Bound-derivation inputs → `PerceptionEvent.evidence_digest`**, a SHA-256 over
+  the complete accepted safety-relevant Taj output: the corridor `left`/`right`
+  polylines, objects (id/x/y/vx/vy/coasted), pedestrians with their classification
+  and fusion reason, `clear_distance_m`, `minimum_corridor_width_m`,
+  `required_corridor_width_m`, `speed_cap_mps`, and the `profile_digest` that binds
+  evidence interpretation to the configuration that produced it. One 64-hex value,
+  bit-comparable, computed from the Taj response alone.
+* **The enforced cap → `raw_speed_cap_mps` / `stabilized_speed_cap_mps`**, carried
+  as a *pair* precisely so a review can see whether the enforced cap was
+  perception's own or the stabilizer holding a stale anchor.
+* **The proposal axis → `ProposalEvent.proposal_digest`**, distinct from the
+  evidence digest, with an existing echo-check that the planner bound the evidence
+  it claims.
+* **Cross-run alignment → `scan_sequence`**, the cycle's primary key.
+
+**The smallest extension needed, therefore, is one field, not a new artifact:**
+the **kinematic contract identity** (vehicle class, or a digest over the resolved
+`VehicleKinematicsContract`) on the record. Without it, two runs can be shown to
+have had identical perception evidence and still not be shown to have been judged
+against the same envelope. Everything else part 4 requires is already captured.
+
+Two things deliberately **not** added:
+
+* **A Kirra World provenance field on the cycle record.** The harness controls
+  which arm is which, so run identity is known out of band. Adding it would put
+  world-derived data into the transport of a safety artifact — close enough to the
+  fence that the convenience is not worth the precedent.
+* **`profile_digest` as its own field.** It is folded into `evidence_digest`, so a
+  perception-config change is *detected* (the digests differ) but not *explained*.
+  That is a diagnosability gap, not a soundness gap, and part 4 needs soundness.
 
 ---
 
@@ -1767,6 +1929,68 @@ the closure walk would not see it.
 
 But a gate can refuse a dependency. It cannot refuse an argument. Holding the
 line is part of this scope, not a footnote to it.
+
+### Finding — `parko-kirra` is a checker that the dev-edge exclusion treats as a doer
+
+Surfaced by the Tier 2.5 placement survey and recorded **here rather than in
+§5.5**, because it is not Tier 2.5's to fix and folding it in would make that
+milestone's acceptance hostage to an unrelated question.
+
+**First, the mechanism that is *not* at issue.** The fence enumerates manifests by
+`rglob` from the repo root, so it sees `parko/`'s crates despite `parko/` being a
+separate Cargo workspace — and `parko-core` is already **inside** Fence B's
+closure, reached by a normal dependency edge from the root crate. "A second
+workspace is invisible to the walk" would be a tidy explanation and it is false.
+
+The actual mechanism is the closure walk's **deliberate exclusion of
+dev-dependency edges**, whose stated rationale is load-bearing and, for its
+intended targets, correct:
+
+> the safety roots dev-depend on the DOER crates for their test harnesses. Those
+> crates are the ones that SHOULD one day depend on Kirra World — Occy consuming
+> semantic knowledge to generate a proposal is the intended design, not a breach.
+> Counting dev edges would drag them inside the safety closure and make the fence
+> fire on the architecture working as specified.
+
+That reasoning holds exactly for `kirra-planner`, `kirra-taj`, `kirra-sidecars`
+and `kirra-mick`. It names **`parko-kirra` alongside them, and `parko-kirra` is
+not a doer.** It hosts `KirraGovernor::apply_mrc_profile`
+(`parko/crates/parko-kirra/src/lib.rs:682`) — one of the four enforcement points
+of the Degraded decel-to-stop-and-HOLD envelope, and the one that additionally
+gates an independent angular-velocity channel through `STOP_EPSILON_RAD_S`
+(`:114`). A world edge added there would be a *checker* edge admitted by an
+exclusion justified for *doers*.
+
+`parko-kirra` misses the other route too, for an unrelated reason: it is not one
+of the 10 `SAFETY_ROOTS`, so it is never a closure root either. Two independent
+mechanisms, two different reasons, same blind spot. `parko-ros2` — which runs
+`run_pipeline_tick`, where governor divergence escalates the effective posture —
+is outside for a third reason: nothing in this workspace depends on it at all.
+
+**No world edge exists at any of these today and none is proposed.** The finding
+is about what the gate would fail to notice if one were added, which is the only
+kind of gap worth recording about a gate.
+
+Three ways to close it, none obviously right, which is why this is a finding and
+not a task:
+
+1. **Add `parko-kirra` to `SAFETY_ROOTS`.** Most direct: a root is walked
+   regardless of how it is reached, so this closes the gap without touching the
+   dev-edge policy at all. Cost: `parko-kirra`'s own dependency closure joins the
+   safety closure, and that set has not been reviewed for this purpose.
+2. **Replace the blanket dev-edge exclusion with an explicit doer allowlist.**
+   Turns "dev edges don't count" into "these four named doer crates don't count",
+   so a *new* dev-depended crate is caught by default rather than admitted by
+   default. This is the fail-closed shape; it costs a list that must be
+   maintained, which is the thing the manifest-computed closure exists to avoid.
+3. **Record the boundary as an assumption of use** and gate it socially. Cheapest,
+   and the weakest — this section's own argument is that a gate can refuse a
+   dependency but not an argument.
+
+**Owner: an ADR, not a tier box.** Option 2 is the one that generalizes, but it
+reopens how `parko/`'s separateness is meant to be understood — an independent
+product, or an implementation split of one — and that question predates Kirra
+World.
 
 ---
 
