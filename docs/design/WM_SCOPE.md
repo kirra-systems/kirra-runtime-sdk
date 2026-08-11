@@ -2860,6 +2860,16 @@ carry `ObjectIdentity::NotResolvedAtPin`, which `matchable` refuses, so a pinned
 answer cannot shape a proposal by accident. A generation-pinned IDENTITY read is
 the natural next prerequisite if refs ever need resolved objects.
 
+**One construction funnel, restored rather than re-worded.** Adding a second
+producer of `WorldAnswer` made two claims stale at once — `bind`'s *"the one
+place a `WorldAnswer` is built"* and the module's *"`ask` is the only way to
+obtain one"*. Caught in review. The fix is a private `assemble` that both `bind`
+and `bind_pinned` delegate to, so the property is true again instead of the claim
+being weakened to match: rule 1 says every answer carries value, axes, validity
+and provenance, and a second hand-written construction site is how one of those
+quietly stops being populated. Verified load-bearing — hard-coding one field
+inside `assemble` reds three tests.
+
 **Non-vacuity.** The acceptance set is the eight cases agreed for this step, plus
 mutations: ignoring the version check, falling forward when irreproducible,
 dropping the generation from ref identity, and two fold-rule changes — each
