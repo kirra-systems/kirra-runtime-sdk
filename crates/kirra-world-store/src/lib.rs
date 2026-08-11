@@ -2649,6 +2649,48 @@ impl WorldStore {
             .read_composed_at_generation(generation)
     }
 
+    /// **Claims and identity at ONE transaction-time cut.**
+    ///
+    /// The `as_of` twin of [`Self::read_composed_at_generation`]. Box 3h
+    /// established, on the generation axis, that an historical answer must
+    /// resolve objects through the graph as it stood *then*; this is the same
+    /// property on the axis `as_of` asks about.
+    ///
+    /// Both halves are read inside one transaction, so a fold landing between
+    /// them cannot pair claims from one commit with an identity graph from
+    /// another — box 3c's rule, applied to a pair of reads that previously ran
+    /// outside any snapshot because only one of them existed.
+    ///
+    /// # Why this lives on the store rather than on `ReadSnapshot`
+    ///
+    /// Its two halves are store-level temporal queries ([`Self::as_of`],
+    /// [`Self::identity_view_at`]) rather than projection replays, so the
+    /// snapshot is opened here and they are called unchanged. That keeps one
+    /// cut per axis: no second copy of the bitemporal filter, and no second
+    /// adjudication replay to drift from the original.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::as_of`] and [`Self::identity_view_at`].
+    pub fn as_of_composed(
+        &self,
+        subject: &str,
+        valid_at_ms: i64,
+        as_known_at_ms: i64,
+    ) -> Result<snapshot::TemporalComposition, StoreError> {
+        // One snapshot for both halves. `unchecked_transaction` borrows the
+        // connection immutably, so the calls below run inside it and see one
+        // committed state; dropping it rolls back, which is free for reads.
+        let tx = self.conn.unchecked_transaction()?;
+        let answer = self.as_of(subject, valid_at_ms, as_known_at_ms)?;
+        let identity = self.identity_view_at(as_known_at_ms)?;
+        drop(tx);
+        Ok(snapshot::TemporalComposition::new(
+            answer,
+            identity.view().clone(),
+        ))
+    }
+
     /// Where every projection stands right now, read outside any snapshot.
     ///
     /// For reporting and diagnostics. A composed ANSWER should carry the

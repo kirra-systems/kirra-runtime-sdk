@@ -172,15 +172,24 @@ impl SemanticVersions {
     #[must_use]
     pub fn for_query(kind: QueryKind) -> Self {
         match kind {
-            QueryKind::CurrentSubject => Self::new([
+            // Both families depend on the SAME three rules, and that is a
+            // finding rather than a coincidence: they differ in which
+            // COORDINATE they cut on, not in which rules produce the answer.
+            // Still derived per-family, because "identical today" is not
+            // "identical by construction" — a temporal-resolution rule would
+            // belong to one and not the other, and a shared arm that had to be
+            // split later is a shared arm nobody remembers to split.
+            QueryKind::CurrentSubject | QueryKind::AsOfSubject => Self::new([
                 RuleVersion {
                     rule: RuleId::WorldCurrentFold.as_str().to_string(),
                     version: store_semantics::version_of(RuleId::WorldCurrentFold),
                 },
-                // Box 3h added this. A resolved ref now composes the identity
-                // graph as it stood at the pinned generation, so the fold that
-                // BUILDS that graph can change what an answer says — which is
-                // the whole test for membership in this set.
+                // Box 3h added this for `CurrentSubject`: a resolved ref
+                // composes the identity graph as it stood at the pinned
+                // generation, so the fold that BUILDS that graph can change
+                // what an answer says — the whole test for membership in this
+                // set. `ask_as_of` joined when its composition landed on the
+                // transaction-time axis.
                 RuleVersion {
                     rule: RuleId::EntityFold.as_str().to_string(),
                     version: store_semantics::version_of(RuleId::EntityFold),

@@ -95,6 +95,10 @@ DOMAIN_READ_METHODS = (
     # bypassing the boundary that would have resolved the object properly. The
     # convenience is exactly what makes it worth gating.
     "read_composed_at_generation",
+    # The transaction-time twin, gated for the identical reason: claims AND an
+    # identity view in one return value is everything a consumer needs to build
+    # an historical answer without the boundary.
+    "as_of_composed",
     "identity_view",
     "identity_view_at",
     "resolve_at",
