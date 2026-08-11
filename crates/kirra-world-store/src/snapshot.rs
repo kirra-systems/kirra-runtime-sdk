@@ -287,6 +287,11 @@ impl<'a> ReadSnapshot<'a> {
     /// code. Composing here makes the shared coordinate structural: one
     /// generation, one compaction check, one refusal covering both halves.
     ///
+    /// The reproducibility rules are **delegated** to
+    /// [`Self::read_at_generation`] rather than restated, so that guarantee
+    /// rests on there being one implementation rather than on two copies
+    /// agreeing.
+    ///
     /// # The bound is the LOG's progress, not the entity checkpoint
     ///
     /// The obvious head for the identity half — `entities_projection`'s own
@@ -317,35 +322,29 @@ impl<'a> ReadSnapshot<'a> {
         &self,
         generation: i64,
     ) -> Result<PinnedComposedRead, StoreError> {
-        if generation < 0 {
-            return Err(StoreError::InvalidGeneration {
-                requested: generation,
-            });
-        }
-
-        let head = checkpoint_on(&self.tx, projection::CURRENT_PROJECTION)?.0;
-        if generation > head {
-            return Ok(PinnedComposedRead::Irreproducible(
-                Irreproducible::NotYetReached { head },
-            ));
-        }
-
-        // ONE compaction check for both halves, before either replay. The two
-        // projections fold the same log, so evidence removed at or below
-        // `generation` ends BOTH reconstructions; checking once is what makes a
-        // half-reproducible answer unrepresentable.
-        let spans = compacted_at_or_below(&self.tx, generation)?;
-        if !spans.is_empty() {
-            return Ok(PinnedComposedRead::Irreproducible(
-                Irreproducible::Compacted { spans },
-            ));
-        }
+        // DELEGATED, not re-derived. Every reproducibility rule — the negative
+        // guard, the head bound, the compaction refusal — lives in
+        // `read_at_generation` and is reached from here, so "one refusal covers
+        // both halves" is true because there is only one implementation of it,
+        // not because two copies currently agree.
+        //
+        // The first draft duplicated the three checks. They were identical, and
+        // that is exactly the problem: a later edit to one path would leave the
+        // other silently reproducing a generation its sibling refuses, and the
+        // half that drifted would be the one nothing tested directly. Caught in
+        // review on #1437.
+        //
+        // Identity replays only on the reproduced path, so a refused
+        // composition does no work and cannot half-succeed.
+        let projection = match self.read_at_generation(generation)? {
+            PinnedRead::Reproduced(p) => p,
+            PinnedRead::Irreproducible(reason) => {
+                return Ok(PinnedComposedRead::Irreproducible(reason))
+            }
+        };
 
         Ok(PinnedComposedRead::Reproduced(PinnedComposition {
-            projection: PinnedProjection {
-                generation,
-                rows: replay_to(&self.tx, generation)?,
-            },
+            projection,
             identity: replay_identity_to(&self.tx, generation)?,
         }))
     }
