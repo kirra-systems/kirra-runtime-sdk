@@ -2039,9 +2039,14 @@ pressure that produced every stale claim this box already documents.
       `Full`/`Degraded` **independently of the payload outcome**, not just
       `subject_summary`. Retention may reduce answer precision; Tier 3 makes the
       loss observable.
-- [ ] **3h — Historical composition.** Historical queries use historical identity
-      (2d) and historical evidence — never today's entity graph applied to old
-      evidence.
+- [x] **3h — Historical composition.** ✅ **DONE 2026-08-11** — see *"3h closed:
+      the graph as it stood then"* below. Historical queries use historical
+      identity (2d) and historical evidence — never today's entity graph applied
+      to old evidence. `ReadSnapshot::read_composed_at_generation` reconstructs
+      claims AND identity at ONE coordinate with ONE refusal, and `AnswerRef`
+      resolves objects through it. Scope bound: this closes the box for the
+      **generation-pinned** family (`AnswerRef`); the transaction-time family
+      (`ask_as_of`) still reports `NotResolvedInReplay` and is the follow-up.
 
 **Cross-cutting, applying to every box above:**
 
@@ -3018,6 +3023,11 @@ never consulted, and a refusal that fires constantly is one people route around.
 The exclusion of `entity_fold` is a claim about *today's* code, asserted by test
 — box 3h's identity-resolving ref will put it in the set.
 
+> **It did, the next day.** 3h made refs compose identity at the pin, the
+> two-rule assertion went red, and the set became three. Left standing rather
+> than rewritten because the prediction and its resolution are the evidence that
+> this set is maintained by tests rather than by hand — see *"3h closed"* below.
+
 #### The three checks, and which hole each closes
 
 | Check | Where | Catches |
@@ -3091,3 +3101,101 @@ only to the axes it names, and the source pin is what covers the rest; and the
 boundary rule's corpus is challenged in **both** directions, because
 over-strictness there (refusing a stale claim) is a regression that reads as
 conservatism.
+
+### 3h closed: the graph as it stood then — 2026-08-11
+
+The box: *"historical queries use historical identity (2d) and historical
+evidence — never today's entity graph applied to old evidence."*
+
+#### The failure survives a correct evidence pin, which is why it needed its own box
+
+Box 3b's `read_at_generation` pinned the *evidence* and worked. The failure this
+box names goes straight through it: replay the claims at generation `g`, then
+resolve the object they name against the identity graph **as it is now**. Every
+claim is historically correct, the coordinate on the answer is honest, and the
+object is silently wrong — because a merge recorded last week says the thing
+that claim pointed at is now called something else.
+
+Nothing about that reads as a bug at the call site. It is what you get from
+writing the obvious code with a live `WorldStore` in scope. So the fix is a
+**composed read** rather than a rule about which functions to call in which
+order: `read_composed_at_generation` returns claims and identity together, and
+`PinnedComposition`'s halves are private and reachable only as a pair.
+
+#### One coordinate, one compaction check, one refusal
+
+Both halves replay from the same log at the same cut, so the compaction check
+runs **once** and covers both. A half-reproducible composition is
+unrepresentable rather than merely discouraged.
+
+#### The trap this box had to walk past
+
+The obvious head for the identity half — `entities_projection`'s own checkpoint
+— is **wrong**, and wrong in the direction that looks careful. Box 3c already
+recorded why the two checkpoints are not comparable: `world_current` advances
+past every event *considered*, the entity fold only to the last *adjudication*
+it folded, so appending one ordinary claim leaves the entity checkpoint
+legitimately behind with both folds complete. Bounding the composed read on it
+would refuse perfectly reproducible generations on a healthy store — the exact
+false drift that finding exists to prevent, re-appearing one box later in new
+clothes. `a_lagging_entity_checkpoint_does_not_refuse_a_reproducible_generation`
+pins the correct bound, and its fixture forces the checkpoints apart so the
+assertion is not vacuous.
+
+A related simplification falls out: a pinned composition needs no staleness gate
+at all. `identity_is_current` exists because a LIVE read consults a projection
+that may lag the log; a pinned read folds the adjudications itself, up to the
+coordinate, so the graph is complete there by construction.
+
+#### `entity_fold` entered the version set because a red test said so
+
+This is the part worth keeping. Box 3b shipped with `entity_fold` **excluded**
+from `SemanticVersions::for_query(CurrentSubject)`, and the exclusion was correct
+then: a resolved ref reported `NotResolvedInReplay`, so the identity fold could
+not reach the answer, and including it would have refused references for a rule
+they never consulted. 3b asserted that exclusion in
+`the_current_subject_query_depends_on_exactly_two_rules`.
+
+3h changed what the answer is derived from, and that test **failed** — which is
+the whole point of having written it. The set was widened because an assertion
+said the old claim had stopped being true, not because someone edited a list to
+match the code. A dependency set maintained the other way round is one that will
+eventually describe a composition that no longer exists. The test is now
+`..._exactly_three_rules` and records the flip in its own docs.
+
+Three further tests moved with it, all for the same reason: `entity_fold` had
+been serving as the *"a dependency this build does not have"* case, and that role
+passed to `subject_summary_fold` — a rule the store really declares and this
+query family really does not consult, so the case stays honest.
+
+#### Measured, not asserted
+
+| Mutation | Caught by |
+|---|---|
+| resolve identity against **today's** graph | `a_ref_pinned_before_the_merge_resolves_identity_as_it_stood_then` **and** `the_historical_and_live_identities_genuinely_differ` |
+| drop `entity_fold` from the version set | `the_current_subject_query_depends_on_exactly_three_rules` (unit) **and** `a_refs_recorded_versions_are_pinned_to_what_it_resolves_to` (end-to-end) |
+| bound the composed read on the **entity checkpoint** | `a_lagging_entity_checkpoint_does_not_refuse_a_reproducible_generation` |
+
+The suite carries its own controls, because each arm is worthless without the
+other: `the_live_read_resolves_the_object_through_the_merge` proves the fixture
+exercises identity at all (otherwise the historical arm would be "unmerged" for
+reasons unrelated to the pin), and `a_ref_pinned_after_the_merge_does_follow_it`
+proves the pin is a coordinate rather than a preference for old answers
+(otherwise an implementation that never resolved identity would pass). The two
+arms differ in the OBJECT RESOLUTION and not in the claim — the stored object
+string is `dock_alpha` in both — so the pair cannot be satisfied by the evidence
+pin alone.
+
+#### What remains
+
+`read_composed_at_generation` is gated by the 3d answer-boundary ratchet, for a
+sharper reason than its siblings: it hands back a `ProjectedClaim` and an
+`IdentityView` *together*, so calling it directly gives a consumer everything
+needed to compose an historical answer while bypassing the boundary. The
+convenience is what makes it worth gating.
+
+The honest scope bound: 3h is closed for the **generation-pinned** family.
+`ask_as_of` — the transaction-time family — still reports
+`ObjectIdentity::NotResolvedInReplay`. That is a scope decision rather than an
+impossibility (both `ask_as_of` and `identity_view_at` cut on transaction time,
+so the axes would agree), and it is the natural next slice.

@@ -12,6 +12,11 @@
 //! the mechanism now exists: `ReadSnapshot::read_at_generation` re-executes
 //! against the same snapshot, and fails closed when it cannot.
 //!
+//! Since box 3h it re-executes against `read_composed_at_generation`, which
+//! reconstructs the claims AND the identity graph at that one coordinate — so a
+//! resolved ref resolves its objects through the graph as it stood then, never
+//! through today's.
+//!
 //! # What a ref carries, and why each field
 //!
 //! | Field | Why |
@@ -40,7 +45,7 @@
 //! compaction floor resolves to [`RefResolution::Irreproducible`] — which is an
 //! honest answer, and the reason resolution is not infallible.
 
-use kirra_world_store::snapshot::{Irreproducible, PinnedRead};
+use kirra_world_store::snapshot::{Irreproducible, PinnedComposedRead};
 use kirra_world_store::WorldStore;
 
 use crate::read_view::{AskError, ObjectIdentity, WorldAnswer};
@@ -49,11 +54,12 @@ use crate::semantics::{SemanticVersions, VersionDifference};
 /// **The semantics a `CurrentSubject` answer is produced under, right now.**
 ///
 /// A convenience over [`SemanticVersions::for_query`], which is where the set is
-/// actually derived. Two rules bear on a resolved ref today — the projection
-/// fold (`supersedes` / `fold_step`, which decides which claim wins a key) and
-/// the boundary's admissibility test (which decides whether a claim is servable
-/// at all) — and both come from their crates' live declarations rather than
-/// being restated here.
+/// actually derived. THREE rules bear on a resolved ref since box 3h — the
+/// claim fold (`supersedes` / `fold_step`, which decides which claim wins a
+/// key), the **identity fold** (which builds the graph a resolved object is
+/// looked up in), and the boundary's admissibility test (which decides whether
+/// a claim is servable at all). All three come from their crates' live
+/// declarations rather than being restated here.
 ///
 /// # This replaced a single opaque constant, and the difference is box 3b
 ///
@@ -62,6 +68,11 @@ use crate::semantics::{SemanticVersions, VersionDifference};
 /// — but it could not say *which* rule moved, and it covered two of the four
 /// versioned rules in the system while the identity and subject-summary folds
 /// had no declared version at all. Both gaps are what 3b names.
+///
+/// The set is not decorative in the other direction either: box 3h ADDED
+/// `entity_fold` to it, and did so because a red test said the old membership
+/// claim had stopped being true — not because someone edited a list to match
+/// the code.
 #[must_use]
 pub fn current_semantics() -> SemanticVersions {
     SemanticVersions::for_query(QueryKind::CurrentSubject)
@@ -212,21 +223,29 @@ impl AnswerRef {
             return Ok(RefResolution::VersionMismatch { differences });
         }
 
-        let pinned = match store.read_at_generation(self.generation)? {
-            PinnedRead::Reproduced(p) => p,
-            PinnedRead::Irreproducible(reason) => return Ok(RefResolution::Irreproducible(reason)),
+        // COMPOSED, not two reads. Box 3h: an historical answer resolves
+        // objects against the identity graph as it stood at this coordinate.
+        // Reading the two halves separately would put a live `identity_view`
+        // one autocomplete away, and today's merges would silently rewrite what
+        // a recorded reference means.
+        let composed = match store.read_composed_at_generation(self.generation)? {
+            PinnedComposedRead::Reproduced(c) => c,
+            PinnedComposedRead::Irreproducible(reason) => {
+                return Ok(RefResolution::Irreproducible(reason))
+            }
         };
 
         let clock = self.now_ms.max(0).unsigned_abs();
         let mut answers = Vec::new();
-        for claim in pinned.current(&self.subject, self.now_ms) {
+        for claim in composed.claims().current(&self.subject, self.now_ms) {
             if !crate::read_view::is_admissible_for_ref(&claim, clock, self.staleness_budget_ms) {
                 continue;
             }
-            answers.push(crate::read_view::bind_pinned(
+            answers.push(crate::read_view::bind_composed(
                 &claim,
                 clock,
                 self.staleness_budget_ms,
+                composed.identity(),
             )?);
         }
         Ok(RefResolution::Resolved(answers))

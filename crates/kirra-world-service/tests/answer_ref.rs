@@ -202,10 +202,22 @@ fn changing_any_parameter_changes_the_ref() {
         ),
         // A ref that named a dependency this build does not have is a different
         // ref, even though every SHARED rule agrees.
+        // Box 3h added `entity_fold` to this query's dependency set, so it is
+        // a real rule now and belongs beside the other two.
+        (
+            "identity-fold-version",
+            AnswerRef::current_subject("package_17", LATER, Some(60_000), 7)
+                .recorded_with("entity_fold", 99),
+        ),
+        // A ref that named a dependency this build does not have is a different
+        // ref, even though every SHARED rule agrees. `subject_summary_fold` is
+        // the honest choice: it is a declared rule of the STORE that this query
+        // family genuinely does not consult, so the case stays real rather than
+        // resting on a name nothing has claimed yet.
         (
             "extra-rule",
             AnswerRef::current_subject("package_17", LATER, Some(60_000), 7)
-                .recorded_with("entity_fold", 1),
+                .recorded_with("subject_summary_fold", 1),
         ),
     ];
 
@@ -368,18 +380,38 @@ fn a_version_mismatch_refuses_rather_than_replaying() {
     // derives its answer from something else.
     match current
         .clone()
-        .recorded_with("entity_fold", 1)
+        .recorded_with("subject_summary_fold", 1)
         .resolve(&store)
         .expect("resolve")
     {
         RefResolution::VersionMismatch { differences } => {
-            assert_eq!(differences[0].rule, "entity_fold");
+            assert_eq!(differences[0].rule, "subject_summary_fold");
             assert_eq!(
                 differences[0].current, None,
-                "this build has no such dependency"
+                "this query family does not consult the subject summary fold"
             );
         }
         other => panic!("an unknown dependency must refuse, got {other:?}"),
+    }
+
+    // Box 3h: the IDENTITY fold is a dependency now, and moving it alone must
+    // refuse. Before 3h this exact ref was the "unknown dependency" case above
+    // — the same call, a different verdict, because the composition changed.
+    match current
+        .clone()
+        .recorded_with("entity_fold", 99)
+        .resolve(&store)
+        .expect("resolve")
+    {
+        RefResolution::VersionMismatch { differences } => {
+            assert_eq!(differences.len(), 1, "only one rule moved: {differences:?}");
+            assert_eq!(differences[0].rule, "entity_fold");
+            assert_eq!(
+                differences[0].current,
+                current_semantics().version_of("entity_fold"),
+            );
+        }
+        other => panic!("a moved identity fold must refuse, got {other:?}"),
     }
 
     // And the refusal is decided BEFORE the store is touched: a mismatched ref
@@ -449,6 +481,11 @@ fn a_refs_recorded_versions_are_pinned_to_what_it_resolves_to() {
     let pinned = SemanticVersions::new([
         RuleVersion {
             rule: "answer_admissibility".into(),
+            version: 1,
+        },
+        // Added by box 3h, when refs began composing identity at the pin.
+        RuleVersion {
+            rule: "entity_fold".into(),
             version: 1,
         },
         RuleVersion {

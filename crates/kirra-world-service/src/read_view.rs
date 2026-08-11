@@ -723,21 +723,37 @@ pub(crate) fn is_admissible_for_ref(
     WorldView::is_admissible(claim, clock, budget)
 }
 
-/// Build a `WorldAnswer` from a generation-pinned claim.
+/// **Build a `WorldAnswer` from a claim and the identity of the same pin — 3h.**
 ///
-/// Delegates to [`assemble`] exactly as `WorldView::bind` does; the only
-/// difference is the object identity, which a pinned read cannot resolve — see
-/// [`crate::answer_ref::pinned_object_identity`].
-pub(crate) fn bind_pinned(
+/// The identity view must come from the SAME
+/// [`read_composed_at_generation`][rc] call as the claim. That is not enforced
+/// by the type system here; it is enforced upstream, by that call being the only
+/// way to obtain the pair — which is why `AnswerRef::resolve` uses it rather
+/// than fetching the halves itself.
+///
+/// # Why `identity_is_current` is `true` and not a check
+///
+/// The live path consults [`ReadSnapshot::identity_is_current`][ic] because a
+/// live read reads a *projection* that may lag the log. A pinned composition
+/// does not read the projection at all: it folds the adjudications itself, up
+/// to the pinned generation, so the graph is complete at that coordinate by
+/// construction. Passing `true` states a fact about the reconstruction rather
+/// than skipping a check — and passing the live gate here would be actively
+/// wrong, since it answers a question about a different object.
+///
+/// [rc]: kirra_world_store::snapshot::ReadSnapshot::read_composed_at_generation
+/// [ic]: kirra_world_store::snapshot::ReadSnapshot::identity_is_current
+pub(crate) fn bind_composed(
     claim: &ProjectedClaim,
     clock: u64,
     budget: Option<u64>,
+    identity: &IdentityView,
 ) -> Result<WorldAnswer, AskError> {
     assemble(
         claim,
         clock,
         budget,
-        crate::answer_ref::pinned_object_identity(),
+        WorldView::resolve_object(claim.object.as_deref(), identity, true),
     )
 }
 

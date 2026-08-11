@@ -14,19 +14,31 @@
 //! refusal that fires constantly is one people learn to route around.
 //!
 //! So [`SemanticVersions::for_query`] names exactly the rules a query family
-//! depends on. For [`QueryKind::CurrentSubject`] that is two of the four rules
-//! in the system, and the two exclusions are the interesting part:
+//! depends on. For [`QueryKind::CurrentSubject`] that is three of the four rules
+//! in the system, and the membership test is always the same question — *can
+//! this rule change what the answer says?*
 //!
 //! | Rule | In? | Why |
 //! |---|---|---|
-//! | `world_current_fold` | yes | the pinned replay folds with it |
+//! | `world_current_fold` | yes | the pinned replay folds claims with it |
+//! | `entity_fold` | yes **since 3h** | the pinned replay folds the identity graph the answer resolves objects against |
 //! | `answer_admissibility` | yes | it decides which folded claims are served |
-//! | `entity_fold` | **no** | a pinned ref reports `NotResolvedInReplay`; identity cannot reach the answer |
 //! | `subject_summary_fold` | **no** | a different query family entirely |
 //!
-//! `entity_fold`'s exclusion is a live claim about today's code, not a
-//! permanent one. The moment a ref resolves object identity — the follow-up
-//! box 3h needs — it belongs in this set, and `answer_ref`'s tests say so.
+//! # `entity_fold` entered this set because the composition changed
+//!
+//! Box 3b shipped with `entity_fold` **excluded**, and the exclusion was
+//! correct at the time: a resolved ref reported
+//! `ObjectIdentity::NotResolvedInReplay`, so the identity fold could not reach
+//! the answer and including it would have refused references for a rule they
+//! never consulted.
+//!
+//! Box 3h made refs compose identity at the pinned generation. That is a change
+//! in what an answer is *derived from*, so the rule joined the set — and the
+//! test that pinned the exclusion failed, which is how it was supposed to
+//! happen. A dependency set edited by hand to match the code is a dependency set
+//! that will one day not match it; this one moved because a red test said the
+//! old claim was no longer true.
 //!
 //! [`QueryKind::CurrentSubject`]: crate::answer_ref::QueryKind::CurrentSubject
 
@@ -164,6 +176,14 @@ impl SemanticVersions {
                 RuleVersion {
                     rule: RuleId::WorldCurrentFold.as_str().to_string(),
                     version: store_semantics::version_of(RuleId::WorldCurrentFold),
+                },
+                // Box 3h added this. A resolved ref now composes the identity
+                // graph as it stood at the pinned generation, so the fold that
+                // BUILDS that graph can change what an answer says — which is
+                // the whole test for membership in this set.
+                RuleVersion {
+                    rule: RuleId::EntityFold.as_str().to_string(),
+                    version: store_semantics::version_of(RuleId::EntityFold),
                 },
                 RuleVersion {
                     rule: ADMISSIBILITY.to_string(),
@@ -426,19 +446,39 @@ mod tests {
         );
     }
 
-    /// The exclusions are a claim about today's code, so they are asserted
-    /// rather than only written down.
+    /// The membership of this set is a claim about today's code, so it is
+    /// asserted rather than only written down.
+    ///
+    /// # This test previously asserted TWO rules, and box 3h broke it
+    ///
+    /// That is the intended lifecycle, and worth recording because a dependency
+    /// set is exactly the kind of thing that rots quietly. Under 3b a pinned ref
+    /// reported `ObjectIdentity::NotResolvedInReplay`, so `entity_fold` could
+    /// not reach the answer and its exclusion was correct. 3h made refs compose
+    /// the identity graph at the pinned generation — a change in what the answer
+    /// is *derived from* — and this assertion went red, naming the stale claim.
+    ///
+    /// The set was then widened because a test said the old claim was false, not
+    /// because someone edited a list to match the code. A dependency set
+    /// maintained the other way round is one that will eventually describe a
+    /// composition that no longer exists.
     #[test]
-    fn the_current_subject_query_depends_on_exactly_two_rules() {
+    fn the_current_subject_query_depends_on_exactly_three_rules() {
         let v = SemanticVersions::for_query(QueryKind::CurrentSubject);
         let names: Vec<&str> = v.entries().iter().map(|e| e.rule.as_str()).collect();
-        assert_eq!(names, vec![ADMISSIBILITY, "world_current_fold"]);
-        assert!(
-            v.version_of("entity_fold").is_none(),
-            "a pinned ref does not resolve identity, so the entity fold cannot \
-             reach its answer — including it would refuse references for a rule \
-             they never consulted"
+        assert_eq!(
+            names,
+            vec![ADMISSIBILITY, "entity_fold", "world_current_fold"]
         );
-        assert!(v.version_of("subject_summary_fold").is_none());
+        assert!(
+            v.version_of("entity_fold").is_some(),
+            "since 3h a resolved ref looks its objects up in the identity graph \
+             the entity fold builds, so that fold can change what the answer says"
+        );
+        assert!(
+            v.version_of("subject_summary_fold").is_none(),
+            "subject summaries are a different query family; including them would \
+             refuse references for a rule they never consulted"
+        );
     }
 }
