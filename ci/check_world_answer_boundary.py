@@ -89,6 +89,12 @@ DOMAIN_READ_METHODS = (
     "candidates",
     "read_snapshot",
     "read_at_generation",
+    # Box 3h. Gated for a sharper reason than its siblings: this one hands back
+    # a `ProjectedClaim` AND an `IdentityView` together, so a consumer calling
+    # it directly gets everything needed to compose an historical answer while
+    # bypassing the boundary that would have resolved the object properly. The
+    # convenience is exactly what makes it worth gating.
+    "read_composed_at_generation",
     "identity_view",
     "identity_view_at",
     "resolve_at",

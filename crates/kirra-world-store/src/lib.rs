@@ -2629,6 +2629,26 @@ impl WorldStore {
         self.read_snapshot()?.read_at_generation(generation)
     }
 
+    /// **Reconstruct claims and identity together at one generation — box 3h.**
+    ///
+    /// See [`snapshot::ReadSnapshot::read_composed_at_generation`]. Both halves
+    /// come from ONE snapshot and ONE coordinate, which is what lets an
+    /// historical answer resolve objects against the graph as it stood then
+    /// rather than the graph as it stands now.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::read_at_generation`], plus
+    /// [`StoreError::CorruptEntityProjectionRow`] if a stored adjudication
+    /// cannot be decoded faithfully.
+    pub fn read_composed_at_generation(
+        &self,
+        generation: i64,
+    ) -> Result<snapshot::PinnedComposedRead, StoreError> {
+        self.read_snapshot()?
+            .read_composed_at_generation(generation)
+    }
+
     /// Where every projection stands right now, read outside any snapshot.
     ///
     /// For reporting and diagnostics. A composed ANSWER should carry the

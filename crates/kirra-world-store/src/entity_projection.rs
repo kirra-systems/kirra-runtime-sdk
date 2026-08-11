@@ -839,6 +839,7 @@ pub fn contradiction_from_json(raw: &str) -> Result<Contradiction, EntityRowErro
 /// A snapshot also means a resolution walk sees ONE state of the world
 /// throughout — a per-query reader could observe a fold landing mid-walk and
 /// answer from two different generations at once.
+#[derive(Debug, Clone)]
 pub struct IdentityView {
     rows: BTreeMap<String, ProjectedEntity>,
     generation: i64,

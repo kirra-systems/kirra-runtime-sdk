@@ -273,6 +273,83 @@ impl<'a> ReadSnapshot<'a> {
         }))
     }
 
+    /// **Reconstruct claims AND identity at one generation — box 3h.**
+    ///
+    /// 3h's rule is *"historical queries use historical identity and historical
+    /// evidence — never today's entity graph applied to old evidence."* This is
+    /// the primitive that makes that possible rather than merely intended.
+    ///
+    /// # Why this is one call and not two
+    ///
+    /// A caller who fetched the two halves separately would be one refactor away
+    /// from pinning claims at `g` and resolving identity against the live graph
+    /// — which is exactly the failure 3h names, and it would look like ordinary
+    /// code. Composing here makes the shared coordinate structural: one
+    /// generation, one compaction check, one refusal covering both halves.
+    ///
+    /// # The bound is the LOG's progress, not the entity checkpoint
+    ///
+    /// The obvious head for the identity half — `entities_projection`'s own
+    /// checkpoint — is **wrong**, and wrong in the direction that looks careful.
+    /// [`SnapshotCoordinate`] records at length why the two checkpoints are not
+    /// comparable: `world_current` advances past every event *considered*, while
+    /// the entity fold advances only to the last *adjudication* it folded, so
+    /// appending one ordinary claim leaves the entity checkpoint legitimately
+    /// behind with both folds complete. Gating the identity half on it would
+    /// refuse reproducible generations on a perfectly healthy store — the same
+    /// false drift that finding was recorded to prevent.
+    ///
+    /// Both halves replay from the **log**, so both are bounded by how far the
+    /// log has been folded, which is one number.
+    ///
+    /// # Staleness is not a question here
+    ///
+    /// [`Self::identity_is_current`] exists because a LIVE read consults a
+    /// projection that may lag the log. A pinned read does not: it folds the
+    /// adjudications itself, up to `generation`, so the reconstruction is
+    /// complete at that coordinate by construction. The gate is unnecessary
+    /// rather than skipped.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::read_at_generation`].
+    pub fn read_composed_at_generation(
+        &self,
+        generation: i64,
+    ) -> Result<PinnedComposedRead, StoreError> {
+        if generation < 0 {
+            return Err(StoreError::InvalidGeneration {
+                requested: generation,
+            });
+        }
+
+        let head = checkpoint_on(&self.tx, projection::CURRENT_PROJECTION)?.0;
+        if generation > head {
+            return Ok(PinnedComposedRead::Irreproducible(
+                Irreproducible::NotYetReached { head },
+            ));
+        }
+
+        // ONE compaction check for both halves, before either replay. The two
+        // projections fold the same log, so evidence removed at or below
+        // `generation` ends BOTH reconstructions; checking once is what makes a
+        // half-reproducible answer unrepresentable.
+        let spans = compacted_at_or_below(&self.tx, generation)?;
+        if !spans.is_empty() {
+            return Ok(PinnedComposedRead::Irreproducible(
+                Irreproducible::Compacted { spans },
+            ));
+        }
+
+        Ok(PinnedComposedRead::Reproduced(PinnedComposition {
+            projection: PinnedProjection {
+                generation,
+                rows: replay_to(&self.tx, generation)?,
+            },
+            identity: replay_identity_to(&self.tx, generation)?,
+        }))
+    }
+
     /// **Has the identity graph consumed every adjudication the log holds?**
     ///
     /// The question a composed read must ask before trusting a resolution, and
@@ -403,6 +480,51 @@ impl PinnedProjection {
     pub fn is_empty(&self) -> bool {
         self.rows.is_empty()
     }
+}
+
+/// **Claims and identity, reconstructed at ONE generation — box 3h.**
+///
+/// The two halves are private and reachable only together, so there is no way
+/// to hold a pinned projection beside a live identity view and call the pair an
+/// historical answer. That is the whole point of the type: 3h's failure mode is
+/// not exotic, it is the natural result of resolving an object while a live
+/// `WorldStore` is in scope.
+#[derive(Debug, Clone)]
+pub struct PinnedComposition {
+    projection: PinnedProjection,
+    identity: entity_projection::IdentityView,
+}
+
+impl PinnedComposition {
+    /// The claims half.
+    pub fn claims(&self) -> &PinnedProjection {
+        &self.projection
+    }
+
+    /// **The identity graph as it stood at the pinned generation.**
+    ///
+    /// Adjudications recorded *after* that coordinate are absent, which is the
+    /// property 3h is about: a merge performed today must not silently rewrite
+    /// what an answer from before it meant.
+    pub fn identity(&self) -> &entity_projection::IdentityView {
+        &self.identity
+    }
+
+    /// The coordinate both halves were reconstructed at.
+    pub fn generation(&self) -> i64 {
+        self.projection.generation()
+    }
+}
+
+/// The outcome of a composed generation-pinned read.
+///
+/// One refusal for both halves — see [`ReadSnapshot::read_composed_at_generation`].
+#[derive(Debug, Clone)]
+pub enum PinnedComposedRead {
+    /// Both halves reconstructed at the requested generation.
+    Reproduced(PinnedComposition),
+    /// Neither half can be reconstructed, and why.
+    Irreproducible(Irreproducible),
 }
 
 /// The outcome of a generation-pinned read.
@@ -633,6 +755,65 @@ pub(crate) fn replay_to(
         projection::fold_step(&mut acc, claim_from_row(row)?);
     }
     Ok(acc)
+}
+
+/// Replay the identity graph from the log up to `generation` — box 3h.
+///
+/// The generation-cut twin of [`crate::WorldStore::identity_view_at`], which
+/// cuts on transaction time. Both exist because the two coordinates answer
+/// different questions and must not be mixed: transaction time asks *"what did
+/// we know then"*, generation asks *"what does this exact recorded position
+/// reconstruct to"*. Box 3c's whole subject is that pairing one with the other
+/// produces an answer whose halves come from different cuts.
+///
+/// Folds with the shipped [`entity_projection::fold_adjudication`] rather than a
+/// re-derivation, so a pinned identity and a live one differ in WHERE they stop
+/// and in nothing else — the same relationship [`replay_to`] has with the claims
+/// fold.
+///
+/// The view's own generation is the last adjudication folded, NOT the requested
+/// `generation`: that is what `IdentityView` means by its coordinate, and
+/// stamping the request onto it would claim the graph had consumed events it
+/// never saw.
+pub(crate) fn replay_identity_to(
+    conn: &Connection,
+    generation: i64,
+) -> Result<entity_projection::IdentityView, StoreError> {
+    let mut acc = BTreeMap::new();
+    let mut head: i64 = 0;
+    if !table_exists(conn, "world_events")? {
+        return Ok(entity_projection::IdentityView::new(acc, head));
+    }
+
+    let mut stmt = conn.prepare(
+        "SELECT generation, payload, payload_schema, provenance
+         FROM world_events
+         WHERE claim_status = 'confirmed' AND kind = ?1 AND generation <= ?2
+         ORDER BY generation ASC",
+    )?;
+    let mut rows = stmt.query(params![
+        crate::adjudication_record::ADJUDICATION_KIND,
+        generation
+    ])?;
+    while let Some(r) = rows.next()? {
+        let at: i64 = r.get(0)?;
+        let payload: String = r.get(1)?;
+        let payload_schema: i64 = r.get(2)?;
+        let provenance: String = r.get(3)?;
+        let cited: Vec<String> = serde_json::from_str(&provenance).map_err(|e| {
+            StoreError::CorruptEntityProjectionRow {
+                detail: format!("provenance is not a JSON array: {e}"),
+            }
+        })?;
+        let adjudication =
+            crate::adjudication_record::decode_adjudication(&payload, payload_schema, &cited)
+                .map_err(|e| StoreError::CorruptEntityProjectionRow {
+                    detail: format!("generation {at}: {e}"),
+                })?;
+        entity_projection::fold_adjudication(&mut acc, &adjudication, at);
+        head = at;
+    }
+    Ok(entity_projection::IdentityView::new(acc, head))
 }
 
 pub(crate) fn table_exists(conn: &Connection, name: &str) -> Result<bool, StoreError> {
