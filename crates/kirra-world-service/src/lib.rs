@@ -30,6 +30,7 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
+pub mod answer_ref;
 pub mod read_view;
 
 // Both edges exercised, so the proposed three-node graph is genuinely built and

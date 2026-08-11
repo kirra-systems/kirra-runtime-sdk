@@ -2818,3 +2818,49 @@ head really moved.
 
 `read_at_generation` was added to the 3d answer-boundary gate's method list in
 the same change, so the new capability cannot become a fresh bypass.
+
+
+### The ruled `AnswerRef` — 2026-08-10
+
+`KIRRA-WM-ANSWERREF-NAMING-001` reserved this name for a descriptor that
+re-executes against the same snapshot, and forbade putting it on a drift
+detector. **The name is taken now**, because the mechanism exists.
+
+`AnswerRef` carries query kind, parameters, pinned generation and rule version —
+everything needed to re-execute, and nothing that is the answer. `resolve()`
+returns `Resolved | Irreproducible | VersionMismatch`, with **no silent fallback
+to current state**; that absence is the contract.
+
+**The version check runs before the store is touched.** Re-executing under new
+semantics and then noticing is not a check: the answer would already have been
+computed under rules the ref never described. A version mismatch is the subtler
+half of falling forward — the coordinate is honoured and the SEMANTICS are
+silently swapped, so the answer looks right and describes a query nobody asked.
+
+**`RULE_VERSION` is pinned to behaviour, and the first pin measured the wrong
+thing.** A hand-bumped constant is what 3b calls decorative metadata, so a corpus
+test anchors it. The first draft digested `projection_state_digest()` — the LIVE
+projection — and was insensitive to the rule a ref actually uses. The reason is a
+real property of this store, now recorded: **supersession has two
+implementations.** The incremental fold does it in SQL
+(`WHERE (excluded.valid_from_ms, excluded.generation) > (world_current…)`), while
+`projection::supersedes` / `fold_step` is the pure reducer used by
+`rebuild_projections` and by the pinned replay. `rebuild_from_zero_equals_incremental`
+holds them equal — but a corpus digesting the live table measured the SQL, so
+mutating `fold_step` left it green while changing what every ref resolves to.
+The pin is now over the resolved ANSWER, which covers the fold rule (through the
+replay) and admissibility (through the binding), and fails on either.
+
+**What a resolved ref deliberately does NOT do.** It does not resolve object
+identity: identity is a second projection with its own coordinate, the pinned
+read exists only for `world_current`, and `identity_view_at` cuts on transaction
+time — so resolving here would pair a generation-pinned claim with a
+transaction-time-pinned identity, mixing the axes box 3c closed. Pinned answers
+carry `ObjectIdentity::NotResolvedAtPin`, which `matchable` refuses, so a pinned
+answer cannot shape a proposal by accident. A generation-pinned IDENTITY read is
+the natural next prerequisite if refs ever need resolved objects.
+
+**Non-vacuity.** The acceptance set is the eight cases agreed for this step, plus
+mutations: ignoring the version check, falling forward when irreproducible,
+dropping the generation from ref identity, and two fold-rule changes — each
+caught, the last two only after the corpus was re-anchored.

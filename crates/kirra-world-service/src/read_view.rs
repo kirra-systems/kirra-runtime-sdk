@@ -362,6 +362,18 @@ pub enum WorldLookup {
 pub enum ObjectIdentity {
     /// The claim carries no object. Nothing to resolve.
     NoObject,
+    /// **This answer came from a generation-pinned read, where identity
+    /// resolution is not available.**
+    ///
+    /// Not a fault and not a stale graph: identity is a SECOND projection with
+    /// its own coordinate, and the pinned read exists only for `world_current`.
+    /// Resolving identity here would pair a generation-pinned claim with a
+    /// transaction-time-pinned identity, mixing the two axes that box 3c closed.
+    ///
+    /// Kept distinct from [`Self::Unresolvable`] because they call for different
+    /// responses: that one is an operator's problem to fix by folding, this one
+    /// is a limit of what a ref can currently reconstruct.
+    NotResolvedAtPin,
     /// **The identity graph is BEHIND the log: adjudications are recorded that
     /// it has not folded, so any resolution would be known-stale.**
     ///
@@ -412,7 +424,11 @@ impl ObjectIdentity {
         match self {
             Self::Resolved { entity, .. } => Some(entity),
             Self::NotAnEntity | Self::Malformed => stored_object,
-            Self::NoObject | Self::Unresolvable | Self::Ambiguous { .. } | Self::Refused(_) => None,
+            Self::NoObject
+            | Self::Unresolvable
+            | Self::NotResolvedAtPin
+            | Self::Ambiguous { .. }
+            | Self::Refused(_) => None,
         }
     }
 }
@@ -553,6 +569,9 @@ impl<'a> WorldView<'a> {
 
     /// The one place a `WorldAnswer` is built — every field populated together.
     ///
+    /// See also `answer_ref`'s `bind_pinned`, which is this same construction
+    /// for a generation-pinned claim.
+    ///
     /// Fallible only on the provenance handle, which is the one field that
     /// carries an invariant the row cannot enforce.
     fn bind(
@@ -624,4 +643,50 @@ impl<'a> WorldView<'a> {
             ResolutionOutcome::Refused(reason) => ObjectIdentity::Refused(reason),
         }
     }
+}
+
+/// The boundary's admissibility rule, for a generation-pinned claim.
+///
+/// `pub(crate)` so [`crate::answer_ref::AnswerRef::resolve`] applies the SAME
+/// test as a live `ask`, rather than a copy that could drift. A ref that
+/// admitted claims the boundary would refuse would be re-executing a different
+/// query than the one it names.
+pub(crate) fn is_admissible_for_ref(
+    claim: &ProjectedClaim,
+    clock: u64,
+    budget: Option<u64>,
+) -> bool {
+    WorldView::is_admissible(claim, clock, budget)
+}
+
+/// Build a `WorldAnswer` from a generation-pinned claim.
+///
+/// Identical to `WorldView::bind` except that object identity is
+/// [`ObjectIdentity::NotResolvedAtPin`] — see
+/// [`crate::answer_ref::pinned_object_identity`] for why a pinned answer cannot
+/// resolve identity without mixing coordinate axes.
+pub(crate) fn bind_pinned(
+    claim: &ProjectedClaim,
+    clock: u64,
+    budget: Option<u64>,
+) -> Result<WorldAnswer, AskError> {
+    let provenance = EvidenceDigest::new(claim.chain_digest.clone()).map_err(|cause| {
+        AskError::CorruptProvenance {
+            subject: claim.subject.clone(),
+            predicate: claim.predicate.clone(),
+            cause,
+        }
+    })?;
+    Ok(WorldAnswer {
+        subject: claim.subject.clone(),
+        predicate: claim.predicate.clone(),
+        object_identity: crate::answer_ref::pinned_object_identity(),
+        object: claim.object.clone(),
+        value: claim.payload.clone(),
+        validity: claim.validity_at(clock, budget),
+        axes: claim.trust,
+        grade: claim.grade_at(clock, budget),
+        provenance,
+        event_id: claim.event_id.clone(),
+    })
 }

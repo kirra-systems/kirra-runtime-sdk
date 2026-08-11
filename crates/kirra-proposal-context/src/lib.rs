@@ -379,9 +379,15 @@ fn mirror_resolution(identity: &ObjectIdentity) -> ObjectResolution {
         ObjectIdentity::Refused(reason) => {
             ObjectResolution::Contradictory(ObjectResolution::contradiction_tag(reason))
         }
+        // Not reachable through `matchable`, and reported rather than panicked.
+        // `NotResolvedAtPin` sits here for a specific reason: it can only arise
+        // from an `AnswerRef` resolution, and this consumer asks live. If it
+        // ever appears, something is feeding pinned answers into a proposal —
+        // worth a visible "unclassified" rather than a plausible-looking tag.
         ObjectIdentity::NoObject
         | ObjectIdentity::Malformed
         | ObjectIdentity::NotAnEntity
+        | ObjectIdentity::NotResolvedAtPin
         | ObjectIdentity::Resolved { .. } => ObjectResolution::Contradictory("unclassified"),
     }
 }
