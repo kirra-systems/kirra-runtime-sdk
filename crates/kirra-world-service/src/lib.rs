@@ -32,6 +32,7 @@
 
 pub mod answer_ref;
 pub mod read_view;
+pub mod semantics;
 
 // Both edges exercised, so the proposed three-node graph is genuinely built and
 // not merely described in a manifest. The edge is no longer only exercised --

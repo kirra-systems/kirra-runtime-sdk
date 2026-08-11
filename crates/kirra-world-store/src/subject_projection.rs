@@ -296,6 +296,11 @@ pub struct ProjectedSubject {
 /// `(subject, kind)` would compile everywhere `(kind, subject)` does.
 pub type SubjectKey = (SummaryKind, String);
 
+// SEMANTICS-PIN-BEGIN: subject_summary_fold
+//
+// Digested by `ci/check_world_semantics.py` and pinned in
+// `semantics::SEMANTICS` — see `crate::semantics` for the two-check rationale.
+
 /// Fold one observation into the accumulator. Returns whether it changed.
 ///
 /// # Ordering is not assumed
@@ -382,6 +387,8 @@ pub fn subject_fold_all<'a, I: IntoIterator<Item = &'a SubjectObservation>>(
     }
     Ok(acc)
 }
+
+// SEMANTICS-PIN-END: subject_summary_fold
 
 #[cfg(test)]
 mod tests {

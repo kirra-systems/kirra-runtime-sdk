@@ -219,7 +219,7 @@ def ambiguous_item_names(mods: list[tuple[str, str, Path]]) -> set[str]:
     return ambiguous
 
 
-def strip_noncode(text: str) -> str:
+def strip_noncode(text: str, keep_strings: bool = False) -> str:
     """Blank out comments and string literals, preserving line structure.
 
     A name inside a comment or a string is **prose, not consumption**, and the
@@ -242,6 +242,24 @@ def strip_noncode(text: str) -> str:
     each can contain the other's opening token. Newlines are preserved so
     line-oriented rules (`use` at line start) still work, and removed spans
     become spaces so nothing on either side is joined into a new token.
+
+    # `keep_strings`
+
+    `keep_strings=True` blanks comments only, emitting string literals verbatim.
+    Scanning is unchanged either way — a literal still has to be *recognised* to
+    know that a `//` inside it does not open a comment — so the flag changes what
+    is emitted, never what is parsed.
+
+    Added for `check_world_semantics.py`, whose reducer source pins must not go
+    blind to a string constant. Several reducers return stored tokens
+    (`lifecycle_token`, `SummaryKind::as_str`) where the literal IS the
+    behaviour, and a pin that blanked them would sit green through an edit that
+    changed what every projection row says. The cost is a false red on
+    error-message churn, which is the cheap direction: re-pinning costs one
+    commit and the corpus digest proves nothing moved, while blindness costs
+    correctness silently.
+
+    Default `False`, so every existing caller is byte-identical.
     """
     out: list[str] = []
     i, n = 0, len(text)
@@ -272,9 +290,13 @@ def strip_noncode(text: str) -> str:
             close = '"' + m.group(1)
             end = text.find(close, i + m.end())
             end = n if end == -1 else end + len(close)
-            out.extend("\n" if ch == "\n" else " " for ch in text[i:end])
+            if keep_strings:
+                out.append(text[i:end])
+            else:
+                out.extend("\n" if ch == "\n" else " " for ch in text[i:end])
             i = end
         elif c == '"':
+            start, mark = i, len(out)
             out.append(" ")
             i += 1
             while i < n:
@@ -298,6 +320,13 @@ def strip_noncode(text: str) -> str:
                     break
                 out.append("\n" if text[i] == "\n" else " ")
                 i += 1
+            if keep_strings:
+                # Replace the blanks just emitted for this literal with the
+                # literal itself. Done after the scan rather than instead of it
+                # so escape handling — including the line-continuation case
+                # above — still decides where the literal ENDS.
+                del out[mark:]
+                out.append(text[start:i])
         else:
             out.append(c)
             i += 1

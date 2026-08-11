@@ -240,6 +240,13 @@ impl ProjectedClaim {
     }
 }
 
+// SEMANTICS-PIN-BEGIN: world_current_fold
+//
+// Everything between these markers is digested by `ci/check_world_semantics.py`
+// and pinned in `semantics::SEMANTICS`. Editing it moves the pin; if the edit
+// changed BEHAVIOUR the corpus digest moves too, and then the declared version
+// must be bumped. See `crate::semantics` for why both checks exist.
+
 /// Does `incoming` supersede `held` for the same key?
 ///
 /// Ordered by `(valid_from_ms, generation)`. Valid time leads because the
@@ -284,6 +291,8 @@ pub fn fold_all<I: IntoIterator<Item = ProjectedClaim>>(
     }
     acc
 }
+
+// SEMANTICS-PIN-END: world_current_fold
 
 #[cfg(test)]
 mod tests {

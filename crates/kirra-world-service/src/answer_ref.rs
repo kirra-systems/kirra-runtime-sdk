@@ -19,7 +19,7 @@
 //! | query kind | which query this describes; the ref is meaningless without it |
 //! | parameters | subject, clock, staleness budget — change one, change the answer |
 //! | pinned generation | the snapshot coordinate to re-execute AT |
-//! | rule version | the semantics the answer was produced under |
+//! | semantic versions | the rules the answer was produced under — a SET, one entry per rule the query family depends on |
 //!
 //! Everything needed to re-execute, and nothing that is the answer itself. A ref
 //! holds no claims, no digests of claims, and no summary — because a durable
@@ -44,31 +44,28 @@ use kirra_world_store::snapshot::{Irreproducible, PinnedRead};
 use kirra_world_store::WorldStore;
 
 use crate::read_view::{AskError, ObjectIdentity, WorldAnswer};
+use crate::semantics::{SemanticVersions, VersionDifference};
 
-/// **The semantics an answer was produced under.**
+/// **The semantics a `CurrentSubject` answer is produced under, right now.**
 ///
-/// Bumped when a rule that can change an answer changes. Two rules bear on a
-/// resolved ref today: the projection fold (`supersedes` / `fold_step`, which
-/// decides which claim wins a key) and the boundary's admissibility test (which
-/// decides whether a claim is servable at all).
+/// A convenience over [`SemanticVersions::for_query`], which is where the set is
+/// actually derived. Two rules bear on a resolved ref today — the projection
+/// fold (`supersedes` / `fold_step`, which decides which claim wins a key) and
+/// the boundary's admissibility test (which decides whether a claim is servable
+/// at all) — and both come from their crates' live declarations rather than
+/// being restated here.
 ///
-/// # This is not decorative, and that took a mechanism
+/// # This replaced a single opaque constant, and the difference is box 3b
 ///
-/// A hand-bumped constant with nothing behind it is exactly what Tier 3 box 3b
-/// calls *"decorative metadata"* — it would read the same across a semantics
-/// change, so [`RefResolution::VersionMismatch`] would never fire when it
-/// mattered and the ref would replay under new rules while claiming the old
-/// ones. `answer_ref.rs`'s corpus test pins the fold's observable output against
-/// this constant: change the rule without changing the version and the test
-/// fails, naming the obligation.
-///
-/// # What it is NOT
-///
-/// It is not box 3b. 3b asks for declared, behaviour-changing, corpus-and-source
-/// pinned versioning across *rules and projections generally*; this covers the
-/// two rules THIS ref's resolution depends on, which is the honest subset a ref
-/// can carry today. Widening it is 3b's job.
-pub const RULE_VERSION: u32 = 1;
+/// The first version of this file carried `RULE_VERSION: u32 = 1`: one number,
+/// hand-bumped, pinned by one corpus. It refused on a mismatch, which was real
+/// — but it could not say *which* rule moved, and it covered two of the four
+/// versioned rules in the system while the identity and subject-summary folds
+/// had no declared version at all. Both gaps are what 3b names.
+#[must_use]
+pub fn current_semantics() -> SemanticVersions {
+    SemanticVersions::for_query(QueryKind::CurrentSubject)
+}
 
 /// Which query a ref describes.
 ///
@@ -97,15 +94,15 @@ pub struct AnswerRef {
     now_ms: i64,
     staleness_budget_ms: Option<u64>,
     generation: i64,
-    rule_version: u32,
+    semantics: SemanticVersions,
 }
 
 impl AnswerRef {
     /// Describe a `CurrentSubject` query at a pinned generation.
     ///
-    /// The rule version is stamped from [`RULE_VERSION`] rather than accepted
-    /// from the caller: a ref records the semantics its answer was produced
-    /// under, and letting a caller name them would let it claim any.
+    /// The semantic versions are stamped from the live declarations rather than
+    /// accepted from the caller: a ref records the semantics its answer was
+    /// produced under, and letting a caller name them would let it claim any.
     #[must_use]
     pub fn current_subject(
         subject: impl Into<String>,
@@ -119,7 +116,7 @@ impl AnswerRef {
             now_ms,
             staleness_budget_ms,
             generation,
-            rule_version: RULE_VERSION,
+            semantics: SemanticVersions::for_query(QueryKind::CurrentSubject),
         }
     }
 
@@ -155,19 +152,42 @@ impl AnswerRef {
 
     /// The semantics this ref's answer was produced under.
     #[must_use]
-    pub fn rule_version(&self) -> u32 {
-        self.rule_version
+    pub fn semantics(&self) -> &SemanticVersions {
+        &self.semantics
     }
 
-    /// Rebuild a ref that was recorded under a different rule version.
+    /// Rebuild a ref that was recorded under a different semantic version set.
     ///
     /// For tests and for a reader decoding a persisted ref. Deliberately
     /// explicit — there is no way to reach it by accident, and a ref built this
-    /// way says so by carrying a version that may not be [`RULE_VERSION`].
+    /// way says so by carrying versions that may not be this build's.
     #[must_use]
-    pub fn recorded_under(mut self, rule_version: u32) -> Self {
-        self.rule_version = rule_version;
+    pub fn recorded_under(mut self, semantics: SemanticVersions) -> Self {
+        self.semantics = semantics;
         self
+    }
+
+    /// Rebuild a ref with ONE rule's recorded version overridden.
+    ///
+    /// The common shape in a test — *"what if only the fold had moved?"* — and
+    /// writing it out longhand each time invites restating the whole set, which
+    /// would make the test pass for a reason it did not intend. An unknown rule
+    /// name is added rather than rejected, so a ref carrying a dependency this
+    /// build no longer has is representable.
+    #[must_use]
+    pub fn recorded_with(self, rule: &str, version: u32) -> Self {
+        let mut entries: Vec<_> = self
+            .semantics
+            .entries()
+            .iter()
+            .filter(|e| e.rule != rule)
+            .cloned()
+            .collect();
+        entries.push(crate::semantics::RuleVersion {
+            rule: rule.to_string(),
+            version,
+        });
+        self.recorded_under(SemanticVersions::new(entries))
     }
 
     /// **Re-execute this exact query against the same snapshot.**
@@ -185,11 +205,11 @@ impl AnswerRef {
     /// carrying a negative generation. Irreproducibility is an OUTCOME, not an
     /// error: *"we deleted the evidence"* is a fact about the data.
     pub fn resolve(&self, store: &WorldStore) -> Result<RefResolution, AskError> {
-        if self.rule_version != RULE_VERSION {
-            return Ok(RefResolution::VersionMismatch {
-                recorded: self.rule_version,
-                current: RULE_VERSION,
-            });
+        let differences = self
+            .semantics
+            .differences(&SemanticVersions::for_query(self.kind));
+        if !differences.is_empty() {
+            return Ok(RefResolution::VersionMismatch { differences });
         }
 
         let pinned = match store.read_at_generation(self.generation)? {
@@ -230,11 +250,14 @@ pub enum RefResolution {
     /// Refused rather than replayed, because replaying would answer a question
     /// the ref does not describe: the coordinate would be honoured and the
     /// SEMANTICS silently swapped, which is the subtler half of falling forward.
+    ///
+    /// Carries every rule that moved, by name. A refusal that said only *"the
+    /// rules changed"* would leave an operator holding a reference they cannot
+    /// act on — the versions exist precisely so the answer to *"changed how?"*
+    /// is in the refusal rather than in a changelog.
     VersionMismatch {
-        /// The version the ref was recorded under.
-        recorded: u32,
-        /// The version this build implements.
-        current: u32,
+        /// Every rule whose version differs, recorded versus current.
+        differences: Vec<VersionDifference>,
     },
 }
 

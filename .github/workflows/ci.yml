@@ -1653,6 +1653,28 @@ jobs:
         run: |
           python3 ci/check_world_answer_boundary.py --self-test
           python3 ci/check_world_answer_boundary.py
+      - name: Kirra World reducer semantics gate (Tier 3 box 3b)
+        # THE RULE (KIRRA-WM-REDUCER-VERSION-001): a reducer version changes
+        # whenever behaviour changes in a way that can alter a derived answer,
+        # and a recorded AnswerRef refuses replay under a different version
+        # rather than silently adopting the new rule.
+        #
+        # The Rust conformance tests prove each declared corpus digest IS the
+        # reducer's digest. They cannot see the failure that makes a version
+        # decorative: re-pin the digest and they go green with the version
+        # untouched. This gate can, because the baseline records what each
+        # version's digest WAS — so a behaviour change at a fixed version has
+        # nowhere to hide.
+        #
+        # The source pin is the second, independent mechanism: the corpus
+        # discriminates the axes it exercises, and an axis nobody thought of is
+        # not covered, so any EDIT to a pinned reducer span reds regardless.
+        #
+        # Self-test first, and it asserts its own case count — a harness that
+        # discovers zero cases prints the same "OK" as one that ran them all.
+        run: |
+          python3 ci/check_world_semantics.py --self-test
+          python3 ci/check_world_semantics.py
       - name: Kirra World domain-logic gate (ADR-0042 Decision 5)
         # THE RULE: no Kirra World domain implementation may merge until
         # ADR-0042's safety-assurance scope ruling is assigned to a named owner
