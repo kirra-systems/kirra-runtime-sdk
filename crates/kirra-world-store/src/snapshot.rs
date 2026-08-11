@@ -526,6 +526,65 @@ pub enum PinnedComposedRead {
     Irreproducible(Irreproducible),
 }
 
+/// **Claims and identity at ONE transaction-time cut** — the `as_of` twin.
+///
+/// The same composition [`PinnedComposition`] provides on the generation axis,
+/// for the axis `as_of` actually asks about: *what did this store know at time
+/// T*. Both halves come from one snapshot, so a fold landing mid-read cannot
+/// pair claims from one commit with an identity graph from another.
+///
+/// # Why this one has no refusal variant, and the pinned one does
+///
+/// The asymmetry is real and worth stating, because two composed reads with
+/// different failure shapes look like an oversight:
+///
+/// * A **generation pin** promises exact reconstruction of a recorded
+///   coordinate. Evidence removed at or below it makes that impossible, so it
+///   [`Irreproducible`]-refuses — anything else would be a reconstruction with
+///   holes wearing the word "pinned".
+/// * An **`as_of`** promises *what was known then, from what remains*.
+///   Compaction does not make that impossible, it makes it **incomplete** — and
+///   incompleteness already has a carrier, [`crate::Resolution`], on the answer.
+///   Refusing here would throw away an answer the caller can legitimately use
+///   while being told exactly what is missing.
+///
+/// So one refuses and one degrades, and both are honest about which they did.
+#[derive(Debug, Clone)]
+pub struct TemporalComposition {
+    answer: crate::compaction::TemporalAnswer,
+    identity: IdentityView,
+}
+
+impl TemporalComposition {
+    /// Build from halves read in one snapshot.
+    ///
+    /// `pub(crate)` so the only way a caller obtains one is
+    /// [`crate::WorldStore::as_of_composed`], which is what opens that snapshot.
+    /// A public constructor would let the two halves be assembled from separate
+    /// reads — the pairing this type exists to prevent.
+    pub(crate) fn new(answer: crate::compaction::TemporalAnswer, identity: IdentityView) -> Self {
+        Self { answer, identity }
+    }
+
+    /// The claims half, carrying its own completeness.
+    pub fn answer(&self) -> &crate::compaction::TemporalAnswer {
+        &self.answer
+    }
+
+    /// **The identity graph as it stood at the same `as_known_at` cut.**
+    ///
+    /// Adjudications recorded after that instant are absent — the transaction-
+    /// time form of the property box 3h established on the generation axis.
+    pub fn identity(&self) -> &IdentityView {
+        &self.identity
+    }
+
+    /// Consume into the two halves, for a caller that must own the answer.
+    pub fn into_parts(self) -> (crate::compaction::TemporalAnswer, IdentityView) {
+        (self.answer, self.identity)
+    }
+}
+
 /// The outcome of a generation-pinned read.
 ///
 /// A two-variant result rather than `Option` or a fallback, because the one

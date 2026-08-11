@@ -3194,8 +3194,95 @@ sharper reason than its siblings: it hands back a `ProjectedClaim` and an
 needed to compose an historical answer while bypassing the boundary. The
 convenience is what makes it worth gating.
 
-The honest scope bound: 3h is closed for the **generation-pinned** family.
-`ask_as_of` — the transaction-time family — still reports
-`ObjectIdentity::NotResolvedInReplay`. That is a scope decision rather than an
-impossibility (both `ask_as_of` and `identity_view_at` cut on transaction time,
-so the axes would agree), and it is the natural next slice.
+The honest scope bound at the time of writing: 3h was closed for the
+**generation-pinned** family only, with `ask_as_of` still reporting
+`ObjectIdentity::NotResolvedInReplay`.
+
+> **Closed 2026-08-11, immediately after** — see *"3h's other axis"* below.
+> The remainder was taken while the machinery was fresh rather than deferred,
+> on the reasoning that it is the same architectural problem on the other
+> temporal axis rather than a separate feature.
+
+### 3h's other axis: `ask_as_of` composes identity — 2026-08-11
+
+3h closed *"historical queries use historical identity, never today's entity
+graph applied to old evidence"* for the generation-pinned family and left
+`ask_as_of` reporting `NotResolvedInReplay`. That was honest, but it answered
+the same architectural question on one axis and left it open on the other.
+
+Taken immediately rather than deferred behind 3e, on the reasoning that this is
+**the same problem on the other temporal axis, not a separate feature** — and
+that the moment to close an inconsistency is while the machinery that closes it
+is fresh. Everything needed already existed: `ask_as_of` and `identity_view_at`
+both cut on transaction time, the composed-read pattern came from 3h, the
+version machinery from 3b, the one-snapshot rule from 3c.
+
+#### What was built, and what deliberately was not
+
+`WorldStore::as_of_composed` reads both halves inside one transaction. It lives
+on the store rather than on `ReadSnapshot` because its halves are store-level
+temporal queries rather than projection replays — so the existing `as_of` and
+`identity_view_at` are called **unchanged**, keeping one cut per axis with no
+second copy of the bitemporal filter and no second adjudication replay to drift
+from the original.
+
+Held to the stated scope: no new resolver (object resolution goes through the
+same `resolve_object` the live and pinned paths use), no valid-time
+interpretation of identity, no fallback to the current graph, and contradiction
+/ ambiguity outcomes propagate unchanged.
+
+#### The asymmetry between the two compositions, stated so it does not read as an oversight
+
+| | Generation-pinned | `as_of` |
+|---|---|---|
+| promises | exact reconstruction of a recorded coordinate | what was known then, from what remains |
+| on lost evidence | **refuses** (`Irreproducible`) | **degrades** (`Resolution`, already on the answer) |
+
+Refusing on the `as_of` path would discard an answer the caller can legitimately
+use while being told exactly what is missing; reconstructing a generation pin
+from a log with holes would be a reconstruction wearing the word "pinned". Both
+are honest about which they did.
+
+#### The version set, and a finding
+
+`QueryKind::AsOfSubject` joined, and `entity_fold` is in its set for the same
+reason it is in `CurrentSubject`'s. The two families turn out to depend on the
+**same three rules** — a finding rather than a coincidence: they differ in which
+COORDINATE they cut on, not in which rules produce the answer. They are still
+derived per-family, because *"identical today"* is not *"identical by
+construction"*: a temporal-resolution rule would belong to one and not the other,
+and a shared arm that has to be split later is one nobody remembers to split.
+
+`TemporalLookup` now carries that set, which spends a 3a exclusion. 3a said the
+envelope owns *"completeness, freshness, provenance and versions"* and then
+excluded versions because *"no reducer version exists to carry. Minting one here
+would be the decorative metadata 3b forbids; it lands with 3b's enforcement."*
+3b built the enforcement, so the field is no longer decorative.
+
+**Carried, not enforced** — and the docs say so. A recorded `AnswerRef` REFUSES
+on a version mismatch; a `TemporalLookup` states which rules produced it. There
+is no `as_of` ref to refuse yet, and implying otherwise would be the overclaim
+3b exists to prevent.
+
+#### Measured
+
+| Mutation | Caught by |
+|---|---|
+| fall back to today's identity graph | **5** tests, including the box's own assertion and the no-fallback arm |
+| cut identity at the claim's **valid** time instead of transaction time | the same 5 |
+| drop `entity_fold` from the family's version set | `an_as_of_answer_carries_the_familys_version_set` |
+
+The suite's controls: an arm asking the same query LATER (so an implementation
+that never resolved identity fails), an arm asserting the CLAIM is byte-identical
+across both cuts (so the pair cannot be satisfied by the bitemporal claim filter
+alone — only the resolution moves), and a re-assertion that 3g's completeness
+still rides on the answer, because this change rewrote the lines that carry it.
+
+`as_of_composed` joins the 3d answer-boundary ratchet for the same reason its
+generation-axis twin did: claims plus an identity view in one return value is
+everything a consumer needs to build an historical answer without the boundary.
+
+#### Where Tier 3 stands on this question
+
+Both temporal axes now use the same identity semantics. Historical composition
+is no longer a property of one query family.

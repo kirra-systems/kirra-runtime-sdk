@@ -100,6 +100,9 @@ use kirra_world_store::entity_projection::IdentityView;
 use kirra_world_store::snapshot::SnapshotCoordinate;
 use kirra_world_store::{ProjectedClaim, StoreError, TrustAxes, TrustGrade, Validity, WorldStore};
 
+use crate::answer_ref::QueryKind;
+use crate::semantics::SemanticVersions;
+
 /// Why an ask could not be answered at all.
 ///
 /// Distinct from [`WorldLookup::Unknown`], and the split is rule 3: *absence of
@@ -586,7 +589,16 @@ impl<'a> WorldView<'a> {
         valid_at_ms: i64,
         as_known_at_ms: i64,
     ) -> Result<TemporalLookup, AskError> {
-        let answer = self.store.as_of(subject, valid_at_ms, as_known_at_ms)?;
+        // COMPOSED at one transaction-time cut. Objects resolve through the
+        // identity graph as it stood at `as_known_at_ms`, so an adjudication
+        // recorded after that instant cannot rewrite this answer.
+        let composed = self
+            .store
+            .as_of_composed(subject, valid_at_ms, as_known_at_ms)?;
+        // Both halves MOVED out together. An earlier draft cloned the identity
+        // view and then dropped the original — a full copy of the entity graph
+        // on every call, for nothing. Caught in review on #1438.
+        let (answer, identity) = composed.into_parts();
         let completeness = answer.resolution;
 
         let clock = valid_at_ms.max(0).unsigned_abs();
@@ -599,12 +611,11 @@ impl<'a> WorldView<'a> {
                 claim,
                 clock,
                 self.staleness_budget_ms,
-                // A replayed answer does not resolve identity. Unlike the
-                // generation pin the axes would actually AGREE here — both this
-                // query and `identity_view_at` cut on transaction time — so this
-                // is a scope decision rather than an impossibility, and is
-                // recorded as such in WM_SCOPE.
-                ObjectIdentity::NotResolvedInReplay,
+                // `true` for the same reason a pinned composition passes it:
+                // the historical graph was replayed from the log up to the cut,
+                // so it cannot lag it. `identity_is_current` answers a question
+                // about the LIVE projection and would be the wrong question here.
+                Self::resolve_object(claim.object.as_deref(), &identity, true),
             )?);
         }
 
@@ -623,6 +634,7 @@ impl<'a> WorldView<'a> {
         Ok(TemporalLookup {
             lookup,
             completeness,
+            semantics: SemanticVersions::for_query(QueryKind::AsOfSubject),
         })
     }
 
@@ -814,6 +826,7 @@ fn assemble(
 pub struct TemporalLookup {
     lookup: WorldLookup,
     completeness: Resolution,
+    semantics: SemanticVersions,
 }
 
 impl TemporalLookup {
@@ -833,5 +846,24 @@ impl TemporalLookup {
     #[must_use]
     pub fn is_degraded(&self) -> bool {
         self.completeness.is_degraded()
+    }
+
+    /// **The rules this answer was produced under.**
+    ///
+    /// Box 3a said the envelope owns *"completeness, freshness, provenance and
+    /// versions"*, and then excluded versions with a reason: *"no reducer
+    /// version exists to carry. Minting one here would be the decorative
+    /// metadata 3b forbids; it lands with 3b's enforcement."* 3b built that
+    /// enforcement, so the field is no longer decorative and the exclusion is
+    /// spent.
+    ///
+    /// **Carried, not enforced — and the difference matters.** A recorded
+    /// `AnswerRef` REFUSES on a version mismatch; this states which rules
+    /// produced the answer so a caller comparing two answers can see that they
+    /// were not produced alike. There is no `as_of` ref to refuse yet, and
+    /// pretending otherwise is exactly the overclaim 3b exists to prevent.
+    #[must_use]
+    pub fn semantics(&self) -> &SemanticVersions {
+        &self.semantics
     }
 }

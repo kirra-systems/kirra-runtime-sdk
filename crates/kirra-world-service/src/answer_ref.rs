@@ -89,6 +89,15 @@ pub enum QueryKind {
     /// [`crate::read_view::WorldView::ask`] — what is currently known about one
     /// subject.
     CurrentSubject,
+    /// [`crate::read_view::WorldView::ask_as_of`] — what was known about one
+    /// subject at a transaction-time cut, for facts valid at an instant.
+    ///
+    /// A query FAMILY, not yet a ref family: `AnswerRef` describes
+    /// [`Self::CurrentSubject`] only. This variant exists because the family
+    /// has a dependency set that its answers carry
+    /// ([`crate::read_view::TemporalLookup::semantics`]), and that set has to
+    /// be derived in the one place every set is derived.
+    AsOfSubject,
 }
 
 /// **A reproducible descriptor for one answer.**
