@@ -95,6 +95,7 @@
 use kirra_world::evidence::{DigestError, EvidenceDigest};
 use kirra_world::reference::EntityId;
 use kirra_world::resolution::{resolve, RefusalReason, ResolutionOutcome};
+use kirra_world_store::compaction::Resolution;
 use kirra_world_store::entity_projection::IdentityView;
 use kirra_world_store::snapshot::SnapshotCoordinate;
 use kirra_world_store::{ProjectedClaim, StoreError, TrustAxes, TrustGrade, Validity, WorldStore};
@@ -368,8 +369,8 @@ pub enum WorldLookup {
 pub enum ObjectIdentity {
     /// The claim carries no object. Nothing to resolve.
     NoObject,
-    /// **This answer came from a generation-pinned read, where identity
-    /// resolution is not available.**
+    /// **This answer came from a log REPLAY — generation-pinned or bitemporal —
+    /// where identity resolution is not performed.**
     ///
     /// Not a fault and not a stale graph: identity is a SECOND projection with
     /// its own coordinate, and the pinned read exists only for `world_current`.
@@ -379,7 +380,7 @@ pub enum ObjectIdentity {
     /// Kept distinct from [`Self::Unresolvable`] because they call for different
     /// responses: that one is an operator's problem to fix by folding, this one
     /// is a limit of what a ref can currently reconstruct.
-    NotResolvedAtPin,
+    NotResolvedInReplay,
     /// **The identity graph is BEHIND the log: adjudications are recorded that
     /// it has not folded, so any resolution would be known-stale.**
     ///
@@ -432,7 +433,7 @@ impl ObjectIdentity {
             Self::NotAnEntity | Self::Malformed => stored_object,
             Self::NoObject
             | Self::Unresolvable
-            | Self::NotResolvedAtPin
+            | Self::NotResolvedInReplay
             | Self::Ambiguous { .. }
             | Self::Refused(_) => None,
         }
@@ -556,6 +557,73 @@ impl<'a> WorldView<'a> {
             WorldLookup::Answered(answers)
         };
         Ok(ComposedLookup { lookup, coordinate })
+    }
+
+    /// **Ask what was true at `valid_at_ms`, as the store knew it at
+    /// `as_known_at_ms`** — the bitemporal query, carrying its completeness.
+    ///
+    /// The answer boundary's first query family that can genuinely DEGRADE.
+    /// `ask` reads `world_current`, which compaction structurally protects
+    /// (`compact_range` refuses to remove a live projection head), so its
+    /// completeness would be `Full` by construction and prove nothing. This one
+    /// replays the log, which is precisely what compaction removes.
+    ///
+    /// # The completeness is the store's, propagated — not recomputed
+    ///
+    /// `WorldStore::as_of` already decides `Full` vs `Degraded` against the
+    /// retained summaries on both temporal axes. A second judgement here would
+    /// be a second implementation of the rule that governs whether an answer can
+    /// be trusted, and the two would drift. This carries the store's verdict
+    /// across the boundary unchanged; 3g is about propagation, not about a new
+    /// opinion.
+    ///
+    /// # Errors
+    ///
+    /// As [`WorldView::ask`].
+    pub fn ask_as_of(
+        &self,
+        subject: &str,
+        valid_at_ms: i64,
+        as_known_at_ms: i64,
+    ) -> Result<TemporalLookup, AskError> {
+        let answer = self.store.as_of(subject, valid_at_ms, as_known_at_ms)?;
+        let completeness = answer.resolution;
+
+        let clock = valid_at_ms.max(0).unsigned_abs();
+        let mut answers = Vec::new();
+        for claim in &answer.claims {
+            if !Self::is_admissible(claim, clock, self.staleness_budget_ms) {
+                continue;
+            }
+            answers.push(assemble(
+                claim,
+                clock,
+                self.staleness_budget_ms,
+                // A replayed answer does not resolve identity. Unlike the
+                // generation pin the axes would actually AGREE here — both this
+                // query and `identity_view_at` cut on transaction time — so this
+                // is a scope decision rather than an impossibility, and is
+                // recorded as such in WM_SCOPE.
+                ObjectIdentity::NotResolvedInReplay,
+            )?);
+        }
+
+        // Completeness is attached to BOTH outcomes. An `Unknown` that is
+        // `Degraded` says "we deleted the evidence", which is a different fact
+        // from "nothing was known" and the one 3g exists to keep.
+        let lookup = if answers.is_empty() {
+            WorldLookup::Unknown(if answer.claims.is_empty() {
+                UnknownReason::NoClaim
+            } else {
+                UnknownReason::NoneAdmissible
+            })
+        } else {
+            WorldLookup::Answered(answers)
+        };
+        Ok(TemporalLookup {
+            lookup,
+            completeness,
+        })
     }
 
     /// Expired, or graded `Inadmissible`, is not servable.
@@ -702,4 +770,43 @@ fn assemble(
         provenance,
         event_id: claim.event_id.clone(),
     })
+}
+
+/// **A bitemporal answer and its completeness** — Tier 3 box 3g.
+///
+/// The two are carried TOGETHER and neither is optional, because 3g's whole
+/// claim is that completeness survives *independently of the payload outcome*.
+///
+/// # Completeness rides on `Unknown` too, and that is the point
+///
+/// The tempting shape is to attach a resolution only to `Answered` — an empty
+/// answer has nothing to be incomplete about, so why carry it? Because
+/// *"nothing was known"* and *"we deleted it"* are then the same value, which is
+/// the exact silent rewrite §11.3 forbids and the failure an incident
+/// reconstruction most needs to distinguish. An `Unknown` that is `Degraded` is
+/// the most important thing this type can say.
+#[derive(Debug, Clone)]
+pub struct TemporalLookup {
+    lookup: WorldLookup,
+    completeness: Resolution,
+}
+
+impl TemporalLookup {
+    /// What was found.
+    #[must_use]
+    pub fn lookup(&self) -> &WorldLookup {
+        &self.lookup
+    }
+
+    /// Whether the answer is the whole truth, or what remains of it.
+    #[must_use]
+    pub fn completeness(&self) -> &Resolution {
+        &self.completeness
+    }
+
+    /// Whether compaction could have borne on this answer.
+    #[must_use]
+    pub fn is_degraded(&self) -> bool {
+        self.completeness.is_degraded()
+    }
 }

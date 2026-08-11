@@ -2021,7 +2021,8 @@ pressure that produced every stale claim this box already documents.
 - [ ] **3f — Lineage retrieval contract.** Deterministic, bounded, paginated,
       truncation visible, historically correct. Consumed by Tier 4's `Explain`;
       does not render.
-- [ ] **3g — Degradation propagation.** Every answer family preserves
+- [x] **3g — Degradation propagation.** ✅ **DONE 2026-08-11** — see *"3g:
+      the boundary finally carries completeness"* below. Every answer family preserves
       `Full`/`Degraded` **independently of the payload outcome**, not just
       `subject_summary`. Retention may reduce answer precision; Tier 3 makes the
       loss observable.
@@ -2856,7 +2857,7 @@ identity: identity is a second projection with its own coordinate, the pinned
 read exists only for `world_current`, and `identity_view_at` cuts on transaction
 time — so resolving here would pair a generation-pinned claim with a
 transaction-time-pinned identity, mixing the axes box 3c closed. Pinned answers
-carry `ObjectIdentity::NotResolvedAtPin`, which `matchable` refuses, so a pinned
+carry `ObjectIdentity::NotResolvedInReplay`, which `matchable` refuses, so a pinned
 answer cannot shape a proposal by accident. A generation-pinned IDENTITY read is
 the natural next prerequisite if refs ever need resolved objects.
 
@@ -2874,3 +2875,75 @@ inside `assemble` reds three tests.
 mutations: ignoring the version check, falling forward when irreproducible,
 dropping the generation from ref identity, and two fold-rule changes — each
 caught, the last two only after the corpus was re-anchored.
+
+
+### 3g: the boundary finally carries completeness — 2026-08-11
+
+**What was already true, and what was missing.** The STORE decides `Full` vs
+`Degraded` correctly, on both temporal axes, and `degraded_answers.rs` already
+pins an `as_of` pair that cannot pass by always answering `Full`. Building that
+again here would have been duplication wearing a closed box — and closing 3g on
+it would have been the "looks green, proves nothing" outcome the box is most
+prone to.
+
+The missing half was **propagation**. `WorldLookup` is `{Answered, Unknown}` and
+carried no completeness at all. `ask` reads `world_current`, which `compact_range`
+structurally protects by refusing to remove a live projection head — so its
+completeness is `Full` by construction and could never fail, which is exactly why
+`current()` cannot prove this box. `WorldView::ask_as_of` is the first boundary
+query that can genuinely degrade; `TemporalLookup` is the first boundary type
+that carries the verdict.
+
+**The property, as ruled:**
+
+> If retained evidence is sufficient for the query, completeness is `Full`. If
+> the query depends on evidence removed by compaction, completeness is
+> `Degraded`. Tier 3 may over-report degradation, but it must **never** report
+> `Full` after relevant evidence has been lost.
+
+**Both arms answer, and the degraded one answers WRONG.** The fixture keeps a
+surviving observation either side of a compacted middle, so at `T0+150` the truth
+was `dock_beta` — deleted — and the replay returns `dock_alpha`: non-empty,
+well-formed, believable. Same payload as the `Full` arm, opposite verdict. That
+is what *"independently of the payload outcome"* means, and it is why a pair
+distinguishing an answer from silence would measure emptiness rather than
+completeness.
+
+**Completeness rides on `Unknown` too.** The tempting shape attaches a resolution
+only to `Answered`. Then *"nothing was known"* and *"we deleted it"* become the
+same value — the confusion an incident reconstruction can least afford. Pinned by
+its own test, and by a mutation.
+
+**The verdict is propagated, not recomputed.** A second judgement at the boundary
+would be a second implementation of the rule deciding whether an answer can be
+trusted, and the two would drift — precisely what the `AnswerRef` corpus found
+when supersession turned out to have two implementations. A test pins boundary
+and store equal on both arms.
+
+**This suite is deliberately STRICTER than the contract, in one direction, and
+that was measured rather than assumed.**
+
+| Mutation | Result |
+|---|---|
+| force `Full` in the degraded arm | 3 tests fail — the load-bearing direction |
+| drop completeness on `Unknown` | the independence test fails |
+| force `Degraded` everywhere | **the Full arms fail** |
+
+The third matters. `Resolution` PERMITS over-reporting, so a move that way is
+legal and these tests would red anyway: they pin current behaviour, not the
+contract's outer bound. That is the right trade rather than an oversight —
+without asserting `Full`, an implementation answering `Degraded` unconditionally
+would pass everything else and the degraded arm would prove nothing. If a future
+change legitimately makes an arm `Degraded`, update the test *with reasoning*;
+do not relax the degraded arm to match. **Only one direction is a bug: `Full`
+after evidence was lost.**
+
+**Scope, stated because it is narrower than the box's wording.** `ask_as_of` is
+one family. 3g says *every* family; the ones that exist at the boundary are `ask`
+(structurally `Full`, and now knowably so) and this. `history` and
+`subject_summary` remain unpropagated, and a boundary query for them is the
+follow-up. A replayed answer also does not resolve object identity —
+`ObjectIdentity::NotResolvedInReplay`, renamed from `NotResolvedAtPin` since it
+now covers both replay families. Here the axes would actually AGREE (both this
+query and `identity_view_at` cut on transaction time), so that is a scope
+decision rather than an impossibility, unlike the generation pin.
