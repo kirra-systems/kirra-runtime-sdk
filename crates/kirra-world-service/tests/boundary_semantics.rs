@@ -26,7 +26,7 @@ use kirra_world_service::semantics::{
 };
 use kirra_world_store::projection::ProjectedClaim;
 use kirra_world_store::semantics::digest;
-use kirra_world_store::{TrustGrade, Validity};
+use kirra_world_store::{Adjudication, TrustGrade, Validity};
 
 /// The declared digest must be the rule's actual digest.
 #[test]
@@ -154,6 +154,45 @@ fn the_boundary_corpus_catches_refusing_a_stale_claim() {
                 Validity::Expired | Validity::Stale
             ) && !matches!(c.grade_at(clock, budget), Some(TrustGrade::Inadmissible))
         }),
+    );
+}
+
+/// **Narrowing `trust_grade`'s `Rejected | Ambiguous` or-pattern to one variant
+/// must move the digest.**
+///
+/// Both arms of that or-pattern are reached by ONE match arm, so a corpus
+/// carrying only a `Rejected` row would sit green while someone dropped
+/// `Ambiguous` from it — and an ambiguous claim would then grade `Adequate` and
+/// be served. `admissibility_corpus`'s doc claims the second row prevents
+/// exactly that; this is the claim rather than the assertion.
+///
+/// The variant flips precisely one row: every other row's verdict is unchanged,
+/// which is what makes the moved digest attributable to this axis alone.
+#[test]
+fn the_boundary_corpus_catches_narrowing_the_inadmissible_pattern() {
+    let narrowed = render_with(|c, clock, budget| {
+        let rejected_only = c
+            .trust
+            .as_ref()
+            .is_some_and(|a| matches!(a.adjudication(), Adjudication::Rejected));
+        c.validity_at(clock, budget) != Validity::Expired && !rejected_only
+    });
+    assert_variant_is_caught("inadmissible_narrowed_to_rejected", &narrowed);
+
+    // Asserted rather than narrated: a variant that moved SEVERAL rows would
+    // also be "caught", and would prove only that the two rules differ somewhere
+    // — not that this corpus can see the `Ambiguous` arm specifically.
+    let real = admissibility_rendering();
+    let moved: Vec<&str> = real
+        .split('\u{1e}')
+        .zip(narrowed.split('\u{1e}'))
+        .filter(|(a, b)| a != b)
+        .map(|(a, _)| a.split('\u{1f}').next().unwrap_or(""))
+        .collect();
+    assert_eq!(
+        moved,
+        vec!["ambiguous_adjudication"],
+        "exactly the ambiguous row must flip, and nothing else"
     );
 }
 

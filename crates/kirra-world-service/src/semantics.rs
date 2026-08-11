@@ -240,19 +240,29 @@ pub struct VersionDifference {
 
 /// The admissibility rule's corpus input: `(label, claim, clock, budget)`.
 ///
-/// Each row exercises a distinct branch, and the third is the one a careless
-/// corpus omits:
+/// One bullet per row, in order, because a list that does not match the rows is
+/// a list a reader cannot check coverage against — and checking coverage is the
+/// only reason to write it down:
 ///
-/// * an unbounded unlabelled claim — admitted, the base case;
-/// * an **expired** claim — refused;
-/// * a **stale** claim — **admitted**, carrying its staleness. That the
-///   boundary reports staleness rather than swallowing it is a documented
-///   property of this rule, so a corpus that could not tell "stale" from
-///   "expired" would let the two be merged without moving the digest;
-/// * an `Inadmissible`-graded claim — refused on trust rather than on time;
-/// * an unlabelled claim that would grade `Inadmissible` if it had axes —
-///   admitted, because refusing it would invent a trust judgement from the
-///   absence of one.
+/// | Row | Verdict | The branch it holds open |
+/// |---|---|---|
+/// | `unbounded_unlabelled` | served | the base case, and the **unlabelled** one: a claim with no axes has no trust to grade, and refusing it would invent a judgement from the absence of one |
+/// | `expired` | refused | refused on **time** |
+/// | `stale` | **served** | past the budget, not past `valid_to` |
+/// | `rejected_adjudication` | refused | refused on **trust**, not on time |
+/// | `ambiguous_adjudication` | refused | the other half of `trust_grade`'s `Rejected \| Ambiguous` or-pattern — with only one row present, narrowing that pattern to a single variant would not move the digest |
+/// | `confirmed_adjudication` | served | **labelled** and served, which is what distinguishes "served because unlabelled" from "served despite being graded" |
+///
+/// The `stale` row is the one a careless corpus omits, and its absence is the
+/// expensive kind. That the boundary reports staleness rather than swallowing
+/// it is a documented property of this rule, so a corpus that could not tell
+/// "stale" from "expired" would let the two be merged without moving the digest
+/// — see `the_boundary_corpus_catches_refusing_a_stale_claim`.
+///
+/// The pairing of `unbounded_unlabelled` with `confirmed_adjudication` is what
+/// gives `the_boundary_corpus_catches_refusing_an_unlabelled_claim` its teeth:
+/// a rule that served only labelled claims still serves the second row, so the
+/// two rows together locate the change rather than merely detecting one.
 #[must_use]
 pub fn admissibility_corpus() -> Vec<(&'static str, ProjectedClaim, u64, Option<u64>)> {
     use kirra_world_store::{Adjudication, Corroboration, Origin, TrustAxes};
