@@ -206,6 +206,38 @@ def strip_preserves_line_structure() -> bool:
     return ok
 
 
+def strip_keep_strings_is_opt_in_and_faithful() -> bool:
+    """`keep_strings=True` blanks comments only; the default is unchanged.
+
+    Both halves are asserted because both are load-bearing. The DEFAULT must
+    stay byte-identical or the orphan gate's own reasoning — a name inside a
+    string is prose, not consumption — quietly reverses. The FLAG must emit the
+    literal verbatim, which is why `check_world_semantics.py` can pin a reducer
+    whose behaviour lives in a returned token.
+    """
+    src = 'let s = "kirra_world::same_as_candidate"; // kirra_world::other\n'
+
+    default = G.strip_noncode(src)
+    kept = G.strip_noncode(src, keep_strings=True)
+
+    checks = [
+        ("default still blanks the literal", "same_as_candidate" not in default),
+        ("default still blanks the comment", "other" not in default),
+        ("keep_strings emits the literal", "same_as_candidate" in kept),
+        ("keep_strings still blanks the comment", "other" not in kept),
+        (
+            "line structure preserved either way",
+            len(default.splitlines()) == len(kept.splitlines()) == len(src.splitlines()),
+        ),
+    ]
+    ok = all(passed for _, passed in checks)
+    print(f"  {'PASS' if ok else 'FAIL'}  strip_noncode keep_strings is opt-in and faithful")
+    for label, passed in checks:
+        if not passed:
+            print(f"        {label}")
+    return ok
+
+
 def main() -> int:
     results = []
 
@@ -377,6 +409,8 @@ def main() -> int:
     )
 
     results.append(strip_preserves_line_structure())
+
+    results.append(strip_keep_strings_is_opt_in_and_faithful())
 
     results.append(historical_non_vacuity())
 

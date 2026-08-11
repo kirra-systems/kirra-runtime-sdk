@@ -145,6 +145,11 @@ impl ProjectedEntity {
     }
 }
 
+// SEMANTICS-PIN-BEGIN: entity_fold
+//
+// Digested by `ci/check_world_semantics.py` and pinned in
+// `semantics::SEMANTICS` — see `crate::semantics` for the two-check rationale.
+
 /// **The pure fold step.** Apply one adjudication to the accumulator.
 ///
 /// `BTreeMap` rather than `HashMap` for the same reason
@@ -248,6 +253,8 @@ where
     }
     acc
 }
+
+// SEMANTICS-PIN-END: entity_fold
 
 /// The stored token for a lifecycle state.
 #[must_use]

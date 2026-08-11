@@ -1,0 +1,41 @@
+{
+  "_comment": [
+    "Recorded semantic-version history for every Kirra World reducer -- Tier 3 box 3b.",
+    "Enforced by ci/check_world_semantics.py. This file is APPEND-ONLY in intent:",
+    "a row records what a version's corpus digest WAS, and the gate refuses a",
+    "declaration that gives an already-recorded version a different digest. The",
+    "only clean way to change reducer behaviour is a NEW row with a NEW version.",
+    "The one legitimate edit to an existing row is `source_pin`, when a refactor",
+    "moved the source without moving the corpus digest -- see the gate's docstring."
+  ],
+  "rules": {
+    "world_current_fold": [
+      {
+        "version": 1,
+        "corpus_digest": "c38fc802ea1d7eca0afbf2dc5a11b8f5d55da0f4008dd43f9fcf22dae1d26da7",
+        "source_pin": "8725833999142be53519dc5029ab37afe03c782d57ab5d90f55dc67aed440c82"
+      }
+    ],
+    "entity_fold": [
+      {
+        "version": 1,
+        "corpus_digest": "966bc0bf440e824f5c3ebc916f2f753eee74dad914c015dab16dc58296b0f39e",
+        "source_pin": "b605bc92b7ae460293ab7f48db814fd3576c68977e1cb0c642ed19e66df9324b"
+      }
+    ],
+    "subject_summary_fold": [
+      {
+        "version": 1,
+        "corpus_digest": "b1008c8775e491639258f64560bcfe0abebab288022c5f03c9a7f682d79a34c7",
+        "source_pin": "2faa627ee865dd00229b52960b35d250caadc42acf4b10aef7bb48f97ecebb85"
+      }
+    ],
+    "answer_admissibility": [
+      {
+        "version": 1,
+        "corpus_digest": "c6458e88ed93ce2498a8b02f97e04bdfe3f2c666a1146ed34c081f4e56bcc33f",
+        "source_pin": "93d1c69a10f75e8df9e39c9d3cee1a89733b76b8fac7f0b0a7203b25370e04ae"
+      }
+    ]
+  }
+}

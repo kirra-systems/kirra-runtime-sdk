@@ -1873,6 +1873,13 @@ changes. Two mechanisms, because neither alone is enough:
 The corpus proves meaning; the pin proves nobody edited quietly. A version
 checked by neither is decorative metadata.
 
+**Built 2026-08-11**, and one thing this section did not anticipate: neither
+mechanism forces the BUMP. Both are satisfied by re-pinning, so a behaviour
+change that updates its own declaration keeps its version and stays green. That
+needed a third check — a recorded history the declaration is accountable to, so
+a version's corpus digest cannot be redefined after the fact. See *"3b closed"*
+below.
+
 ### `KIRRA-WM-EXPLAIN-TIER-001` — RULED 2026-08-09
 
 > **`Explain` stays at Tier 4. Tier 3 builds only the deterministic lineage
@@ -1996,8 +2003,14 @@ pressure that produced every stale claim this box already documents.
       generation, so a recorded coordinate can actually be re-executed against.
       `KIRRA-WM-ANSWER-IDENTITY-001` now has a mechanism behind it; the ruled
       `AnswerRef` itself is the next step and is still open.
-- [ ] **3b — Rule / projection versioning.** Declared, behaviour-changing, and
-      enforced by corpus + source pin (above). Not decorative metadata.
+- [x] **3b — Rule / projection versioning.** ✅ **DONE 2026-08-11** — see *"3b
+      closed — the version stopped being a promise"* below. Declared,
+      behaviour-changing, and enforced by corpus + source pin (above). Not
+      decorative metadata. Four rules declared (three reducers + the answer
+      boundary's admissibility rule), each corpus-pinned and source-pinned;
+      `ci/check_world_semantics.py` refuses a corpus-digest change at a fixed
+      version, which is the check that makes the bump unavoidable and the one a
+      Rust test structurally cannot perform. `KIRRA-WM-REDUCER-VERSION-001`.
 - [x] **3c — Snapshot consistency.** ✅ **DONE 2026-08-10** — see *"3c closed
       against its consumer"* below. An answer composing several projections
       (identity, claims, relationships, summaries) must read them at ONE coherent
@@ -2852,6 +2865,12 @@ mutating `fold_step` left it green while changing what every ref resolves to.
 The pin is now over the resolved ANSWER, which covers the fold rule (through the
 replay) and admissibility (through the binding), and fails on either.
 
+> **Superseded 2026-08-11 by box 3b.** `RULE_VERSION` is gone; a ref carries a
+> `SemanticVersions` SET naming each rule it depends on, and the refusal reports
+> which one moved. The end-to-end pin described above survives — it is the only
+> check covering the SQLite replay path between the per-rule corpora — but it is
+> now one of several. See *"3b closed"* at the end of this document.
+
 **What a resolved ref deliberately does NOT do.** It does not resolve object
 identity: identity is a second projection with its own coordinate, the pinned
 read exists only for `world_current`, and `identity_view_at` cuts on transaction
@@ -2947,3 +2966,128 @@ follow-up. A replayed answer also does not resolve object identity —
 now covers both replay families. Here the axes would actually AGREE (both this
 query and `identity_view_at` cut on transaction time), so that is a scope
 decision rather than an impossibility, unlike the generation pin.
+
+### 3b closed — the version stopped being a promise — 2026-08-11
+
+**`KIRRA-WM-REDUCER-VERSION-001` — RULED 2026-08-11**
+
+> **A reducer version changes whenever the reducer's behaviour changes in a way
+> that can alter a derived answer. A pinned answer reference refuses replay
+> under a different semantic version rather than replaying under the new one.**
+
+The second sentence is what gives the first one teeth. A version nothing
+consumes is a comment.
+
+#### What existed before, and why it was not 3b
+
+The `AnswerRef` shipped on 2026-08-10 carried `RULE_VERSION: u32 = 1` — one
+number, hand-bumped, pinned by one corpus. That was real: it refused on a
+mismatch, and its corpus was anchored to the resolved answer rather than to the
+live projection (a distinction that had already caught one vacuous draft). But
+it fell short of this box in three specific ways, and naming them is the
+difference between closing 3b and declaring it closed:
+
+1. **It covered two of four rules.** The identity fold and the subject-summary
+   fold had no declared version at all. A change to either moved what the store
+   answers with nothing recording that it had.
+2. **It could not say what moved.** `VersionMismatch { recorded, current }` told
+   an operator the rules had changed, not *which* rule — which is the only part
+   they can act on.
+3. **Nothing forced the bump.** The corpus test asserted `RULE_VERSION ==
+   PINNED_FOR_VERSION` against a local constant, so re-pinning the expected
+   answer and leaving both alone was green. That is precisely the decorative
+   metadata this section warns about, in the code that quoted the warning.
+
+#### What is there now
+
+Four rules are declared — three reducers in `kirra_world_store::semantics`
+(`world_current_fold`, `entity_fold`, `subject_summary_fold`) and one at the
+answer boundary in `kirra_world_service::semantics` (`answer_admissibility`).
+Each carries a version, a conformance-corpus digest, and a source pin over a
+marker-delimited span. Both crates declare in the same shape and are read by one
+parser (`ci/check_world_semantics.py`) against one recorded history
+(`ci/world_semantics_baseline.json`), because a boundary rule checked by a
+second, differently-shaped gate is a boundary rule checked more weakly.
+
+A query family carries the **set** of versions it depends on, not a composite
+number. `SemanticVersions::for_query(CurrentSubject)` names two rules and
+deliberately excludes the other two: `entity_fold` cannot reach a pinned ref's
+answer (it reports `NotResolvedInReplay`), and `subject_summary_fold` is a
+different family. Including them would refuse recorded references for rules they
+never consulted, and a refusal that fires constantly is one people route around.
+The exclusion of `entity_fold` is a claim about *today's* code, asserted by test
+— box 3h's identity-resolving ref will put it in the set.
+
+#### The three checks, and which hole each closes
+
+| Check | Where | Catches |
+|---|---|---|
+| corpus digest == declared | `tests/semantics_corpus.rs`, `tests/boundary_semantics.rs` | behaviour moved and the declaration did not |
+| source pin == span digest | `ci/check_world_semantics.py` | the reducer was edited at all — including on an axis the corpus does not exercise |
+| **corpus digest may not move at a fixed version** | `ci/check_world_semantics.py` | behaviour moved, the declaration was updated, and the version was not |
+
+The third is the one that makes the bump unavoidable, and it is the one the Rust
+test structurally cannot perform: re-pin the digest and the test is satisfied.
+The baseline records what each version's digest *was*, so re-declaring a
+different digest for a recorded version has nowhere to hide.
+
+`strip_noncode` grew a `keep_strings` flag for the pin (default off; every
+existing caller byte-identical). Blanking string literals would leave the pin
+blind to `lifecycle_token` and `SummaryKind::as_str`, where the literal **is**
+the behaviour. The cost is a false red on error-message churn — the cheap
+direction, since re-pinning costs one commit and the corpus digest proves
+nothing moved, while blindness costs correctness silently.
+
+#### Measured, not asserted
+
+Run against the shipped `projection::supersedes` with the
+generation-leads-valid-time flip applied:
+
+| Mutation | Rust conformance | Gate |
+|---|---|---|
+| flip the fold rule | **RED** — corpus digest moved | **RED** — source pin moved |
+| …re-pin BOTH digests, leave `version` at 1 | **green** | **RED** — digest moved at a fixed version |
+| …bump to v2, add a baseline row | green | green — and the end-to-end ref pin reds until the recorded version set is re-pinned |
+
+Row two is the whole box. Row three shows the bump genuinely reaching a
+reference rather than stopping at a constant. The gate's own 20 self-tests were
+mutation-checked the same way: stubbing `check` to return no problems reds six
+of them.
+
+#### The corpus is challenged, permanently
+
+The user's requested control — *change fold behaviour without changing the
+version and confirm the gate catches it* — is in the repo as a standing table
+rather than a one-off run, because a one-off answer expires the moment someone
+edits the corpus. Each rule carries deliberately divergent reimplementations,
+one per behavioural axis, and every one must render differently from the real
+fold over the same input: `generation_leads_valid_time`, `no_tiebreak`,
+`subject_only_key`, `never_supersedes`, `assert_overwrites`,
+`no_create_from_consequence`, `last_observed_follows_head`, `head_follows_time`,
+`kind_not_in_key`, plus four at the boundary including the over-strict
+`stale_refused`. Each variant harness also carries a **faithfulness control**
+asserting it reproduces the real reducer at its real settings — otherwise a
+transcription slip in the variant would render differently and "pass" while
+proving nothing about the axis it names.
+
+This earned itself immediately. On its first run
+`the_claim_corpus_catches_generation_leading_valid_time` **failed**:
+`world_current_corpus` had the backdated claim mid-sequence, where the mutated
+and real folds converge on the same final state. A fold is only observable
+through its final state, so an intermediate divergence that later converges is
+invisible to any corpus — the corpus was blind to the axis it existed to cover,
+and would have shipped that way.
+
+#### The residual, stated rather than papered over
+
+An author who edits the Rust declaration **and** rewrites the baseline's
+historical row in one commit still passes. No gate can force a human to
+increment an integer. What these three checks remove is doing it silently, doing
+it by accident, and doing it without a reviewer seeing a diff — in a file whose
+only purpose is to be that record — saying a historical fact was rewritten.
+
+Two further bounds worth keeping visible: the variant table proves sensitivity
+only to the axes it names, and the source pin is what covers the rest; and the
+boundary rule's corpus is challenged in **both** directions, because
+over-strictness there (refusing a stale claim) is a regression that reads as
+conservatism.

@@ -626,6 +626,13 @@ impl<'a> WorldView<'a> {
         })
     }
 
+    // SEMANTICS-PIN-BEGIN: answer_admissibility
+    //
+    // The boundary's own versioned rule — see `crate::semantics`. Digested by
+    // `ci/check_world_semantics.py`; changing what it SERVES moves the corpus
+    // digest too, and then `BOUNDARY_SEMANTICS`' version must be bumped so
+    // recorded references refuse rather than replay under the new rule.
+
     /// Expired, or graded `Inadmissible`, is not servable.
     ///
     /// An **unlabelled** claim is admitted: it has no axes to grade, and
@@ -640,6 +647,8 @@ impl<'a> WorldView<'a> {
             Some(TrustGrade::Inadmissible)
         )
     }
+
+    // SEMANTICS-PIN-END: answer_admissibility
 
     /// Bind a live claim into an answer, resolving its object identity.
     ///

@@ -21,7 +21,8 @@
 //! the store-level suite was vacuous without the second, and a ref inherits that
 //! bound wholesale, so it is re-asserted here at the level a caller sees.
 
-use kirra_world_service::answer_ref::{AnswerRef, QueryKind, RefResolution, RULE_VERSION};
+use kirra_world_service::answer_ref::{current_semantics, AnswerRef, QueryKind, RefResolution};
+use kirra_world_service::semantics::{RuleVersion, SemanticVersions};
 use kirra_world_store::snapshot::Irreproducible;
 use kirra_world_store::{ClaimStatus, EventId, NewEvent, ObservationId, WorldStore, WriterClass};
 
@@ -153,7 +154,7 @@ fn the_same_query_at_the_same_coordinate_produces_the_same_ref() {
     assert_eq!(hash(&a), hash(&b), "equal refs must hash equally");
 
     assert_eq!(a.kind(), QueryKind::CurrentSubject);
-    assert_eq!(a.rule_version(), RULE_VERSION);
+    assert_eq!(*a.semantics(), current_semantics());
 }
 
 /// **Changing any query parameter changes the ref.**
@@ -186,10 +187,25 @@ fn changing_any_parameter_changes_the_ref() {
             "generation",
             AnswerRef::current_subject("package_17", LATER, Some(60_000), 8),
         ),
+        // One rule moving is enough. Varying the WHOLE set would also pass
+        // while proving less: a ref must differ when any single dependency it
+        // names is at a different version, not merely when all of them are.
         (
-            "rule-version",
+            "fold-version",
             AnswerRef::current_subject("package_17", LATER, Some(60_000), 7)
-                .recorded_under(RULE_VERSION + 1),
+                .recorded_with("world_current_fold", 99),
+        ),
+        (
+            "boundary-version",
+            AnswerRef::current_subject("package_17", LATER, Some(60_000), 7)
+                .recorded_with("answer_admissibility", 99),
+        ),
+        // A ref that named a dependency this build does not have is a different
+        // ref, even though every SHARED rule agrees.
+        (
+            "extra-rule",
+            AnswerRef::current_subject("package_17", LATER, Some(60_000), 7)
+                .recorded_with("entity_fold", 1),
         ),
     ];
 
@@ -303,19 +319,43 @@ fn a_version_mismatch_refuses_rather_than_replaying() {
          proves only that the coordinate was bad"
     );
 
-    let stale = current.clone().recorded_under(RULE_VERSION - 1);
+    // ONE rule moving is enough, and the refusal must NAME it. A mismatch that
+    // said only "the rules changed" would leave an operator holding a reference
+    // they cannot act on.
+    let stale = current.clone().recorded_with("world_current_fold", 0);
     match stale.resolve(&store).expect("resolve") {
-        RefResolution::VersionMismatch { recorded, current } => {
-            assert_eq!(recorded, RULE_VERSION - 1);
-            assert_eq!(current, RULE_VERSION);
+        RefResolution::VersionMismatch { differences } => {
+            assert_eq!(differences.len(), 1, "only one rule moved: {differences:?}");
+            assert_eq!(differences[0].rule, "world_current_fold");
+            assert_eq!(differences[0].recorded, Some(0));
+            assert_eq!(
+                differences[0].current,
+                current_semantics().version_of("world_current_fold"),
+            );
         }
-        other => panic!("a stale rule version must refuse, got {other:?}"),
+        other => panic!("a stale fold version must refuse, got {other:?}"),
+    }
+
+    // The BOUNDARY rule is a separate dependency, and moving it alone must
+    // refuse too — otherwise the set is decorative for every rule but one.
+    match current
+        .clone()
+        .recorded_with("answer_admissibility", 99)
+        .resolve(&store)
+        .expect("resolve")
+    {
+        RefResolution::VersionMismatch { differences } => {
+            assert_eq!(differences.len(), 1);
+            assert_eq!(differences[0].rule, "answer_admissibility");
+        }
+        other => panic!("a moved boundary rule must refuse, got {other:?}"),
     }
 
     // A version from the FUTURE refuses too — a ref written by a newer build
     // describes semantics this one does not implement.
     match current
-        .recorded_under(RULE_VERSION + 1)
+        .clone()
+        .recorded_with("world_current_fold", u32::MAX)
         .resolve(&store)
         .expect("resolve")
     {
@@ -323,20 +363,54 @@ fn a_version_mismatch_refuses_rather_than_replaying() {
         other => panic!("an unknown future version must refuse, got {other:?}"),
     }
 
+    // A ref naming a dependency this build does not have refuses, even though
+    // every SHARED rule agrees. A query family that gained or lost a dependency
+    // derives its answer from something else.
+    match current
+        .clone()
+        .recorded_with("entity_fold", 1)
+        .resolve(&store)
+        .expect("resolve")
+    {
+        RefResolution::VersionMismatch { differences } => {
+            assert_eq!(differences[0].rule, "entity_fold");
+            assert_eq!(
+                differences[0].current, None,
+                "this build has no such dependency"
+            );
+        }
+        other => panic!("an unknown dependency must refuse, got {other:?}"),
+    }
+
+    // And the refusal is decided BEFORE the store is touched: a mismatched ref
+    // at an irreproducible coordinate reports the version, not the compaction.
+    match AnswerRef::current_subject("package_17", LATER, None, 99_999)
+        .recorded_with("world_current_fold", 0)
+        .resolve(&store)
+        .expect("resolve")
+    {
+        RefResolution::VersionMismatch { .. } => {}
+        other => panic!("the version check must precede the read, got {other:?}"),
+    }
+
     drop(store);
     cleanup(&path);
 }
 
 // ---------------------------------------------------------------------------
-// The corpus pin that keeps RULE_VERSION honest
+// The END-TO-END corpus pin, over a real store
 // ---------------------------------------------------------------------------
 
-/// **`RULE_VERSION` is pinned to the semantics a REF resolves under.**
+/// **A ref's recorded versions are pinned to what a ref actually resolves to.**
 ///
-/// Without this the version is what box 3b calls decorative metadata: a constant
-/// nobody is obliged to bump, so `VersionMismatch` would never fire on a real
-/// semantics change and a ref would replay under new rules while claiming the
-/// old ones.
+/// The per-rule corpora in `kirra-world-store/tests/semantics_corpus.rs` and
+/// `tests/boundary_semantics.rs` pin each rule in ISOLATION, over pure inputs.
+/// This pins the composition over a REAL store, and the difference is not
+/// ceremonial: the isolated corpora fold in-memory values, while a ref resolves
+/// by replaying rows out of SQLite. Everything between — the event decode, the
+/// confirmed-only filter, the generation cut — sits inside this test and outside
+/// those. A change there moves what every ref answers while every per-rule
+/// corpus stays green.
 ///
 /// # It pins the ref's own output, and the first draft pinned the wrong thing
 ///
@@ -359,21 +433,34 @@ fn a_version_mismatch_refuses_rather_than_replaying() {
 ///
 /// So this pins the resolved ANSWER, canonically rendered. That covers the fold
 /// rule (through the replay) and the boundary's admissibility rule (through the
-/// binding) — the two rules `RULE_VERSION` claims to describe — and it fails on
-/// a change to either.
+/// binding) — the two rules a `CurrentSubject` ref names — and it fails on a
+/// change to either.
 ///
 /// Rendered rather than hashed on purpose: a failure should show WHAT changed,
 /// not merely that something did.
 #[test]
-fn the_rule_version_is_pinned_to_the_semantics_a_ref_resolves_under() {
-    // This rendering belongs to RULE_VERSION 1. Bump both together.
-    const PINNED_FOR_VERSION: u32 = 1;
+fn a_refs_recorded_versions_are_pinned_to_what_it_resolves_to() {
+    // This rendering belongs to the version set below. Move them together.
     const PINNED_ANSWER: &str = "package_17|last_seen_at|dock_second|{}|Timeless|Ungraded";
 
+    // Spelled out rather than read from `current_semantics()`, which would make
+    // the assertion tautological — it would agree with whatever the build
+    // declares, including a version somebody bumped without touching a rule.
+    let pinned = SemanticVersions::new([
+        RuleVersion {
+            rule: "answer_admissibility".into(),
+            version: 1,
+        },
+        RuleVersion {
+            rule: "world_current_fold".into(),
+            version: 1,
+        },
+    ]);
     assert_eq!(
-        RULE_VERSION, PINNED_FOR_VERSION,
-        "RULE_VERSION moved without re-pinning the corpus — the two are a pair, \
-         and a version that moves alone tracks nothing"
+        current_semantics(),
+        pinned,
+        "the version set a ref records moved without re-pinning this rendering — \
+         the two are a pair, and a version that moves alone tracks nothing"
     );
 
     let path = tmp("corpus");
@@ -445,9 +532,9 @@ fn the_rule_version_is_pinned_to_the_semantics_a_ref_resolves_under() {
     assert_eq!(
         rendered.join("\n"),
         PINNED_ANSWER,
-        "the semantics a ref resolves under changed. If that was deliberate, \
-         bump RULE_VERSION and re-pin this rendering in the same commit — a \
-         recorded AnswerRef must not silently replay under the new rule."
+        "the semantics a ref resolves under changed. If that was deliberate, bump \
+         the moved rule's version and re-pin this rendering in the same commit — \
+         a recorded AnswerRef must not silently replay under the new rule."
     );
 
     drop(store);

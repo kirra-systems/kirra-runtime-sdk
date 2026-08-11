@@ -89,6 +89,7 @@ pub mod projection;
 pub mod retention_driver;
 pub mod retention_sweeper;
 pub mod schema;
+pub mod semantics;
 pub mod snapshot;
 pub mod subject_projection;
 
