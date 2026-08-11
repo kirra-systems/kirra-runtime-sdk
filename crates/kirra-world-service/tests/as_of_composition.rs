@@ -498,3 +498,53 @@ fn completeness_still_rides_on_the_answer() {
     drop(store);
     cleanup(&path);
 }
+
+// ---------------------------------------------------------------------------
+// The composed read's own contract
+// ---------------------------------------------------------------------------
+
+/// **Both halves come from the same cut** — the store-level assertion.
+///
+/// The transaction-time mirror of 3h's
+/// `the_composed_read_reconstructs_both_halves_at_the_same_generation`. Every
+/// test above reaches the composition through `ask_as_of`, which is the path
+/// that matters but also the path that could hide a wrong half behind a right
+/// answer: if the claims half were empty the identity half would never be
+/// consulted, and the suite would still be green.
+///
+/// This is also what exercises [`TemporalComposition::answer`] and
+/// [`TemporalComposition::identity`] directly. `ask_as_of` moves both halves out
+/// with `into_parts`, so without this the two accessors would be public surface
+/// no test had ever called.
+///
+/// [`TemporalComposition::answer`]: kirra_world_store::snapshot::TemporalComposition::answer
+/// [`TemporalComposition::identity`]: kirra_world_store::snapshot::TemporalComposition::identity
+#[test]
+fn the_composed_read_holds_both_halves_at_the_same_cut() {
+    let (store, path) = store_where_the_graph_moved_after_the_cut("composed");
+
+    let at_cut = store
+        .as_of_composed("package_17", VALID_AT, CUT)
+        .expect("composed read");
+    assert_eq!(
+        at_cut.answer().claims.len(),
+        1,
+        "the claims half must hold the fixture's claim — an empty one would \
+         leave the identity half unconsulted and every arm above vacuous"
+    );
+    assert!(at_cut.identity().get(&eid("dock_alpha")).is_some());
+    assert!(
+        at_cut.identity().get(&eid("dock_beta")).is_none(),
+        "an entity asserted after the cut must be absent from the graph at it"
+    );
+
+    // Later, the same read sees both — so the absence above is the cut doing
+    // its job rather than the fixture never having recorded dock_beta.
+    let later = store
+        .as_of_composed("package_17", VALID_AT, AFTER)
+        .expect("composed read");
+    assert!(later.identity().get(&eid("dock_beta")).is_some());
+
+    drop(store);
+    cleanup(&path);
+}

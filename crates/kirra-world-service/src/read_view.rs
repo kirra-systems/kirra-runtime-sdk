@@ -595,8 +595,10 @@ impl<'a> WorldView<'a> {
         let composed = self
             .store
             .as_of_composed(subject, valid_at_ms, as_known_at_ms)?;
-        let identity = composed.identity().clone();
-        let (answer, _) = composed.into_parts();
+        // Both halves MOVED out together. An earlier draft cloned the identity
+        // view and then dropped the original — a full copy of the entity graph
+        // on every call, for nothing. Caught in review on #1438.
+        let (answer, identity) = composed.into_parts();
         let completeness = answer.resolution;
 
         let clock = valid_at_ms.max(0).unsigned_abs();
