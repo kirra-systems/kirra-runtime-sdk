@@ -2857,7 +2857,7 @@ identity: identity is a second projection with its own coordinate, the pinned
 read exists only for `world_current`, and `identity_view_at` cuts on transaction
 time — so resolving here would pair a generation-pinned claim with a
 transaction-time-pinned identity, mixing the axes box 3c closed. Pinned answers
-carry `ObjectIdentity::NotResolvedAtPin`, which `matchable` refuses, so a pinned
+carry `ObjectIdentity::NotResolvedInReplay`, which `matchable` refuses, so a pinned
 answer cannot shape a proposal by accident. A generation-pinned IDENTITY read is
 the natural next prerequisite if refs ever need resolved objects.
 
