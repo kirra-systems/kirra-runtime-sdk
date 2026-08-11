@@ -45,9 +45,15 @@
 //!
 //! # What [`WorldAnswer`] buys, and the bound on it
 //!
-//! It has no constructor that omits validity, trust or provenance, and
-//! [`WorldView::ask`] is the only way to obtain one. So an answer in hand always
-//! carries them.
+//! It has no constructor that omits validity, trust or provenance, and only two
+//! things can produce one — [`WorldView::ask`] and
+//! [`crate::answer_ref::AnswerRef::resolve`]. Both funnel through the same
+//! private `assemble`, so an answer in hand always carries them, and adding a
+//! third producer means going through that funnel too.
+//!
+//! (This read *"`ask` is the only way to obtain one"* until refs landed. Caught
+//! in review on #1434: a guarantee stated as a count of functions goes stale the
+//! moment a second one is right, which is why it is now stated as the funnel.)
 //!
 //! **"Trust" here means the axes, not a summary of them.** Rule 1 says *the
 //! trust axes*, and an earlier draft of this type carried only the collapsed
@@ -362,6 +368,18 @@ pub enum WorldLookup {
 pub enum ObjectIdentity {
     /// The claim carries no object. Nothing to resolve.
     NoObject,
+    /// **This answer came from a generation-pinned read, where identity
+    /// resolution is not available.**
+    ///
+    /// Not a fault and not a stale graph: identity is a SECOND projection with
+    /// its own coordinate, and the pinned read exists only for `world_current`.
+    /// Resolving identity here would pair a generation-pinned claim with a
+    /// transaction-time-pinned identity, mixing the two axes that box 3c closed.
+    ///
+    /// Kept distinct from [`Self::Unresolvable`] because they call for different
+    /// responses: that one is an operator's problem to fix by folding, this one
+    /// is a limit of what a ref can currently reconstruct.
+    NotResolvedAtPin,
     /// **The identity graph is BEHIND the log: adjudications are recorded that
     /// it has not folded, so any resolution would be known-stale.**
     ///
@@ -412,7 +430,11 @@ impl ObjectIdentity {
         match self {
             Self::Resolved { entity, .. } => Some(entity),
             Self::NotAnEntity | Self::Malformed => stored_object,
-            Self::NoObject | Self::Unresolvable | Self::Ambiguous { .. } | Self::Refused(_) => None,
+            Self::NoObject
+            | Self::Unresolvable
+            | Self::NotResolvedAtPin
+            | Self::Ambiguous { .. }
+            | Self::Refused(_) => None,
         }
     }
 }
@@ -551,10 +573,11 @@ impl<'a> WorldView<'a> {
         )
     }
 
-    /// The one place a `WorldAnswer` is built — every field populated together.
+    /// Bind a live claim into an answer, resolving its object identity.
     ///
-    /// Fallible only on the provenance handle, which is the one field that
-    /// carries an invariant the row cannot enforce.
+    /// Delegates the field-by-field construction to [`assemble`], which is the
+    /// one place a `WorldAnswer` is built; this adds only the identity
+    /// resolution a live read can do and a pinned one cannot.
     fn bind(
         &self,
         claim: &ProjectedClaim,
@@ -562,29 +585,12 @@ impl<'a> WorldView<'a> {
         identity: &IdentityView,
         identity_is_current: bool,
     ) -> Result<WorldAnswer, AskError> {
-        let provenance = EvidenceDigest::new(claim.chain_digest.clone()).map_err(|cause| {
-            AskError::CorruptProvenance {
-                subject: claim.subject.clone(),
-                predicate: claim.predicate.clone(),
-                cause,
-            }
-        })?;
-        Ok(WorldAnswer {
-            subject: claim.subject.clone(),
-            predicate: claim.predicate.clone(),
-            object_identity: Self::resolve_object(
-                claim.object.as_deref(),
-                identity,
-                identity_is_current,
-            ),
-            object: claim.object.clone(),
-            value: claim.payload.clone(),
-            validity: claim.validity_at(clock, self.staleness_budget_ms),
-            axes: claim.trust,
-            grade: claim.grade_at(clock, self.staleness_budget_ms),
-            provenance,
-            event_id: claim.event_id.clone(),
-        })
+        assemble(
+            claim,
+            clock,
+            self.staleness_budget_ms,
+            Self::resolve_object(claim.object.as_deref(), identity, identity_is_current),
+        )
     }
 
     /// Resolve one claim's object through the identity graph.
@@ -624,4 +630,76 @@ impl<'a> WorldView<'a> {
             ResolutionOutcome::Refused(reason) => ObjectIdentity::Refused(reason),
         }
     }
+}
+
+/// The boundary's admissibility rule, for a generation-pinned claim.
+///
+/// `pub(crate)` so [`crate::answer_ref::AnswerRef::resolve`] applies the SAME
+/// test as a live `ask`, rather than a copy that could drift. A ref that
+/// admitted claims the boundary would refuse would be re-executing a different
+/// query than the one it names.
+pub(crate) fn is_admissible_for_ref(
+    claim: &ProjectedClaim,
+    clock: u64,
+    budget: Option<u64>,
+) -> bool {
+    WorldView::is_admissible(claim, clock, budget)
+}
+
+/// Build a `WorldAnswer` from a generation-pinned claim.
+///
+/// Delegates to [`assemble`] exactly as `WorldView::bind` does; the only
+/// difference is the object identity, which a pinned read cannot resolve — see
+/// [`crate::answer_ref::pinned_object_identity`].
+pub(crate) fn bind_pinned(
+    claim: &ProjectedClaim,
+    clock: u64,
+    budget: Option<u64>,
+) -> Result<WorldAnswer, AskError> {
+    assemble(
+        claim,
+        clock,
+        budget,
+        crate::answer_ref::pinned_object_identity(),
+    )
+}
+
+/// **The one place a `WorldAnswer` is built** — every field populated together.
+///
+/// Private, and both producers go through it. Rule 1 says every answer carries
+/// the value, the trust axes, the validity at the supplied clock and a
+/// provenance handle; a second hand-written construction site is how one of
+/// those quietly stops being populated, so there is exactly one.
+///
+/// Object identity is the ONE thing a caller supplies, because it is the one
+/// thing that genuinely differs: a live read resolves it, a generation-pinned
+/// read cannot without mixing coordinate axes.
+///
+/// Fallible only on the provenance handle, which is the one field carrying an
+/// invariant the row cannot enforce.
+fn assemble(
+    claim: &ProjectedClaim,
+    clock: u64,
+    budget: Option<u64>,
+    object_identity: ObjectIdentity,
+) -> Result<WorldAnswer, AskError> {
+    let provenance = EvidenceDigest::new(claim.chain_digest.clone()).map_err(|cause| {
+        AskError::CorruptProvenance {
+            subject: claim.subject.clone(),
+            predicate: claim.predicate.clone(),
+            cause,
+        }
+    })?;
+    Ok(WorldAnswer {
+        subject: claim.subject.clone(),
+        predicate: claim.predicate.clone(),
+        object_identity,
+        object: claim.object.clone(),
+        value: claim.payload.clone(),
+        validity: claim.validity_at(clock, budget),
+        axes: claim.trust,
+        grade: claim.grade_at(clock, budget),
+        provenance,
+        event_id: claim.event_id.clone(),
+    })
 }
