@@ -257,7 +257,7 @@ impl RefResolution {
 
 /// The object-identity an answer reached through a ref carries.
 ///
-/// Always [`ObjectIdentity::NotResolvedAtPin`]. Stated as a named function
+/// Always [`ObjectIdentity::NotResolvedInReplay`]. Stated as a named function
 /// rather than left implicit because it is a real limitation with a real reason:
 /// identity is a SECOND projection with its own coordinate, and the pinned read
 /// exists only for `world_current`. `identity_view_at` cuts on transaction time,
@@ -270,5 +270,5 @@ impl RefResolution {
 /// stored object and says plainly that it was not resolved.
 #[must_use]
 pub fn pinned_object_identity() -> ObjectIdentity {
-    ObjectIdentity::NotResolvedAtPin
+    ObjectIdentity::NotResolvedInReplay
 }

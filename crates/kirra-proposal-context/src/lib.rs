@@ -387,7 +387,7 @@ fn mirror_resolution(identity: &ObjectIdentity) -> ObjectResolution {
         ObjectIdentity::NoObject
         | ObjectIdentity::Malformed
         | ObjectIdentity::NotAnEntity
-        | ObjectIdentity::NotResolvedAtPin
+        | ObjectIdentity::NotResolvedInReplay
         | ObjectIdentity::Resolved { .. } => ObjectResolution::Contradictory("unclassified"),
     }
 }
