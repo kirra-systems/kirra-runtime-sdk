@@ -3480,6 +3480,58 @@ so a lineage entry carries it **verbatim and unparsed**. Walking it here would b
 Tier 3 inventing the structure whose absence is the reason `Explain` is Tier 4.
 The stopping point is the ruling, not an oversight.
 
+#### Review follow-up: the fetch was bounded by the rule, not by the query
+
+Shipped as reviewed. The first cut of `lineage_candidates` fetched **every**
+event recorded under the subject and let `select_lineage` bound the result,
+reasoning that a query which pre-applied the generation bound, the ordering and
+the page would be a second implementation of a versioned rule — the #1437 drift,
+*"in a place where nothing would notice."*
+
+That reasoning was right about the hazard and wrong about the remedy, and review
+caught it. A two-event page over a long-lived subject loaded that subject's
+entire history into memory: the page bound governed the *answer* while nothing
+governed the *work*, on an auditor-reachable read, with a ceiling that grows with
+how long the system has been running.
+
+It also sat against a standing ruling. `KIRRA-WM-ANSWER-IDENTITY-001` clause 2
+is *"queries are bounded"* — not a preference, but a consequence of D-9's
+measured 10.5 s p99 at 100 000 entities and ADR-0041 D-12's finding that **an
+unbounded query has no bounded cost whatever its scaling verdict.** A new query
+family whose fetch was unbounded by construction was in tension with the ruling
+the box was written under, and the tension was invisible because the answer it
+returned was correctly bounded.
+
+The remedy the #1437 lesson actually points at is not *"never pre-narrow"* — it
+is *"never pre-narrow anywhere that nothing would notice."* So the fetch is now
+narrowed to `subject`, the as-of bound, the cursor and `LIMIT limit + 1`, and the
+narrowing ships **with the thing that notices**:
+`narrowing_never_removes_what_the_rule_would_keep` runs the rule over the
+narrowed candidates and over the unnarrowed ones and asserts the two selections
+are identical — including the boundary — swept across 75 (limit, cursor,
+generation) combinations, since the two bounds that can disagree are the cursor
+and the probe and both are invisible on a first page that fits.
+
+`limit + 1` is what keeps `More` detectable: the rule's own comment already said
+*"one over the limit is fetched conceptually here"*, so the narrowing made actual
+what the rule had assumed.
+
+**Two tests, because one cannot catch both failures.** Four mutations were run:
+
+| Mutation | Agreement test | Bound test |
+|---|---|---|
+| no probe row (`limit` not `limit + 1`) | red | red |
+| as-of bound tightened to `<` | red | green |
+| cursor made inclusive | red | green |
+| **unbounded fetch restored** | **green** | **red** |
+
+The last row is the one worth keeping in view: the agreement test *cannot* catch
+a re-widening, because the unbounded fetch is the reference it compares against —
+re-widening makes the two sides identical, which is exactly what it asserts. That
+is why `a_small_page_over_a_long_history_fetches_a_small_number_of_rows` exists
+as a separate test rather than an extra assertion, and the division of labour is
+now demonstrated rather than argued.
+
 #### The mutation battery
 
 Ten mutations, run against the shipped code:

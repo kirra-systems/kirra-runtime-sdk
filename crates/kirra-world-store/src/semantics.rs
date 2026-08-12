@@ -568,15 +568,15 @@ pub fn render_lineage(selection: &crate::lineage::SelectedLineage) -> String {
         out.push_str(&e.generation.to_string());
         out.push(FIELD);
     }
-    out.push_str(
-        match &selection.boundary {
-            PageBoundary::Complete => "complete".to_string(),
-            PageBoundary::More {
-                next_after_generation,
-            } => format!("more:{next_after_generation}"),
+    match &selection.boundary {
+        PageBoundary::Complete => out.push_str("complete"),
+        PageBoundary::More {
+            next_after_generation,
+        } => {
+            out.push_str("more:");
+            out.push_str(&next_after_generation.to_string());
         }
-        .as_str(),
-    );
+    }
     out
 }
 
