@@ -101,6 +101,7 @@ use kirra_world_store::snapshot::SnapshotCoordinate;
 use kirra_world_store::{ProjectedClaim, StoreError, TrustAxes, TrustGrade, Validity, WorldStore};
 
 use crate::answer_ref::QueryKind;
+use crate::freshness::{resolve_policy, FreshnessPolicy, FreshnessSource};
 use crate::semantics::SemanticVersions;
 
 /// Why an ask could not be answered at all.
@@ -143,6 +144,23 @@ pub enum AskError {
         /// What was wrong with the digest.
         cause: DigestError,
     },
+    /// **No ruled freshness policy for this claim's semantics** — box 3e.
+    ///
+    /// `KIRRA-WM-FRESHNESS-POLICY-001`: unclassified semantics refuse. This is
+    /// a **policy-resolution failure**, not a freshness state — which is why it
+    /// is an error rather than a fourth `Validity` variant, and why it is not
+    /// `Unknown`: something IS known about this subject, and the engine has not
+    /// been told what its age means.
+    ///
+    /// Fail-closed by the `KIRRA_VEHICLE_CLASS` precedent. Serving it as
+    /// `Timeless` would assert that the fact's age does not matter — a positive
+    /// claim nobody made.
+    UnclassifiedFreshness {
+        /// The claim kind that has no ruling.
+        kind: String,
+        /// Its predicate, or `None` for a payload-only claim.
+        predicate: Option<String>,
+    },
 }
 
 impl fmt::Display for AskError {
@@ -163,6 +181,12 @@ impl fmt::Display for AskError {
                      (subject={subject:?}, predicate_key={key:?}): {cause}"
                 )
             }
+            Self::UnclassifiedFreshness { kind, predicate } => write!(
+                f,
+                "no ruled freshness policy for kind={kind} predicate={} — \
+                 unclassified semantics refuse (KIRRA-WM-FRESHNESS-POLICY-001)",
+                predicate.as_deref().unwrap_or("<none>")
+            ),
         }
     }
 }
@@ -482,23 +506,24 @@ impl ComposedLookup {
 /// and never adjudicates it.
 pub struct WorldView<'a> {
     store: &'a WorldStore,
-    staleness_budget_ms: Option<u64>,
+    freshness: FreshnessSource,
 }
 
 impl<'a> WorldView<'a> {
-    /// Bind a view with the **caller's** staleness policy.
+    /// Bind a view to a **freshness source** — box 3e.
     ///
-    /// The budget is the caller's deliberately: how long a claim stays fresh is
-    /// a policy of the asking consumer, and a floor plan and a person's location
-    /// go stale at wildly different rates. Baking one budget into the row would
-    /// answer for every reader at once. `None` means this caller treats claims
-    /// as not going stale.
+    /// This took an `Option<u64>` until 3e, and `None` meant *"claims do not go
+    /// stale"*. That was the defect: `Validity::Timeless` is a positive claim
+    /// that a fact's age does not matter, and the engine asserted it about every
+    /// fact in the store whenever a caller supplied nothing.
+    ///
+    /// [`FreshnessSource`] has no variant meaning "nothing supplied", so the old
+    /// default is unrepresentable rather than merely discouraged. Either the
+    /// ruled table decides, or the caller states a policy — and an unclassified
+    /// class under [`FreshnessSource::Ruled`] refuses.
     #[must_use]
-    pub fn new(store: &'a WorldStore, staleness_budget_ms: Option<u64>) -> Self {
-        Self {
-            store,
-            staleness_budget_ms,
-        }
+    pub fn new(store: &'a WorldStore, freshness: FreshnessSource) -> Self {
+        Self { store, freshness }
     }
 
     /// Ask what is currently known about one subject.
@@ -547,11 +572,28 @@ impl<'a> WorldView<'a> {
 
         let clock = now_ms.max(0).unsigned_abs();
         let mut answers: Vec<WorldAnswer> = Vec::new();
-        for c in claims
-            .iter()
-            .filter(|c| Self::is_admissible(c, clock, self.staleness_budget_ms))
-        {
-            answers.push(self.bind(c, clock, &identity, identity_is_current)?);
+        for c in claims.iter() {
+            // ONE resolution per claim, used by both the admissibility test and
+            // the binding. Resolving twice was not merely wasteful: it made the
+            // fail-closed rule depend on two lookups agreeing, when the whole
+            // point of `policy_for` is that there is one place to refuse.
+            //
+            // `?`, NOT a swallowed refusal. A first draft filtered with
+            // `.unwrap_or(false)`, which dropped an unclassified claim silently
+            // and turned a policy fault into a narrower answer — the exact
+            // failure `one_unruled_claim_refuses_the_whole_query_rather_than_narrowing_it`
+            // exists to catch, and it caught it.
+            let budget = self.policy_for(c)?.budget();
+            if !Self::is_admissible(c, clock, budget) {
+                continue;
+            }
+            answers.push(Self::bind(
+                c,
+                clock,
+                budget,
+                &identity,
+                identity_is_current,
+            )?);
         }
 
         let lookup = if answers.is_empty() {
@@ -604,13 +646,16 @@ impl<'a> WorldView<'a> {
         let clock = valid_at_ms.max(0).unsigned_abs();
         let mut answers = Vec::new();
         for claim in &answer.claims {
-            if !Self::is_admissible(claim, clock, self.staleness_budget_ms) {
+            // Resolved once and shared by the admissibility test and the
+            // assembly below — see the note in `ask`.
+            let budget = self.policy_for(claim)?.budget();
+            if !Self::is_admissible(claim, clock, budget) {
                 continue;
             }
             answers.push(assemble(
                 claim,
                 clock,
-                self.staleness_budget_ms,
+                budget,
                 // `true` for the same reason a pinned composition passes it:
                 // the historical graph was replayed from the log up to the cut,
                 // so it cannot lag it. `identity_is_current` answers a question
@@ -636,6 +681,22 @@ impl<'a> WorldView<'a> {
             completeness,
             semantics: SemanticVersions::for_query(QueryKind::AsOfSubject),
         })
+    }
+
+    /// **The ruled disposition for one claim, or a refusal.**
+    ///
+    /// The single place a claim's semantics become a freshness policy, so the
+    /// fail-closed rule cannot be routed around by a second lookup that forgot
+    /// to refuse.
+    ///
+    /// Every caller resolves it **once per claim** and passes the resulting
+    /// budget onward. An earlier draft called this twice — once behind an
+    /// `admissible` wrapper and again when binding — which meant the refusal
+    /// that makes 3e fail closed was evaluated twice for one claim, and would
+    /// have kept working had one of the two sites stopped refusing. Caught in
+    /// review on #1439.
+    fn policy_for(&self, claim: &ProjectedClaim) -> Result<FreshnessPolicy, AskError> {
+        resolve_policy(self.freshness, &claim.kind, claim.predicate.as_deref())
     }
 
     // SEMANTICS-PIN-BEGIN: answer_admissibility
@@ -667,17 +728,20 @@ impl<'a> WorldView<'a> {
     /// Delegates the field-by-field construction to [`assemble`], which is the
     /// one place a `WorldAnswer` is built; this adds only the identity
     /// resolution a live read can do and a pinned one cannot.
+    ///
+    /// Takes the budget rather than resolving it, so the caller's single
+    /// [`Self::policy_for`] call is the only one — see that method.
     fn bind(
-        &self,
         claim: &ProjectedClaim,
         clock: u64,
+        budget: Option<u64>,
         identity: &IdentityView,
         identity_is_current: bool,
     ) -> Result<WorldAnswer, AskError> {
         assemble(
             claim,
             clock,
-            self.staleness_budget_ms,
+            budget,
             Self::resolve_object(claim.object.as_deref(), identity, identity_is_current),
         )
     }

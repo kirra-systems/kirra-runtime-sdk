@@ -58,6 +58,7 @@
 
 use kirra_world::resolution::RefusalReason;
 use kirra_world::trust::{TrustGrade, Validity};
+use kirra_world_service::freshness::{FreshnessPolicy, FreshnessSource};
 use kirra_world_service::read_view::{
     AskError, ObjectIdentity, UnknownReason, WorldLookup, WorldView,
 };
@@ -432,7 +433,18 @@ pub fn mission_context(
     now_ms: i64,
     staleness_budget_ms: Option<u64>,
 ) -> Result<ProposalContext, ContextError> {
-    let view = WorldView::new(store, staleness_budget_ms);
+    // 3e: the caller's `Option` becomes an AFFIRMATIVE classification rather
+    // than an absence. `Some(b)` is `Bounded`, and `None` is `Timeless` — which
+    // is what this signature already meant ("I have considered this and this
+    // fact is genuinely timeless"), now said in a type where the alternative
+    // reading is unrepresentable.
+    let view = WorldView::new(
+        store,
+        FreshnessSource::Caller(match staleness_budget_ms {
+            Some(max_age_ms) => FreshnessPolicy::Bounded { max_age_ms },
+            None => FreshnessPolicy::Timeless,
+        }),
+    );
 
     let answers = match view.ask(subject.as_str(), now_ms)?.into_lookup() {
         WorldLookup::Answered(answers) => answers,

@@ -66,6 +66,7 @@
 //! `dock_alpha` when `dock_beta` was the truth. Only the completeness axis
 //! reveals that, which is precisely the loss 3g exists to make observable.
 
+use kirra_world_service::freshness::{FreshnessPolicy, FreshnessSource};
 use kirra_world_service::read_view::{WorldLookup, WorldView};
 use kirra_world_store::{ClaimStatus, EventId, NewEvent, ObservationId, WorldStore, WriterClass};
 
@@ -165,7 +166,7 @@ fn objects(lookup: &WorldLookup) -> Vec<String> {
 #[test]
 fn evidence_outside_the_compacted_span_is_full_and_still_answers() {
     let (store, path) = store_with_a_hole("full");
-    let view = WorldView::new(&store, None);
+    let view = WorldView::new(&store, FreshnessSource::Caller(FreshnessPolicy::Timeless));
 
     let out = view
         .ask_as_of("package_17", T0 + 50, T0 + 50)
@@ -200,7 +201,7 @@ fn evidence_outside_the_compacted_span_is_full_and_still_answers() {
 #[test]
 fn evidence_inside_the_compacted_span_is_degraded_and_the_answer_looks_fine() {
     let (store, path) = store_with_a_hole("degraded");
-    let view = WorldView::new(&store, None);
+    let view = WorldView::new(&store, FreshnessSource::Caller(FreshnessPolicy::Timeless));
 
     let out = view
         .ask_as_of("package_17", T0 + 150, T0 + 9_000)
@@ -265,7 +266,7 @@ fn an_empty_answer_still_reports_that_evidence_was_lost() {
     store.fold().expect("fold");
     store.compact_range(1, 1, T0 + 9_000).expect("compact");
 
-    let view = WorldView::new(&store, None);
+    let view = WorldView::new(&store, FreshnessSource::Caller(FreshnessPolicy::Timeless));
     let out = view
         .ask_as_of("package_17", T0 + 150, T0 + 9_000)
         .expect("ask_as_of");
@@ -327,7 +328,7 @@ fn a_subject_the_compacted_window_never_held_is_full() {
     store.fold().expect("fold");
     store.compact_range(1, 1, T0 + 9_000).expect("compact");
 
-    let view = WorldView::new(&store, None);
+    let view = WorldView::new(&store, FreshnessSource::Caller(FreshnessPolicy::Timeless));
     let out = view
         .ask_as_of("pallet_9", T0 + 1_000, T0 + 9_000)
         .expect("ask_as_of");
@@ -352,7 +353,7 @@ fn a_subject_the_compacted_window_never_held_is_full() {
 #[test]
 fn the_boundary_verdict_equals_the_stores_verdict() {
     let (store, path) = store_with_a_hole("propagates");
-    let view = WorldView::new(&store, None);
+    let view = WorldView::new(&store, FreshnessSource::Caller(FreshnessPolicy::Timeless));
 
     for (valid_at, known_at) in [(T0 + 50, T0 + 50), (T0 + 150, T0 + 9_000)] {
         let store_side = store

@@ -1675,6 +1675,26 @@ jobs:
         run: |
           python3 ci/check_world_semantics.py --self-test
           python3 ci/check_world_semantics.py
+      - name: Kirra World freshness-coverage gate (Tier 3 box 3e)
+        # THE RULE (KIRRA-WM-FRESHNESS-POLICY-001): freshness semantics are
+        # centrally ruled by claim kind. Timeless must be explicitly granted,
+        # bounded facts require an explicit age limit, and unclassified
+        # semantics REFUSE.
+        #
+        # The refusal is enforced at runtime and is fail-closed, so nothing
+        # unsafe happens when a class is missing. This gate exists for the other
+        # failure, which is silent: the table starts correct and quietly becomes
+        # incomplete as new claim kinds land, and the refusal is discovered by
+        # whoever is holding the pager.
+        #
+        # So every (kind, predicate) the repository WRITES must be either ruled
+        # or listed as knowingly unruled. The baseline is not an escape hatch --
+        # an entry there is a decision that the class refuses, deliberately.
+        #
+        # Self-test first, and it asserts its own case count.
+        run: |
+          python3 ci/check_freshness_coverage.py --self-test
+          python3 ci/check_freshness_coverage.py
       - name: Kirra World domain-logic gate (ADR-0042 Decision 5)
         # THE RULE: no Kirra World domain implementation may merge until
         # ADR-0042's safety-assurance scope ruling is assigned to a named owner

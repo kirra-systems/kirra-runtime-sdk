@@ -46,6 +46,7 @@ use kirra_world::adjudication::{
 use kirra_world::observation::{ClockDomain, DomainInstant};
 use kirra_world::reference::{EntityId, EventId, ObservationId};
 use kirra_world_service::answer_ref::{AnswerRef, RefResolution};
+use kirra_world_service::freshness::{FreshnessPolicy, FreshnessSource};
 use kirra_world_service::read_view::{ObjectIdentity, WorldLookup, WorldView};
 use kirra_world_store::adjudication_record::AdjudicationRow;
 use kirra_world_store::snapshot::PinnedComposedRead;
@@ -202,7 +203,7 @@ fn sole_identity(res: &RefResolution) -> ObjectIdentity {
 #[test]
 fn the_live_read_resolves_the_object_through_the_merge() {
     let (store, path, _pin) = store_where_the_graph_moved_after_the_pin("live");
-    let view = WorldView::new(&store, None);
+    let view = WorldView::new(&store, FreshnessSource::Caller(FreshnessPolicy::Timeless));
 
     let composed = view.ask("package_17", LATER).expect("ask");
     let WorldLookup::Answered(answers) = composed.lookup() else {
@@ -267,7 +268,7 @@ fn the_historical_and_live_identities_genuinely_differ() {
             .expect("resolve"),
     );
 
-    let view = WorldView::new(&store, None);
+    let view = WorldView::new(&store, FreshnessSource::Caller(FreshnessPolicy::Timeless));
     let composed = view.ask("package_17", LATER).expect("ask");
     let WorldLookup::Answered(live) = composed.lookup() else {
         panic!("the fixture must answer");

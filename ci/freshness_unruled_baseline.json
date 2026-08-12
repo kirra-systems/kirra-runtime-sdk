@@ -1,0 +1,34 @@
+{
+  "_comment": [
+    "Tier 3 box 3e. Semantic classes this repository writes that are KNOWINGLY",
+    "unruled: they have no freshness disposition, so `FreshnessSource::Ruled`",
+    "queries for them REFUSE (KIRRA-WM-FRESHNESS-POLICY-001).",
+    "",
+    "This is not an escape hatch. An entry here is a decision that the class has",
+    "not been ruled and therefore does not answer -- which is the safe direction.",
+    "The alternative the gate exists to prevent is a class landing with NO record",
+    "either way, where the refusal is discovered in production.",
+    "",
+    "Every entry below is a TEST FIXTURE class. None is domain semantics anyone",
+    "has ruled on, and inventing dispositions for them would be exactly the",
+    "decorative metadata this tier keeps removing: rows nobody decided, read as",
+    "though somebody had. They move into `RULED` when the domain rules them."
+  ],
+  "unruled": [
+    {
+      "kind": "observation",
+      "predicate": null,
+      "why": "A payload-only observation. `KIRRA-WM-CLAIM-SHAPES-001` makes this a legitimate shape, but what an untyped payload MEANS temporally cannot be ruled in general -- it depends on what the payload carries, which is precisely the thing no key can see."
+    },
+    {
+      "kind": "observation",
+      "predicate": "at",
+      "why": "A fixture predicate used by the store's own projection tests. Plausibly a position -- and if it is, it is recency-sensitive -- but 'plausibly' is not a ruling."
+    },
+    {
+      "kind": "spatial",
+      "predicate": "located_in",
+      "why": "A containment relation from the SD-4 frame fixtures. Whether containment ages depends on whether the container moves, which the class alone does not say."
+    }
+  ]
+}
