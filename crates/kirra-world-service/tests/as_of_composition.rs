@@ -43,6 +43,7 @@ use kirra_world::adjudication::{
 use kirra_world::observation::{ClockDomain, DomainInstant};
 use kirra_world::reference::{EntityId, EventId, ObservationId};
 use kirra_world_service::answer_ref::QueryKind;
+use kirra_world_service::freshness::{FreshnessPolicy, FreshnessSource};
 use kirra_world_service::read_view::{ObjectIdentity, WorldLookup, WorldView};
 use kirra_world_service::semantics::SemanticVersions;
 use kirra_world_store::adjudication_record::AdjudicationRow;
@@ -177,7 +178,7 @@ fn store_where_the_graph_moved_after_the_cut(name: &str) -> (WorldStore, std::pa
 }
 
 fn sole_identity(store: &WorldStore, as_known_at_ms: i64) -> ObjectIdentity {
-    let view = WorldView::new(store, None);
+    let view = WorldView::new(store, FreshnessSource::Caller(FreshnessPolicy::Timeless));
     let temporal = view
         .ask_as_of("package_17", VALID_AT, as_known_at_ms)
         .expect("ask_as_of");
@@ -264,7 +265,7 @@ fn the_two_cuts_genuinely_differ() {
 #[test]
 fn the_claim_is_the_same_in_both_arms_only_its_object_resolution_moves() {
     let (store, path) = store_where_the_graph_moved_after_the_cut("sameclaim");
-    let view = WorldView::new(&store, None);
+    let view = WorldView::new(&store, FreshnessSource::Caller(FreshnessPolicy::Timeless));
 
     let render = |as_known_at: i64| {
         let t = view
@@ -450,7 +451,7 @@ fn a_historically_ambiguous_object_is_not_matchable() {
 #[test]
 fn an_as_of_answer_carries_the_familys_version_set() {
     let (store, path) = store_where_the_graph_moved_after_the_cut("versions");
-    let view = WorldView::new(&store, None);
+    let view = WorldView::new(&store, FreshnessSource::Caller(FreshnessPolicy::Timeless));
 
     let temporal = view
         .ask_as_of("package_17", VALID_AT, CUT)
@@ -485,7 +486,7 @@ fn an_as_of_answer_carries_the_familys_version_set() {
 #[test]
 fn completeness_still_rides_on_the_answer() {
     let (store, path) = store_where_the_graph_moved_after_the_cut("completeness");
-    let view = WorldView::new(&store, None);
+    let view = WorldView::new(&store, FreshnessSource::Caller(FreshnessPolicy::Timeless));
 
     let temporal = view
         .ask_as_of("package_17", VALID_AT, CUT)

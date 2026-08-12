@@ -6,6 +6,7 @@
 //! compiling once Tier 3 lands.
 
 use kirra_world::evidence::DigestError;
+use kirra_world_service::freshness::{FreshnessPolicy, FreshnessSource};
 use kirra_world_service::read_view::{AskError, UnknownReason, WorldLookup, WorldView};
 use kirra_world_store::{
     Adjudication, ClaimStatus, Corroboration, EventId, NewEvent, ObservationId, Origin, TrustAxes,
@@ -128,7 +129,10 @@ fn an_answer_carries_validity_trust_and_provenance() {
     let a = axes(Corroboration::Corroborated(2), Adjudication::Confirmed);
     seed(&mut s, 1, "cup-1", None, Some(&a), ClaimStatus::Confirmed);
 
-    let view = WorldView::new(&s, Some(60_000));
+    let view = WorldView::new(
+        &s,
+        FreshnessSource::Caller(FreshnessPolicy::Bounded { max_age_ms: 60_000 }),
+    );
     let WorldLookup::Answered(answers) = view.ask("cup-1", T0).expect("ask").into_lookup() else {
         panic!("expected an answer");
     };
@@ -191,7 +195,10 @@ fn an_answer_carries_the_axes_not_only_the_collapsed_grade() {
     let a = axes(Corroboration::Corroborated(2), Adjudication::Confirmed);
     seed(&mut s, 1, "cup-1", None, Some(&a), ClaimStatus::Confirmed);
 
-    let view = WorldView::new(&s, Some(60_000));
+    let view = WorldView::new(
+        &s,
+        FreshnessSource::Caller(FreshnessPolicy::Bounded { max_age_ms: 60_000 }),
+    );
     let WorldLookup::Answered(answers) = view.ask("cup-1", T0).expect("ask").into_lookup() else {
         panic!("expected an answer");
     };
@@ -242,7 +249,10 @@ fn two_claims_can_share_a_grade_for_different_reasons() {
         ClaimStatus::Confirmed,
     );
 
-    let view = WorldView::new(&s, Some(60_000));
+    let view = WorldView::new(
+        &s,
+        FreshnessSource::Caller(FreshnessPolicy::Bounded { max_age_ms: 60_000 }),
+    );
 
     let WorldLookup::Answered(a1) = view.ask("a", T0).expect("ask").into_lookup() else {
         panic!("expected an answer");
@@ -276,7 +286,10 @@ fn an_unlabelled_claim_has_no_grade_rather_than_a_default() {
     let mut s = open("unlabelled");
     seed(&mut s, 1, "cup-1", None, None, ClaimStatus::Confirmed);
 
-    let view = WorldView::new(&s, Some(60_000));
+    let view = WorldView::new(
+        &s,
+        FreshnessSource::Caller(FreshnessPolicy::Bounded { max_age_ms: 60_000 }),
+    );
     let WorldLookup::Answered(answers) = view.ask("cup-1", T0).expect("ask").into_lookup() else {
         panic!("expected an answer");
     };
@@ -300,7 +313,10 @@ fn an_unlabelled_claim_has_no_grade_rather_than_a_default() {
 #[test]
 fn an_unknown_subject_is_a_success_not_an_error() {
     let s = open("unknown");
-    let view = WorldView::new(&s, Some(60_000));
+    let view = WorldView::new(
+        &s,
+        FreshnessSource::Caller(FreshnessPolicy::Bounded { max_age_ms: 60_000 }),
+    );
 
     let out = view.ask("never-heard-of-it", T0);
     assert!(
@@ -336,7 +352,10 @@ fn an_expired_claim_is_not_served() {
         ClaimStatus::Confirmed,
     );
 
-    let view = WorldView::new(&s, Some(60_000));
+    let view = WorldView::new(
+        &s,
+        FreshnessSource::Caller(FreshnessPolicy::Bounded { max_age_ms: 60_000 }),
+    );
     assert!(matches!(
         view.ask("cup-1", T0 + 500).expect("ask").into_lookup(),
         WorldLookup::Answered(_)
@@ -366,7 +385,10 @@ fn an_inadmissible_claim_never_reaches_the_boundary() {
         ClaimStatus::Candidate,
     );
 
-    let view = WorldView::new(&s, Some(60_000));
+    let view = WorldView::new(
+        &s,
+        FreshnessSource::Caller(FreshnessPolicy::Bounded { max_age_ms: 60_000 }),
+    );
     assert!(matches!(
         view.ask("cup-1", T0).expect("ask").into_lookup(),
         WorldLookup::Unknown(UnknownReason::NoClaim)
@@ -397,14 +419,22 @@ fn the_staleness_budget_belongs_to_the_asking_caller() {
 
     let later = T0 + 120_000;
 
-    let impatient = WorldView::new(&s, Some(60_000));
+    let impatient = WorldView::new(
+        &s,
+        FreshnessSource::Caller(FreshnessPolicy::Bounded { max_age_ms: 60_000 }),
+    );
     let WorldLookup::Answered(a1) = impatient.ask("cup-1", later).expect("ask").into_lookup()
     else {
         panic!("expected an answer");
     };
     assert_eq!(a1[0].validity(), Validity::Stale);
 
-    let patient = WorldView::new(&s, Some(600_000));
+    let patient = WorldView::new(
+        &s,
+        FreshnessSource::Caller(FreshnessPolicy::Bounded {
+            max_age_ms: 600_000,
+        }),
+    );
     let WorldLookup::Answered(a2) = patient.ask("cup-1", later).expect("ask").into_lookup() else {
         panic!("expected an answer");
     };
@@ -442,7 +472,10 @@ fn an_unreadable_provenance_handle_is_refused_rather_than_served() {
 
     // Answerable to begin with -- so the refusal below is caused by the
     // corruption and not by the fixture never having worked.
-    let view = WorldView::new(&s, Some(60_000));
+    let view = WorldView::new(
+        &s,
+        FreshnessSource::Caller(FreshnessPolicy::Bounded { max_age_ms: 60_000 }),
+    );
     assert!(matches!(
         view.ask("cup-1", T0).expect("ask").into_lookup(),
         WorldLookup::Answered(_)
@@ -454,7 +487,10 @@ fn an_unreadable_provenance_handle_is_refused_rather_than_served() {
     ))
     .expect("plant the corruption");
 
-    let view = WorldView::new(&s, Some(60_000));
+    let view = WorldView::new(
+        &s,
+        FreshnessSource::Caller(FreshnessPolicy::Bounded { max_age_ms: 60_000 }),
+    );
     match view.ask("cup-1", T0) {
         Err(AskError::CorruptProvenance {
             subject,
@@ -506,7 +542,10 @@ fn the_error_identifies_which_of_a_subject_s_rows_is_damaged() {
 
     // Two rows, both answerable, so the refusal below is caused by the
     // corruption rather than by a fixture that never worked.
-    let view = WorldView::new(&s, Some(60_000));
+    let view = WorldView::new(
+        &s,
+        FreshnessSource::Caller(FreshnessPolicy::Bounded { max_age_ms: 60_000 }),
+    );
     let WorldLookup::Answered(before) = view.ask("cup-1", T0).expect("ask").into_lookup() else {
         panic!("expected answers");
     };
@@ -519,7 +558,10 @@ fn the_error_identifies_which_of_a_subject_s_rows_is_damaged() {
     ))
     .expect("plant the corruption in ONE row");
 
-    let view = WorldView::new(&s, Some(60_000));
+    let view = WorldView::new(
+        &s,
+        FreshnessSource::Caller(FreshnessPolicy::Bounded { max_age_ms: 60_000 }),
+    );
     match view.ask("cup-1", T0) {
         Err(AskError::CorruptProvenance {
             subject, predicate, ..
@@ -571,7 +613,10 @@ fn a_corrupt_handle_is_not_reported_as_absence_of_knowledge() {
     s.raw_execute_for_test("UPDATE world_current SET chain_digest = ''")
         .expect("plant the corruption");
 
-    let view = WorldView::new(&s, Some(60_000));
+    let view = WorldView::new(
+        &s,
+        FreshnessSource::Caller(FreshnessPolicy::Bounded { max_age_ms: 60_000 }),
+    );
     let out = view.ask("cup-1", T0);
     assert!(
         !matches!(&out, Ok(c) if matches!(c.lookup(), WorldLookup::Unknown(_))),

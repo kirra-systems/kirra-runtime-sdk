@@ -2029,8 +2029,12 @@ pressure that produced every stale claim this box already documents.
       Direct domain reads of projection tables below the engine are
       **mechanically gated**, on the `ci/check_reexport_shims.py` zero-tolerance
       ratchet pattern — an invariant with no gate is prose.
-- [ ] **3e — Freshness.** Computed at read time; threshold supplied by caller or
-      ruled policy; no implicit default for recency-sensitive semantics (above).
+- [x] **3e — Freshness.** ✅ **DONE 2026-08-11** — see *"3e closed: Timeless is
+      granted, never assumed"* below. Computed at read time; threshold supplied
+      by caller or ruled policy; no implicit default for recency-sensitive
+      semantics. `KIRRA-WM-FRESHNESS-POLICY-001`. The fourth `Unknown` freshness
+      variant is **decided and omitted** — no reachable case exists; see the
+      state machine in the closure.
 - [ ] **3f — Lineage retrieval contract.** Deterministic, bounded, paginated,
       truncation visible, historically correct. Consumed by Tier 4's `Explain`;
       does not render.
@@ -3286,3 +3290,112 @@ everything a consumer needs to build an historical answer without the boundary.
 
 Both temporal axes now use the same identity semantics. Historical composition
 is no longer a property of one query family.
+
+### 3e closed: `Timeless` is granted, never assumed — 2026-08-11
+
+**`KIRRA-WM-FRESHNESS-POLICY-001` — RULED 2026-08-11**
+
+> **Freshness semantics are centrally ruled by claim kind. `Timeless` must be
+> explicitly granted. Bounded facts require an explicit age limit. Unclassified
+> semantics refuse.**
+
+And the invariant that follows, which is the one to remember:
+
+> **`Timeless` is an affirmative semantic classification, never the absence of a
+> freshness policy.**
+
+#### The defect was live, and this document had already found it
+
+FINDING 2 above recorded it before the box was built: `validity_at` maps
+`staleness_budget_ms: None` to `Validity::Timeless`, and `WorldView` accepted
+`None` from anyone. `Timeless` is not *"we did not check"* — it is a **positive
+claim that the fact's age does not matter**. The engine asserted that claim
+about every fact in the store whenever nobody supplied a budget, including
+`last_seen_at`, for which it is false.
+
+#### Why a ruled table and not a caller flag
+
+The alternative considered was letting the caller declare a query
+recency-sensitive. Rejected, and the reason is decisive: it merely moves the
+trust decision outward. A careless caller says *"insensitive"* and manufactures
+`Timeless` exactly as the engine did — the API satisfied, the architectural rule
+defeated. So the disposition is ruled centrally, keyed by **semantics**
+(`kind` + `predicate`), because `last_seen_at` and a floor plan can be identical
+in storage shape and opposite in temporal meaning.
+
+#### The state machine, and the `Unknown` question settled
+
+```text
+policy = Timeless               -> Timeless
+policy = Bounded, age <= bound  -> Fresh
+policy = Bounded, age  > bound  -> Stale
+no policy                       -> the QUERY refuses
+```
+
+The open sub-question above asked whether a fourth `Unknown` freshness variant is
+reachable, and said to decide it by finding a reachable case or leaving it out —
+*"do not carry it undecided."* **Decided: omitted.** There is no successful
+answer for which freshness is unknown; a missing policy is a
+*policy-resolution failure*, not a freshness state, so it travels in the error
+channel as `AskError::UnclassifiedFreshness`. A fourth variant would be
+uninhabited — the decorative-semantics failure this tier keeps removing.
+
+The one case that would justify it, recorded so it is recognised if it appears:
+a claim whose age genuinely **cannot be determined**, from missing or invalid
+time provenance. If that is ever found, the variant becomes justified *then*,
+established by a reachable test rather than reserved speculatively.
+
+#### What `None` became
+
+`WorldView::new` took `Option<u64>`; it now takes a `FreshnessSource` with **no
+variant meaning "nothing supplied"**, so the old default is unrepresentable
+rather than discouraged. `mission_context`'s caller-supplied `Option` maps to an
+affirmative policy — `Some(b)` to `Bounded`, `None` to `Timeless` — which is
+what its signature already *meant* (*"I have considered this and this fact is
+genuinely timeless"*), now said in a type where the other reading cannot be
+written.
+
+#### The table is small on purpose
+
+Three ruled rows, each carrying its reasoning; everything else refuses. A large
+speculative table would be decorative metadata in another costume — entries
+nobody decided, read as though somebody had. Because absence refuses, the table
+grows one argued row at a time and no interim is unsafe.
+
+The classes this repository writes but has **not** ruled are recorded in
+`ci/freshness_unruled_baseline.json` as knowingly unruled. All three are test
+fixtures; inventing dispositions for them would have been the same overclaim.
+
+#### The silent failure the gate exists for
+
+The refusal is fail-closed, so a missing class is never *unsafe* — it is
+*invisible*. The table starts correct and quietly goes incomplete as new claim
+kinds land. `ci/check_freshness_coverage.py` makes that mechanical: every
+`(kind, predicate)` the repository writes must be ruled or baselined, and one in
+neither reds. It reports — rather than silently skips — `NewEvent` literals whose
+`kind` comes from a variable, since those are classes it cannot see.
+
+#### Measured, and one bug the tests caught mid-build
+
+| Mutation | Caught by |
+|---|---|
+| missing policy falls back to `Timeless` | **5** tests (3 integration + 2 unit) |
+| a benign new ruled row | nothing — the control, confirming the suite is not brittle |
+
+The adversarial pair uses claims of the **same `valid_from`**, read at the
+**same clock**: `last_seen_at` is `Stale`, `colour` is `Timeless`. Nothing in the
+data distinguishes them, so only the ruling can.
+
+The first draft of `ask` filtered with `.unwrap_or(false)`, which **swallowed
+the refusal and silently dropped the unclassified claim** — turning a policy
+fault into a narrower answer. That is the exact failure
+`one_unruled_claim_refuses_the_whole_query_rather_than_narrowing_it` was written
+to catch, and it caught it during the build rather than in review.
+
+#### What remains
+
+`mission_context` still classifies for itself via `FreshnessSource::Caller`. That
+is safer than the global default it replaced — the classification is a value
+somebody wrote, greppable and reviewable — and it should move to the ruled table
+once an applicable entry exists. The `Caller` variant stays as the honest interim
+while `RULED` is small.
