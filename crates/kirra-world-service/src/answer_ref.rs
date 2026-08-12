@@ -98,6 +98,14 @@ pub enum QueryKind {
     /// ([`crate::read_view::TemporalLookup::semantics`]), and that set has to
     /// be derived in the one place every set is derived.
     AsOfSubject,
+    /// [`crate::lineage::LineageRef`] — one page of the evidence bearing on a
+    /// subject at a pinned generation.
+    ///
+    /// A ref family of its own, described by [`crate::lineage::LineageRef`]
+    /// rather than by [`AnswerRef`]: its parameters are a page bound rather
+    /// than a clock and a budget. That module records why the two are separate
+    /// types sharing this enum instead of one struct holding the union.
+    SubjectLineage,
 }
 
 /// **A reproducible descriptor for one answer.**

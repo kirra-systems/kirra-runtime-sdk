@@ -199,6 +199,21 @@ impl SemanticVersions {
                     version: version_of(BoundaryRuleId::Admissibility),
                 },
             ]),
+            // Box 3f. ONE rule, and the three absences are load-bearing claims
+            // rather than an oversight — see `crate::lineage::lineage_semantics`
+            // for the argument on each, and
+            // `the_lineage_query_depends_on_exactly_one_rule` for the assertion
+            // that they are still true.
+            //
+            // In particular `answer_admissibility` is OUT: lineage returns
+            // evidence, and an event the boundary would refuse to *serve* is
+            // often precisely the event that explains the answer. Including it
+            // would make a lineage refuse for a rule it never consults, and
+            // would hide the rejected evidence an investigator came for.
+            QueryKind::SubjectLineage => Self::new([RuleVersion {
+                rule: RuleId::LineageSelection.as_str().to_string(),
+                version: store_semantics::version_of(RuleId::LineageSelection),
+            }]),
         }
     }
 
@@ -489,5 +504,59 @@ mod tests {
             "subject summaries are a different query family; including them would \
              refuse references for a rule they never consulted"
         );
+    }
+
+    /// **Box 3f's dependency claim, and its three tripwires.**
+    ///
+    /// The exclusions are asserted, not assumed. Each is a statement about what
+    /// a lineage answer is derived from today, and each will go red the moment
+    /// it stops being true — which is exactly how `entity_fold` entered
+    /// `CurrentSubject`'s set when box 3h changed the composition.
+    #[test]
+    fn the_lineage_query_depends_on_exactly_one_rule() {
+        let v = SemanticVersions::for_query(QueryKind::SubjectLineage);
+        let names: Vec<&str> = v.entries().iter().map(|e| e.rule.as_str()).collect();
+        assert_eq!(names, vec!["lineage_selection"]);
+
+        assert!(
+            v.version_of("world_current_fold").is_none(),
+            "lineage returns EVIDENCE, not folded claims — nothing in it asks \
+             which claim won a key. If lineage ever marks the winning event, \
+             this fold can change what it says and must join the set"
+        );
+        assert!(
+            v.version_of("entity_fold").is_none(),
+            "lineage matches the subject as written and follows no identity \
+             edges. If it ever reads the equivalence class, this fold decides \
+             which events are in the answer and must join the set"
+        );
+        assert!(
+            v.version_of(ADMISSIBILITY).is_none(),
+            "an inadmissible claim is still evidence: whether the boundary would \
+             SERVE it is a different question from whether it happened, and a \
+             lineage hiding rejected events is silent exactly when someone is \
+             investigating one"
+        );
+    }
+
+    /// Two families that share no rules must not be collapsed into one arm.
+    ///
+    /// `CurrentSubject` and `AsOfSubject` legitimately share theirs, and the
+    /// `for_query` comment records that as a finding rather than a coincidence.
+    /// This pins the other direction: lineage's set is genuinely disjoint, so a
+    /// future edit that folded it into the shared arm for tidiness would be
+    /// changing what a lineage answer claims to depend on.
+    #[test]
+    fn the_lineage_family_shares_no_rule_with_the_answer_families() {
+        let lineage = SemanticVersions::for_query(QueryKind::SubjectLineage);
+        let current = SemanticVersions::for_query(QueryKind::CurrentSubject);
+        for entry in lineage.entries() {
+            assert!(
+                current.version_of(&entry.rule).is_none(),
+                "{} is claimed by both families; if that is genuinely true the \
+                 shared-arm comment in `for_query` needs revisiting",
+                entry.rule
+            );
+        }
     }
 }

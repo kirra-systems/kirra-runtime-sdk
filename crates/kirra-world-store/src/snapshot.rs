@@ -243,17 +243,8 @@ impl<'a> ReadSnapshot<'a> {
     /// query, which rule 3 puts in the error channel. Generation `0` is legal
     /// and reconstructs the empty projection that preceded every event.
     pub fn read_at_generation(&self, generation: i64) -> Result<PinnedRead, StoreError> {
-        if generation < 0 {
-            return Err(StoreError::InvalidGeneration {
-                requested: generation,
-            });
-        }
-
-        let head = checkpoint_on(&self.tx, projection::CURRENT_PROJECTION)?.0;
-        if generation > head {
-            return Ok(PinnedRead::Irreproducible(Irreproducible::NotYetReached {
-                head,
-            }));
+        if let Some(reason) = self.coordinate_reached(generation)? {
+            return Ok(PinnedRead::Irreproducible(reason));
         }
 
         // Compaction check BEFORE the replay, deliberately. Replaying first and
@@ -271,6 +262,97 @@ impl<'a> ReadSnapshot<'a> {
             generation,
             rows: replay_to(&self.tx, generation)?,
         }))
+    }
+
+    /// **Does this coordinate exist yet?** — the half of reproducibility that
+    /// every pinned read answers the same way.
+    ///
+    /// Shared rather than repeated. The compaction half is deliberately NOT
+    /// here, because the two pinned families answer it differently and one
+    /// helper returning both would hide that: a projection replay must REFUSE a
+    /// compacted coordinate (a fold over a log with holes is silently wrong),
+    /// while a lineage read DEGRADES (the removed spans are themselves a fact,
+    /// and `Resolution::Degraded` is the type for it). Merging them would force
+    /// one family to take the other's answer.
+    ///
+    /// # Errors
+    ///
+    /// [`StoreError::InvalidGeneration`] for a negative generation — a malformed
+    /// query rather than an unreachable one, so it goes in the error channel.
+    fn coordinate_reached(&self, generation: i64) -> Result<Option<Irreproducible>, StoreError> {
+        if generation < 0 {
+            return Err(StoreError::InvalidGeneration {
+                requested: generation,
+            });
+        }
+        let head = checkpoint_on(&self.tx, projection::CURRENT_PROJECTION)?.0;
+        Ok((generation > head).then_some(Irreproducible::NotYetReached { head }))
+    }
+
+    /// **One page of a subject's lineage, as it stood at `generation`** —
+    /// box 3f.
+    ///
+    /// `KIRRA-WM-EXPLAIN-TIER-001` asks Tier 3 for a lineage contract that is
+    /// *bounded and paginated, with truncation visible* and *historically
+    /// correct*. The selection rule — which events, in what order, where the
+    /// page ends — is [`crate::lineage::select_lineage`], versioned and
+    /// corpus-pinned; this supplies it with candidates and the compaction
+    /// verdict.
+    ///
+    /// # Compaction DEGRADES here rather than refusing
+    ///
+    /// [`Self::read_at_generation`] refuses a compacted coordinate, and must:
+    /// a projection folded from a log with holes in it is silently wrong, and
+    /// looks exactly like a correct one. Lineage is not folded — it is the
+    /// evidence itself — so a page missing a compacted span is *incomplete*
+    /// rather than *wrong*, and the citations say exactly which generations were
+    /// removed and under which digest. Refusing would discard a usable answer;
+    /// `Resolution::Degraded` is 3g's type for precisely this.
+    ///
+    /// The split mirrors one this store already makes: `read_composed_at_generation`
+    /// refuses while `as_of_composed` degrades.
+    ///
+    /// **No summaries ride along, and that is not an omission.** A
+    /// [`crate::DegradedSummary`] summarises folded *claims* for a key; it is
+    /// not a stand-in for removed evidence *rows*, so offering one here would
+    /// answer a question lineage did not ask. The spans are what name the loss.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::coordinate_reached`].
+    pub fn lineage_at_generation(
+        &self,
+        subject: &str,
+        generation: i64,
+        page: crate::lineage::LineagePage,
+    ) -> Result<PinnedLineage, StoreError> {
+        if let Some(reason) = self.coordinate_reached(generation)? {
+            return Ok(PinnedLineage::Irreproducible(reason));
+        }
+
+        let spans = compacted_at_or_below(&self.tx, generation)?;
+        let completeness = if spans.is_empty() {
+            crate::Resolution::Full
+        } else {
+            crate::Resolution::Degraded {
+                spans,
+                summaries: Vec::new(),
+            }
+        };
+
+        Ok(PinnedLineage::Reproduced {
+            // Pre-filtered by subject ONLY — an exact equality on an indexed
+            // column, which is the same test `select_lineage` applies, so the
+            // index cannot select a different set than the rule would. Every
+            // decision that involves a judgement is left to the rule.
+            selection: crate::lineage::select_lineage(
+                lineage_candidates(&self.tx, subject)?,
+                subject,
+                generation,
+                page,
+            ),
+            completeness,
+        })
     }
 
     /// **Reconstruct claims AND identity at one generation — box 3h.**
@@ -513,6 +595,29 @@ impl PinnedComposition {
     pub fn generation(&self) -> i64 {
         self.projection.generation()
     }
+}
+
+/// The outcome of a composed generation-pinned read.
+///
+/// One refusal for both halves — see [`ReadSnapshot::read_composed_at_generation`].
+/// The outcome of a pinned lineage read — box 3f.
+///
+/// Note the asymmetry with [`PinnedComposedRead`], which is deliberate and
+/// documented on [`ReadSnapshot::lineage_at_generation`]: only *"that coordinate
+/// does not exist yet"* refuses here. Compaction rides on the reproduced arm as
+/// a [`crate::Resolution`], because removed evidence is a fact a lineage answer
+/// can report rather than a reason it cannot be given.
+#[derive(Debug, Clone)]
+pub enum PinnedLineage {
+    /// The page, and whether compaction bore on it.
+    Reproduced {
+        /// The selected events and the page boundary.
+        selection: crate::lineage::SelectedLineage,
+        /// Whether compaction removed evidence at or below this coordinate.
+        completeness: crate::Resolution,
+    },
+    /// The coordinate has not been reached.
+    Irreproducible(Irreproducible),
 }
 
 /// The outcome of a composed generation-pinned read.
@@ -872,6 +977,52 @@ pub(crate) fn replay_identity_to(
         head = at;
     }
     Ok(entity_projection::IdentityView::new(acc, head))
+}
+
+/// Every event recorded under `subject`, unordered and unbounded by generation.
+///
+/// The candidates [`crate::lineage::select_lineage`] rules over. Deliberately
+/// does NOT apply the generation bound, the ordering or the page: those are the
+/// rule, and a query that pre-applied them would be a second implementation of a
+/// versioned rule — the drift `read_composed_at_generation` was corrected for on
+/// #1437, in a place where nothing would notice.
+///
+/// The subject equality it *does* apply is the one filter that cannot disagree
+/// with the rule, because it is the identical comparison on the identical value.
+pub(crate) fn lineage_candidates(
+    conn: &Connection,
+    subject: &str,
+) -> Result<Vec<crate::lineage::LineageEvent>, StoreError> {
+    if !table_exists(conn, "world_events")? {
+        return Ok(Vec::new());
+    }
+    let mut stmt = conn.prepare(
+        "SELECT generation, event_id, observation_id, txn_time_ms, valid_from_ms,
+                valid_to_ms, source, source_version, writer_class, claim_status,
+                provenance, kind, subject, predicate, object, chain_digest
+         FROM world_events WHERE subject = ?1",
+    )?;
+    let rows = stmt.query_map(params![subject], |r| {
+        Ok(crate::lineage::LineageEvent {
+            generation: r.get(0)?,
+            event_id: r.get(1)?,
+            observation_id: r.get(2)?,
+            txn_time_ms: r.get(3)?,
+            valid_from_ms: r.get(4)?,
+            valid_to_ms: r.get(5)?,
+            source: r.get(6)?,
+            source_version: r.get(7)?,
+            writer_class: crate::WriterClass::from_stored(&r.get::<_, String>(8)?),
+            claim_status: crate::ClaimStatus::from_stored(&r.get::<_, String>(9)?),
+            provenance: r.get(10)?,
+            kind: r.get(11)?,
+            subject: r.get(12)?,
+            predicate: r.get(13)?,
+            object: r.get(14)?,
+            chain_digest: r.get(15)?,
+        })
+    })?;
+    Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
 }
 
 pub(crate) fn table_exists(conn: &Connection, name: &str) -> Result<bool, StoreError> {

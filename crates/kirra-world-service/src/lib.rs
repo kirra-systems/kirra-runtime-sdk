@@ -32,6 +32,7 @@
 
 pub mod answer_ref;
 pub mod freshness;
+pub mod lineage;
 pub mod read_view;
 pub mod semantics;
 

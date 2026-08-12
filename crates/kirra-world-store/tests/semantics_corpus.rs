@@ -66,6 +66,7 @@ use std::collections::BTreeMap;
 use kirra_world::adjudication::IdentityAdjudication;
 use kirra_world::entity::Lifecycle;
 use kirra_world_store::entity_projection::{Contradiction, ProjectedEntity};
+use kirra_world_store::lineage::{LineageEvent, PageBoundary, SelectedLineage};
 use kirra_world_store::projection::ProjectedClaim;
 use kirra_world_store::semantics::{
     self, corpus_digest, corpus_rendering, entity_corpus, render_entities, render_subjects,
@@ -74,6 +75,7 @@ use kirra_world_store::semantics::{
 use kirra_world_store::subject_projection::{
     ProjectedSubject, SubjectKey, SubjectObservation, SummaryKind,
 };
+use kirra_world_store::ClaimStatus;
 
 // ---------------------------------------------------------------------------
 // 1. Conformance
@@ -466,6 +468,192 @@ fn the_subject_corpus_catches_a_key_without_the_kind() {
     );
 }
 
+// --- lineage_selection ---------------------------------------------------
+
+/// Which behavioural axis a lineage variant flips.
+///
+/// One struct of switches rather than four near-identical copies of the rule:
+/// a copy that drifted from the real selection would weaken every control at
+/// once, silently, and the drift would be invisible because the controls only
+/// ever assert *inequality*.
+#[derive(Clone, Copy)]
+struct LineageVariant {
+    /// Skip the sort, keeping input order.
+    unordered: bool,
+    /// Ignore the `generation <= at_generation` bound.
+    unbounded: bool,
+    /// Ignore the subject filter.
+    any_subject: bool,
+    /// Treat the cursor as inclusive rather than exclusive.
+    inclusive_cursor: bool,
+    /// Report `More` whenever the page is exactly full, successor or not.
+    eager_more: bool,
+    /// Drop unconfirmed candidates, as the claim fold does.
+    confirmed_only: bool,
+}
+
+impl LineageVariant {
+    /// Every switch off — the real rule, reimplemented.
+    fn faithful() -> Self {
+        Self {
+            unordered: false,
+            unbounded: false,
+            any_subject: false,
+            inclusive_cursor: false,
+            eager_more: false,
+            confirmed_only: false,
+        }
+    }
+}
+
+/// Select with one axis flipped, and render it under every corpus query.
+fn render_lineage_variant(v: LineageVariant) -> String {
+    let mut out = String::new();
+    for (label, subject, at_generation, page) in semantics::lineage_queries() {
+        let mut selected: Vec<LineageEvent> = semantics::lineage_corpus()
+            .into_iter()
+            .filter(|e| v.any_subject || e.subject == subject)
+            .filter(|e| v.unbounded || e.generation <= at_generation)
+            .filter(|e| {
+                page.after_generation().is_none_or(|a| {
+                    if v.inclusive_cursor {
+                        e.generation >= a
+                    } else {
+                        e.generation > a
+                    }
+                })
+            })
+            .filter(|e| !v.confirmed_only || e.claim_status == ClaimStatus::Confirmed)
+            .collect();
+        if !v.unordered {
+            selected.sort_by_key(|e| e.generation);
+        }
+
+        let boundary =
+            if selected.len() > page.limit() || (v.eager_more && selected.len() == page.limit()) {
+                selected.truncate(page.limit());
+                PageBoundary::More {
+                    next_after_generation: selected.last().map_or(0, |e| e.generation),
+                }
+            } else {
+                PageBoundary::Complete
+            };
+
+        out.push_str(label);
+        out.push('\u{1f}');
+        out.push_str(&semantics::render_lineage(&SelectedLineage {
+            events: selected,
+            boundary,
+        }));
+        out.push('\u{1e}');
+    }
+    out
+}
+
+/// **The faithfulness control.** The variant harness with every switch off must
+/// reproduce the real rendering EXACTLY.
+///
+/// Without this, the five controls below would all pass against a harness that
+/// had drifted from the real rule — they only assert that something differs, and
+/// a harness wrong in some sixth way differs from the real rule for a reason
+/// none of them names. This is what makes their inequality mean *"this axis"*
+/// rather than merely *"something"*.
+#[test]
+fn the_lineage_variant_harness_reproduces_the_real_rule_when_faithful() {
+    assert_eq!(
+        render_lineage_variant(LineageVariant::faithful()),
+        corpus_rendering(RuleId::LineageSelection),
+        "the variant harness has drifted from `select_lineage`; every control \
+         below is measuring the drift rather than the axis it names"
+    );
+}
+
+/// Losing the sort makes the answer depend on the order rows came back in —
+/// and a cursor over an unordered sequence cannot be resumed at all.
+#[test]
+fn the_lineage_corpus_catches_an_unordered_selection() {
+    assert_variant_is_caught(
+        RuleId::LineageSelection,
+        "unordered",
+        &render_lineage_variant(LineageVariant {
+            unordered: true,
+            ..LineageVariant::faithful()
+        }),
+    );
+}
+
+/// **The historical-correctness axis.** Dropping the generation bound serves
+/// evidence appended after the pinned coordinate — 2d's "resolve current state
+/// and label it historical", one tier up.
+#[test]
+fn the_lineage_corpus_catches_ignoring_the_generation_bound() {
+    assert_variant_is_caught(
+        RuleId::LineageSelection,
+        "unbounded",
+        &render_lineage_variant(LineageVariant {
+            unbounded: true,
+            ..LineageVariant::faithful()
+        }),
+    );
+}
+
+/// A lineage that ignores its subject is another subject's evidence.
+#[test]
+fn the_lineage_corpus_catches_ignoring_the_subject() {
+    assert_variant_is_caught(
+        RuleId::LineageSelection,
+        "any_subject",
+        &render_lineage_variant(LineageVariant {
+            any_subject: true,
+            ..LineageVariant::faithful()
+        }),
+    );
+}
+
+/// An inclusive cursor repeats the previous page's last event on every page —
+/// the kind of defect that looks like a duplicate rather than like a bug.
+#[test]
+fn the_lineage_corpus_catches_an_inclusive_cursor() {
+    assert_variant_is_caught(
+        RuleId::LineageSelection,
+        "inclusive_cursor",
+        &render_lineage_variant(LineageVariant {
+            inclusive_cursor: true,
+            ..LineageVariant::faithful()
+        }),
+    );
+}
+
+/// **The off-by-one at the page boundary.** Reporting `More` because the page
+/// filled — rather than because something follows — advertises a successor that
+/// does not exist. The `exactly_full` corpus query is the row that catches it,
+/// and it is in the corpus for this reason alone.
+#[test]
+fn the_lineage_corpus_catches_reporting_more_on_a_merely_full_page() {
+    assert_variant_is_caught(
+        RuleId::LineageSelection,
+        "eager_more",
+        &render_lineage_variant(LineageVariant {
+            eager_more: true,
+            ..LineageVariant::faithful()
+        }),
+    );
+}
+
+/// Filtering to confirmed claims — as `world_current` legitimately does — hides
+/// what an LLM proposed, which is the question an investigator is asking.
+#[test]
+fn the_lineage_corpus_catches_dropping_unconfirmed_candidates() {
+    assert_variant_is_caught(
+        RuleId::LineageSelection,
+        "confirmed_only",
+        &render_lineage_variant(LineageVariant {
+            confirmed_only: true,
+            ..LineageVariant::faithful()
+        }),
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Coverage of the control table itself
 // ---------------------------------------------------------------------------
@@ -484,6 +672,7 @@ fn every_rule_has_at_least_one_sensitivity_control() {
         RuleId::WorldCurrentFold,
         RuleId::EntityFold,
         RuleId::SubjectSummaryFold,
+        RuleId::LineageSelection,
     ];
     for rule in RuleId::all() {
         assert!(
