@@ -674,6 +674,55 @@ impl SummaryCoverage {
     }
 }
 
+/// **Whether a subject's evidence is whole, given the citations naming it.**
+///
+/// THE coverage derivation, extracted so both the bulk
+/// [`crate::WorldStore::subject_summaries_with_coverage`] and the per-subject
+/// [`crate::WorldStore::subject_summary_with_coverage`] reach the same verdict
+/// by calling the same code rather than by two implementations agreeing.
+///
+/// `citations` must already be narrowed to this subject — by SQL on the
+/// per-subject path, by grouping on the bulk path. Narrowing by SUBJECT is safe
+/// to do outside this function because it is an equality on the same string;
+/// narrowing by KIND is not, and is therefore done in here.
+///
+/// # A citation with no recorded kind matches EVERY kind
+///
+/// `subject_kind` post-dates `compaction_summaries`, so an older citation
+/// carries `None`. That means *"not recorded"*, which cannot be used to exclude
+/// — only to fail to distinguish. Treating it as a non-match would let a
+/// pre-migration citation stop degrading the subject it names, which is a
+/// silent loss in the one direction this tier forbids.
+#[must_use]
+pub fn coverage_from_citations(
+    kind: SummaryKind,
+    citations: &[crate::compaction::DegradedSummary],
+) -> SummaryCoverage {
+    let mine: Vec<_> = citations
+        .iter()
+        .filter(|c| c.subject_kind.as_deref().is_none_or(|k| k == kind.as_str()))
+        .cloned()
+        .collect();
+    if mine.is_empty() {
+        SummaryCoverage::Complete
+    } else {
+        SummaryCoverage::Degraded { summaries: mine }
+    }
+}
+
+/// The kind a citation names, falling back to [`SummaryKind::Unlabelled`].
+///
+/// The fallback is a GUESS and only legitimate for a pre-migration citation
+/// that recorded no discriminant — claiming `Entity` would be inventing one.
+/// Shared by both coverage paths for the same reason the derivation is.
+#[must_use]
+pub fn kind_of_citation(c: &crate::compaction::DegradedSummary) -> SummaryKind {
+    c.subject_kind
+        .as_deref()
+        .and_then(|k| SummaryKind::from_projection_column(k).ok())
+        .unwrap_or(SummaryKind::Unlabelled)
+}
+
 /// One subject's summary **and** how complete it is.
 ///
 /// # Why `retained` is an `Option`

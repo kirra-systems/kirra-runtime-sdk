@@ -199,6 +199,40 @@ impl SemanticVersions {
                     version: version_of(BoundaryRuleId::Admissibility),
                 },
             ]),
+            // 3g follow-up. `history` returns RAW confirmed claims in
+            // generation order — it does not fold and it does not resolve
+            // identity — so `world_current_fold` and `entity_fold` are both
+            // genuinely out, and their absence is asserted rather than assumed
+            // (`the_history_query_depends_on_exactly_one_rule`).
+            //
+            // `answer_admissibility` is IN for a reason worth stating, because
+            // the obvious reading of this set is wrong. History does NOT filter
+            // on admissibility: a claim that has since gone stale is still part
+            // of the historical record, and dropping it would make this family
+            // lie about the past exactly as an admissibility filter on lineage
+            // would hide the evidence an investigator came for.
+            //
+            // It is in the set because history still RESOLVES each claim's
+            // policy, so 3e's fail-closed refusal on unclassified semantics
+            // reaches this family too. Changing the admissibility rule can
+            // therefore change what this query does — it can turn an answer
+            // into a refusal — which is the membership test, and the test does
+            // not care that the rule is consulted for refusal rather than for
+            // filtering.
+            QueryKind::SubjectHistory => Self::new([RuleVersion {
+                rule: ADMISSIBILITY.to_string(),
+                version: version_of(BoundaryRuleId::Admissibility),
+            }]),
+            // 3g follow-up. The subject-summary fold is the whole derivation:
+            // the boundary reads the folded row and the coverage the fold
+            // recorded beside it, adds nothing, and refuses nothing.
+            // `answer_admissibility` is OUT because a summary is an aggregate
+            // over evidence, not a claim served to a caller — there is no
+            // per-claim freshness question to ask of a count.
+            QueryKind::SubjectSummary => Self::new([RuleVersion {
+                rule: RuleId::SubjectSummaryFold.as_str().to_string(),
+                version: store_semantics::version_of(RuleId::SubjectSummaryFold),
+            }]),
             // Box 3f. ONE rule, and the three absences are load-bearing claims
             // rather than an oversight — see `crate::lineage::lineage_semantics`
             // for the argument on each, and
@@ -536,6 +570,75 @@ mod tests {
              SERVE it is a different question from whether it happened, and a \
              lineage hiding rejected events is silent exactly when someone is \
              investigating one"
+        );
+    }
+
+    /// **The history family's set, and the two absences that define it.**
+    ///
+    /// The membership argument here is the subtlest in the module, because the
+    /// one rule present is present for a reason the obvious reading gets wrong.
+    #[test]
+    fn the_history_query_depends_on_exactly_one_rule() {
+        let v = SemanticVersions::for_query(QueryKind::SubjectHistory);
+        let names: Vec<&str> = v.entries().iter().map(|e| e.rule.as_str()).collect();
+        assert_eq!(names, vec![ADMISSIBILITY]);
+
+        assert!(
+            v.version_of("world_current_fold").is_none(),
+            "history returns the RAW confirmed claims in generation order — it \
+             never asks which claim won a key. If it ever returned folded \
+             state, this fold decides what it says and must join the set"
+        );
+        assert!(
+            v.version_of("entity_fold").is_none(),
+            "history is a replay and resolves no identity, which is why its \
+             answers carry NotResolvedInReplay. If it ever resolved objects \
+             through the equivalence graph, this fold must join the set"
+        );
+    }
+
+    /// **`answer_admissibility` is in history's set for REFUSAL, not filtering.**
+    ///
+    /// Separated from the set assertion above because the two would otherwise
+    /// pass as one fact, and they are not one fact. A future reader who sees
+    /// admissibility in this set will reasonably infer that history filters on
+    /// it — and "fixing" the boundary to match that inference would make
+    /// history hide claims that were genuinely made.
+    ///
+    /// The membership test is *"can changing this rule change what the query
+    /// does"*. It can: an unclassified claim turns a history answer into a
+    /// refusal. The test does not care that the rule is consulted for
+    /// fail-closed refusal rather than for dropping rows.
+    #[test]
+    fn history_shares_admissibility_with_the_answer_families_deliberately() {
+        let history = SemanticVersions::for_query(QueryKind::SubjectHistory);
+        let current = SemanticVersions::for_query(QueryKind::CurrentSubject);
+        assert_eq!(
+            history.version_of(ADMISSIBILITY),
+            current.version_of(ADMISSIBILITY),
+            "both families resolve the SAME admissibility rule, so a version \
+             bump must move both; they differ in what they do with the verdict, \
+             which is a property of the boundary and not of the rule"
+        );
+    }
+
+    /// The subject-summary family derives from the fold and nothing else.
+    #[test]
+    fn the_subject_summary_query_depends_on_exactly_one_rule() {
+        let v = SemanticVersions::for_query(QueryKind::SubjectSummary);
+        let names: Vec<&str> = v.entries().iter().map(|e| e.rule.as_str()).collect();
+        assert_eq!(names, vec!["subject_summary_fold"]);
+
+        assert!(
+            v.version_of(ADMISSIBILITY).is_none(),
+            "a summary is an aggregate over evidence, not a claim served to a \
+             caller — there is no per-claim freshness question to ask of a \
+             count, so there is nothing for this rule to decide"
+        );
+        assert!(
+            v.version_of("world_current_fold").is_none(),
+            "the subject summary folds events into aggregates directly; it does \
+             not read the claim projection"
         );
     }
 

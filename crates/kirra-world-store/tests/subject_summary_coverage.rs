@@ -358,3 +358,68 @@ fn a_pre_migration_citation_still_degrades_its_subject() {
     assert_eq!(a.reconciled_observation_count(), 4);
     clean(&p);
 }
+
+/// **The tripwire that lets the per-subject path exist at all.**
+///
+/// `subject_summary_with_coverage` narrows both its sources in SQL;
+/// `subject_summaries_with_coverage` loads the whole store and groups. They
+/// share the coverage derivation (`coverage_from_citations`), so they SHOULD be
+/// identical — this asserts it rather than assuming it, because a disagreement
+/// means a subject reported `Complete` by one path and `Degraded` by the other,
+/// and nothing else in the system would notice.
+///
+/// Swept over EVERY subject the bulk call knows about — including
+/// `window-only`, which has no retained row at all and exists only through its
+/// citation, the case a naive per-subject read drops.
+///
+/// Added on #1441 review for the same reason #1440 added
+/// `narrowing_never_removes_what_the_rule_would_keep`: a narrowing is only safe
+/// when something watches it.
+#[test]
+fn the_narrowed_and_bulk_coverage_paths_agree() {
+    let path = tmp("coverage-agreement");
+    let mut s = WorldStore::open(&path).expect("open");
+    seed_mixed(&mut s);
+    // No `fold()`: building `world_current` creates a protected projection
+    // head that makes generations 1..=5 uncompactable. The sibling fixtures in
+    // this file omit it for the same reason.
+    s.fold_subject_summary().expect("fold");
+    s.compact_range(1, 5, T0 + 90_000).expect("compact");
+    s.rebuild_subject_summary().expect("rebuild");
+
+    let bulk = s.subject_summaries_with_coverage().expect("bulk coverage");
+    assert!(
+        bulk.iter().any(|a| a.coverage.is_degraded()),
+        "the fixture must degrade something, or agreement is trivial"
+    );
+    assert!(
+        bulk.iter().any(|a| a.retained.is_none()),
+        "the fixture must include a citation-only subject, or the hardest arm \
+         of the narrowed path is never exercised"
+    );
+
+    let mut checked = 0;
+    for expected in &bulk {
+        let narrowed = s
+            .subject_summary_with_coverage(&expected.subject)
+            .expect("narrowed coverage")
+            .expect("the bulk call named this subject, so the narrowed one must find it");
+        assert_eq!(
+            &narrowed, expected,
+            "narrowed and bulk disagree for {} — the two coverage paths have drifted",
+            expected.subject
+        );
+        checked += 1;
+    }
+    assert!(
+        checked >= 3,
+        "the sweep must cover several subjects, got {checked}"
+    );
+
+    assert!(
+        s.subject_summary_with_coverage("never_heard_of_it")
+            .expect("narrowed coverage")
+            .is_none(),
+        "a subject with neither a retained row nor a citation is absent, not degraded"
+    );
+}
