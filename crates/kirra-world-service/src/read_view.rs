@@ -573,15 +573,27 @@ impl<'a> WorldView<'a> {
         let clock = now_ms.max(0).unsigned_abs();
         let mut answers: Vec<WorldAnswer> = Vec::new();
         for c in claims.iter() {
+            // ONE resolution per claim, used by both the admissibility test and
+            // the binding. Resolving twice was not merely wasteful: it made the
+            // fail-closed rule depend on two lookups agreeing, when the whole
+            // point of `policy_for` is that there is one place to refuse.
+            //
             // `?`, NOT a swallowed refusal. A first draft filtered with
             // `.unwrap_or(false)`, which dropped an unclassified claim silently
             // and turned a policy fault into a narrower answer — the exact
             // failure `one_unruled_claim_refuses_the_whole_query_rather_than_narrowing_it`
             // exists to catch, and it caught it.
-            if !self.admissible(c, clock)? {
+            let budget = self.policy_for(c)?.budget();
+            if !Self::is_admissible(c, clock, budget) {
                 continue;
             }
-            answers.push(self.bind(c, clock, &identity, identity_is_current)?);
+            answers.push(Self::bind(
+                c,
+                clock,
+                budget,
+                &identity,
+                identity_is_current,
+            )?);
         }
 
         let lookup = if answers.is_empty() {
@@ -634,13 +646,16 @@ impl<'a> WorldView<'a> {
         let clock = valid_at_ms.max(0).unsigned_abs();
         let mut answers = Vec::new();
         for claim in &answer.claims {
-            if !self.admissible(claim, clock)? {
+            // Resolved once and shared by the admissibility test and the
+            // assembly below — see the note in `ask`.
+            let budget = self.policy_for(claim)?.budget();
+            if !Self::is_admissible(claim, clock, budget) {
                 continue;
             }
             answers.push(assemble(
                 claim,
                 clock,
-                self.policy_for(claim)?.budget(),
+                budget,
                 // `true` for the same reason a pinned composition passes it:
                 // the historical graph was replayed from the log up to the cut,
                 // so it cannot lag it. `identity_is_current` answers a question
@@ -673,17 +688,15 @@ impl<'a> WorldView<'a> {
     /// The single place a claim's semantics become a freshness policy, so the
     /// fail-closed rule cannot be routed around by a second lookup that forgot
     /// to refuse.
+    ///
+    /// Every caller resolves it **once per claim** and passes the resulting
+    /// budget onward. An earlier draft called this twice — once behind an
+    /// `admissible` wrapper and again when binding — which meant the refusal
+    /// that makes 3e fail closed was evaluated twice for one claim, and would
+    /// have kept working had one of the two sites stopped refusing. Caught in
+    /// review on #1439.
     fn policy_for(&self, claim: &ProjectedClaim) -> Result<FreshnessPolicy, AskError> {
         resolve_policy(self.freshness, &claim.kind, claim.predicate.as_deref())
-    }
-
-    /// Admissibility at this claim's ruled policy.
-    fn admissible(&self, claim: &ProjectedClaim, clock: u64) -> Result<bool, AskError> {
-        Ok(Self::is_admissible(
-            claim,
-            clock,
-            self.policy_for(claim)?.budget(),
-        ))
     }
 
     // SEMANTICS-PIN-BEGIN: answer_admissibility
@@ -715,17 +728,20 @@ impl<'a> WorldView<'a> {
     /// Delegates the field-by-field construction to [`assemble`], which is the
     /// one place a `WorldAnswer` is built; this adds only the identity
     /// resolution a live read can do and a pinned one cannot.
+    ///
+    /// Takes the budget rather than resolving it, so the caller's single
+    /// [`Self::policy_for`] call is the only one — see that method.
     fn bind(
-        &self,
         claim: &ProjectedClaim,
         clock: u64,
+        budget: Option<u64>,
         identity: &IdentityView,
         identity_is_current: bool,
     ) -> Result<WorldAnswer, AskError> {
         assemble(
             claim,
             clock,
-            self.policy_for(claim)?.budget(),
+            budget,
             Self::resolve_object(claim.object.as_deref(), identity, identity_is_current),
         )
     }

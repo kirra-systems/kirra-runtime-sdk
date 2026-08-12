@@ -100,8 +100,13 @@ fn store_with_both_dispositions(name: &str) -> (WorldStore, std::path::PathBuf) 
     (store, path)
 }
 
+/// A view under the RULED source — the configuration every refusal test needs.
+fn store_view(store: &WorldStore) -> WorldView<'_> {
+    WorldView::new(store, FreshnessSource::Ruled)
+}
+
 fn validity_of(store: &WorldStore, predicate: &str) -> Validity {
-    let view = WorldView::new(store, FreshnessSource::Ruled);
+    let view = store_view(store);
     let composed = view.ask("package_17", MUCH_LATER).expect("ask");
     let WorldLookup::Answered(answers) = composed.lookup() else {
         panic!("the fixture must answer, got {:?}", composed.lookup());
@@ -235,6 +240,79 @@ fn one_unruled_claim_refuses_the_whole_query_rather_than_narrowing_it() {
         "a partially-ruled subject must refuse, not serve the ruled half and \
          quietly omit the rest"
     );
+
+    drop(store);
+    cleanup(&path);
+}
+
+/// **The bitemporal family refuses too**, and nothing was pinning that.
+///
+/// `ask_as_of` carries the same obligation as `ask` — unclassified semantics
+/// refuse — and it was resolving the policy through the same `policy_for`, so
+/// it looked covered. It was not. Restructuring the loop in review (#1439) to
+/// resolve the policy once per claim made the gap visible: a mutation that
+/// swallowed the refusal in `ask_as_of` reddened NOTHING, while the same
+/// mutation in `ask` reddened three tests.
+///
+/// A rule enforced on one query family and merely *believed* on the other is
+/// how the second family quietly stops enforcing it.
+#[test]
+fn the_bitemporal_family_refuses_an_unclassified_claim_as_well() {
+    let path = tmp("asof-unruled");
+    let mut store = WorldStore::open(&path).expect("open");
+    claim(&mut store, "unruled", "mission", "invented_predicate");
+    store.fold().expect("fold");
+
+    match store_view(&store).ask_as_of("package_17", MUCH_LATER, MUCH_LATER) {
+        Err(AskError::UnclassifiedFreshness { kind, predicate }) => {
+            assert_eq!(kind, "mission");
+            assert_eq!(predicate.as_deref(), Some("invented_predicate"));
+        }
+        Ok(answer) => panic!(
+            "an unruled class was SERVED by the historical path: {:?}",
+            answer.lookup()
+        ),
+        Err(other) => panic!("wrong refusal: {other:?}"),
+    }
+
+    drop(store);
+    cleanup(&path);
+}
+
+/// The same non-narrowing rule on the historical axis: a ruled claim beside an
+/// unruled one refuses the whole query rather than serving the ruled half.
+#[test]
+fn the_bitemporal_family_refuses_rather_than_narrowing() {
+    let path = tmp("asof-mixed");
+    let mut store = WorldStore::open(&path).expect("open");
+    claim(&mut store, "seen", "mission", "last_seen_at"); // ruled
+    claim(&mut store, "unruled", "mission", "invented_predicate"); // not
+    store.fold().expect("fold");
+
+    assert!(
+        store_view(&store)
+            .ask_as_of("package_17", MUCH_LATER, MUCH_LATER)
+            .is_err(),
+        "a partially-ruled subject must refuse on the historical axis too, not \
+         serve the ruled half and quietly omit the rest"
+    );
+
+    drop(store);
+    cleanup(&path);
+}
+
+/// The pair above is only meaningful if the fixture ANSWERS when everything is
+/// ruled — otherwise both would pass against a path that refuses unconditionally.
+#[test]
+fn the_bitemporal_family_answers_when_every_claim_is_ruled() {
+    let (store, path) = store_with_both_dispositions("asof-ok");
+    let lookup = store_view(&store)
+        .ask_as_of("package_17", MUCH_LATER, MUCH_LATER)
+        .expect("a fully-ruled subject must answer");
+    let WorldLookup::Answered(answers) = lookup.lookup() else {
+        panic!("the fixture must answer, got {:?}", lookup.lookup());
+    };
+    assert_eq!(answers.len(), 2, "both ruled claims must be served");
 
     drop(store);
     cleanup(&path);

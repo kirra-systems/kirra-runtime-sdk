@@ -42,6 +42,9 @@ _KIND = re.compile(r'\bkind:\s*"([^"]*)"')
 _KIND_VAR = re.compile(r"\bkind\s*,")
 _PRED_SOME = re.compile(r'\bpredicate:\s*Some\("([^"]*)"\)')
 _PRED_NONE = re.compile(r"\bpredicate:\s*None\b")
+# Any `predicate:` field at all, so a form neither literal pattern matches is
+# REPORTED rather than mistaken for "this event has no predicate".
+_PRED_ANY = re.compile(r"\bpredicate:")
 
 # One row of the RULED table.
 _RULED_ROW = re.compile(
@@ -92,17 +95,34 @@ def written_classes(sources: dict[str, str]) -> set[tuple[str, str | None]]:
     return found
 
 
-def dynamic_event_sites(sources: dict[str, str]) -> list[str]:
-    """Files whose `NewEvent` literals take `kind` from a variable.
+def opaque_event_sites(sources: dict[str, str]) -> list[str]:
+    """Files whose `NewEvent` literals this gate cannot read a class out of.
 
-    Reported rather than ignored. This gate reads literals, so a variable
-    `kind` is a class it cannot see — and a gate that quietly skipped them
+    Reported rather than ignored. This gate reads LITERALS, so a class built
+    from variables is one it cannot see — and a gate that quietly skipped them
     would advertise coverage it does not have.
+
+    # Both halves, and the first draft checked only one
+
+    It looked at `kind` alone, which left `predicate: Some(p)` — a variable
+    predicate beside a literal kind — silently invisible. That is precisely the
+    failure this function's own docstring claims to prevent, so it was the worst
+    possible place for the omission. Caught in review on #1439.
+
+    The test is now "did a literal come out for BOTH halves", which is the
+    question that actually matters: either half being dynamic hides the class.
     """
     out = []
     for name, text in sources.items():
         for m in _EVENT.finditer(text):
-            if not _KIND.search(m.group(1)) and _KIND_VAR.search(m.group(1)):
+            body = m.group(1)
+            kind_opaque = not _KIND.search(body) and _KIND_VAR.search(body)
+            predicate_opaque = (
+                _PRED_ANY.search(body)
+                and not _PRED_SOME.search(body)
+                and not _PRED_NONE.search(body)
+            )
+            if kind_opaque or predicate_opaque:
                 out.append(name)
                 break
     return sorted(out)
@@ -160,17 +180,17 @@ def main() -> int:
             print(f"  - {p}\n", file=sys.stderr)
         return 1
 
-    dynamic = dynamic_event_sites(sources)
+    opaque = opaque_event_sites(sources)
     print(
         f"OK: {len(written)} written class(es); "
         f"{len(ruled)} ruled, {len(baselined)} knowingly unruled"
     )
-    if dynamic:
+    if opaque:
         print(
-            "  note: these files build `NewEvent` with a non-literal `kind`, "
-            "so their classes are not visible to this gate:"
+            "  note: these files build `NewEvent` with a non-literal `kind` or "
+            "`predicate`, so their classes are not visible to this gate:"
         )
-        for d in dynamic:
+        for d in opaque:
             print(f"    {d}")
     return 0
 
@@ -250,13 +270,26 @@ def _self_test() -> int:
         })
         '''
         assert written_classes({"d.rs": src}) == set(), "a variable kind was invented"
-        assert dynamic_event_sites({"d.rs": src}) == ["d.rs"]
+        assert opaque_event_sites({"d.rs": src}) == ["d.rs"]
+
+    def t_a_dynamic_PREDICATE_is_reported_too():
+        # The hole the first draft had: a literal kind beside a VARIABLE
+        # predicate produced no class and was reported as fully covered.
+        src = 'store.append(&NewEvent {\n  kind: "mission",\n  predicate: Some(predicate),\n})'
+        assert written_classes({"d.rs": src}) == set(), "a variable predicate was invented"
+        assert opaque_event_sites({"d.rs": src}) == ["d.rs"], (
+            "a variable predicate beside a literal kind was silently skipped — "
+            "the gate would advertise coverage it does not have"
+        )
+
+    def t_a_fully_literal_event_is_not_reported_as_opaque():
+        assert opaque_event_sites({"a.rs": EVENT_SRC}) == []
 
     cases = [(n, f) for n, f in sorted(locals().items()) if n.startswith("t_") and callable(f)]
     for name, fn in cases:
         case(name, fn)
 
-    expected = 9
+    expected = 11
     if len(cases) != expected:
         print(
             f"SELF-TEST HARNESS: discovered {len(cases)} cases, expected {expected}.",
