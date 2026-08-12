@@ -1,6 +1,6 @@
 {
   "_comment": [
-    "Tier 3 box 3d — the boundedness classification of the store's read surface.",
+    "Tier 3 box 3d \u2014 the boundedness classification of the store's read surface.",
     "",
     "KIRRA-WM-ANSWER-IDENTITY-001 clause 2 is 'queries are bounded'. Three defects",
     "in three consecutive PRs showed that per-query vigilance does not enforce it:",
@@ -49,8 +49,8 @@
       "why": "One subject at one bitemporal point. Same PRIMARY KEY bound as `current`."
     },
     "as_of_composed": {
-      "class": "bounded",
-      "why": "`as_of` plus the identity graph AT that cut, composed for one subject."
+      "class": "unbounded",
+      "why": "Composes `as_of` (bounded) with `identity_view_at` (the whole graph). The claims half is bounded and the identity half is not, so the composition is not \u2014 a bounded half does not bound a composition."
     },
     "candidates": {
       "class": "unbounded",
@@ -72,12 +72,30 @@
       "class": "unbounded",
       "why": "The whole claims projection. Grows with the number of subjects."
     },
-    "count": { "class": "operational", "why": "A scalar row count." },
-    "has_citations": { "class": "operational", "why": "Existence probe." },
-    "has_entity_projection": { "class": "operational", "why": "Existence probe." },
-    "has_projections": { "class": "operational", "why": "Existence probe." },
-    "has_subject_summary": { "class": "operational", "why": "Existence probe." },
-    "has_summaries": { "class": "operational", "why": "Existence probe." },
+    "count": {
+      "class": "operational",
+      "why": "A scalar row count."
+    },
+    "has_citations": {
+      "class": "operational",
+      "why": "Existence probe."
+    },
+    "has_entity_projection": {
+      "class": "operational",
+      "why": "Existence probe."
+    },
+    "has_projections": {
+      "class": "operational",
+      "why": "Existence probe."
+    },
+    "has_subject_summary": {
+      "class": "operational",
+      "why": "Existence probe."
+    },
+    "has_summaries": {
+      "class": "operational",
+      "why": "Existence probe."
+    },
     "head_chain": {
       "class": "bounded",
       "why": "One row: the log head."
@@ -110,15 +128,42 @@
       "class": "operational",
       "why": "The fold's own loader."
     },
-    "minted_entity_id_count": { "class": "operational", "why": "A scalar count." },
-    "projected_row_count": { "class": "operational", "why": "A scalar count." },
-    "projection_coordinate": { "class": "operational", "why": "Checkpoint metadata." },
-    "projection_generation": { "class": "operational", "why": "Checkpoint metadata." },
-    "projection_state_digest": { "class": "operational", "why": "Checkpoint metadata." },
-    "entity_projection_generation": { "class": "operational", "why": "Checkpoint metadata." },
-    "entity_projection_state_digest": { "class": "operational", "why": "Checkpoint metadata." },
-    "subject_summary_generation": { "class": "operational", "why": "Checkpoint metadata." },
-    "subject_summary_state_digest": { "class": "operational", "why": "Checkpoint metadata." },
+    "minted_entity_id_count": {
+      "class": "operational",
+      "why": "A scalar count."
+    },
+    "projected_row_count": {
+      "class": "operational",
+      "why": "A scalar count."
+    },
+    "projection_coordinate": {
+      "class": "operational",
+      "why": "Checkpoint metadata."
+    },
+    "projection_generation": {
+      "class": "operational",
+      "why": "Checkpoint metadata."
+    },
+    "projection_state_digest": {
+      "class": "operational",
+      "why": "Checkpoint metadata."
+    },
+    "entity_projection_generation": {
+      "class": "operational",
+      "why": "Checkpoint metadata."
+    },
+    "entity_projection_state_digest": {
+      "class": "operational",
+      "why": "Checkpoint metadata."
+    },
+    "subject_summary_generation": {
+      "class": "operational",
+      "why": "Checkpoint metadata."
+    },
+    "subject_summary_state_digest": {
+      "class": "operational",
+      "why": "Checkpoint metadata."
+    },
     "read_at_generation": {
       "class": "unbounded",
       "why": "The whole claims projection reconstructed at a generation. Pinning the coordinate bounds WHEN, not HOW MUCH -- the same trap as `identity_view_at`."
@@ -132,14 +177,17 @@
       "why": "Returns a HANDLE, reading nothing. The rows come from `ReadSnapshot`'s own methods, which are classified separately below -- a snapshot must not become a way to reach an unbounded read without being seen."
     },
     "resolve_at": {
-      "class": "bounded",
-      "why": "One entity id at one cut."
+      "class": "unbounded",
+      "why": "SIGNATURE-BOUNDED, IMPLEMENTATION-UNBOUNDED \u2014 the literal defect shape, in the store. `resolve_at(id, cut)` takes one entity id and reads like a point lookup, but its body is `self.identity_view_at(cut)?.resolve_at(id)`: it materialises the WHOLE equivalence graph and then indexes it. Classified `bounded` on first pass from the signature alone, which is exactly the mistake the transitive check exists to catch, and it caught it."
     },
     "resolved_entities": {
       "class": "unbounded",
       "why": "Every summarised entity in the store."
     },
-    "schema_version": { "class": "operational", "why": "PRAGMA read." },
+    "schema_version": {
+      "class": "operational",
+      "why": "PRAGMA read."
+    },
     "subject_summaries": {
       "class": "unbounded",
       "why": "Every retained summary row."
@@ -168,25 +216,64 @@
       "class": "operational",
       "why": "The audit walk. WM_SCOPE names it explicitly as a legitimate reader below the engine."
     },
-    "append": { "class": "operational", "why": "Write path." },
-    "append_adjudication": { "class": "operational", "why": "Write path." },
-    "compact_range": { "class": "operational", "why": "Retention mutation." },
-    "fold": { "class": "operational", "why": "Projection fold." },
-    "fold_entity_projection": { "class": "operational", "why": "Projection fold." },
-    "fold_subject_summary": { "class": "operational", "why": "Projection fold." },
-    "mint_entity_id": { "class": "operational", "why": "Id minting." },
-    "open": { "class": "operational", "why": "Constructor." },
-    "rebuild_entity_projection": { "class": "operational", "why": "Projection rebuild." },
-    "rebuild_projections": { "class": "operational", "why": "Projection rebuild." },
-    "rebuild_subject_summary": { "class": "operational", "why": "Projection rebuild." }
+    "append": {
+      "class": "operational",
+      "why": "Write path."
+    },
+    "append_adjudication": {
+      "class": "operational",
+      "why": "Write path."
+    },
+    "compact_range": {
+      "class": "operational",
+      "why": "Retention mutation."
+    },
+    "fold": {
+      "class": "operational",
+      "why": "Projection fold."
+    },
+    "fold_entity_projection": {
+      "class": "operational",
+      "why": "Projection fold."
+    },
+    "fold_subject_summary": {
+      "class": "operational",
+      "why": "Projection fold."
+    },
+    "mint_entity_id": {
+      "class": "operational",
+      "why": "Id minting."
+    },
+    "open": {
+      "class": "operational",
+      "why": "Constructor."
+    },
+    "rebuild_entity_projection": {
+      "class": "operational",
+      "why": "Projection rebuild."
+    },
+    "rebuild_projections": {
+      "class": "operational",
+      "why": "Projection rebuild."
+    },
+    "rebuild_subject_summary": {
+      "class": "operational",
+      "why": "Projection rebuild."
+    }
   },
   "read_snapshot": {
     "current": {
       "class": "bounded",
       "why": "The snapshot-scoped `current`; same PRIMARY KEY bound."
     },
-    "coordinate": { "class": "operational", "why": "Checkpoint metadata." },
-    "identity_is_current": { "class": "operational", "why": "A boolean freshness probe." },
+    "coordinate": {
+      "class": "operational",
+      "why": "Checkpoint metadata."
+    },
+    "identity_is_current": {
+      "class": "operational",
+      "why": "A boolean freshness probe."
+    },
     "identity_view": {
       "class": "unbounded",
       "why": "The whole entity graph, snapshot-scoped. A snapshot bounds COHERENCE, not size."

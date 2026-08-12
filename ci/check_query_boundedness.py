@@ -59,6 +59,8 @@ BASELINE_PATH = REPO_ROOT / "ci" / "store_boundedness_baseline.json"
 
 STORE_LIB = REPO_ROOT / "crates" / "kirra-world-store" / "src" / "lib.rs"
 STORE_SNAPSHOT = REPO_ROOT / "crates" / "kirra-world-store" / "src" / "snapshot.rs"
+STORE_SRC = REPO_ROOT / "crates" / "kirra-world-store" / "src"
+BOUNDARY_SRC = REPO_ROOT / "crates" / "kirra-world-service" / "src"
 
 VALID_CLASSES = {"bounded", "unbounded", "operational"}
 
@@ -80,6 +82,24 @@ def _impl_bodies(text: str, header_re: str) -> list[str]:
             i += 1
         bodies.append(text[m.end() : i])
     return bodies
+
+
+def _fn_bodies(impl_body: str) -> list[tuple[str, str]]:
+    """(name, body) for each `pub fn` in an impl body, brace-matched."""
+    out = []
+    for m in re.finditer(r"\n    pub fn ([a-z_0-9]+)\s*(?:<[^>]*>)?\s*\(", impl_body):
+        i = impl_body.find("{", m.end())
+        if i < 0:
+            continue
+        j, depth = i + 1, 1
+        while j < len(impl_body) and depth > 0:
+            if impl_body[j] == "{":
+                depth += 1
+            elif impl_body[j] == "}":
+                depth -= 1
+            j += 1
+        out.append((m.group(1), impl_body[i:j]))
+    return out
 
 
 def public_methods(path: Path, header_re: str) -> set[str]:
@@ -162,19 +182,20 @@ def run(verbose: bool = False) -> list[str]:
             if not spec.get("why", "").strip():
                 failures.append(f"{surface}::{name} has no reason recorded.")
 
-    # 2. No interactive path may call an unbounded method.
+    # 2. NOTHING in the boundary crate may call an unbounded method.
+    #
+    # The whole crate, not a list of "interactive" files. A per-file list is
+    # exactly the hole a relocated call slips through: move the unbounded fetch
+    # into a private helper in a fourth file and the gate goes green while the
+    # invariant stays false. The boundary crate IS the request path, so every
+    # file in it is checked and there is no file to move the call to.
     forbidden = unbounded_names(baseline)
-    for rel, role in baseline["interactive_paths"].items():
-        if rel.startswith("_"):
-            continue
-        path = REPO_ROOT / rel
-        if not path.exists():
-            failures.append(f"{rel} is named as an interactive path but does not exist.")
-            continue
+    for path in sorted(BOUNDARY_SRC.rglob("*.rs")):
+        rel = path.relative_to(REPO_ROOT)
         for line_no, method, line in scan_interactive(path.read_text(), forbidden):
             failures.append(
-                f"{rel}:{line_no} — interactive path ({role}) calls the UNBOUNDED "
-                f"store method `{method}`.\n"
+                f"{rel}:{line_no} — the answer boundary calls the UNBOUNDED store "
+                f"method `{method}`.\n"
                 f"      {line}\n"
                 f"    A bounded-looking query standing on an unbounded read is the "
                 f"exact defect class of #1440 and #1441: the answer is bounded, the "
@@ -182,6 +203,33 @@ def run(verbose: bool = False) -> list[str]:
                 f"    Use the bounded equivalent, or narrow the fetch in SQL and add "
                 f"an agreement test."
             )
+
+    # 3. A store method classified `bounded` may not CALL an unbounded one.
+    #
+    # The other half of the relocation hole, and the one that matters more:
+    # without it, `pub fn tidy(subject) { self.everything() }` could be declared
+    # bounded and the boundary could call it in good faith. The classification
+    # would be a claim nobody checks — which is what a denylist would have been.
+    for path in sorted(STORE_SRC.rglob("*.rs")):
+        text = path.read_text()
+        for surface, header in (
+            ("world_store", r"^impl WorldStore \{"),
+            ("read_snapshot", r"^impl<'a> ReadSnapshot<'a> \{"),
+        ):
+            for body in _impl_bodies(text, header):
+                for fn_name, fn_body in _fn_bodies(body):
+                    spec = baseline[surface].get(fn_name)
+                    if not spec or spec["class"] != "bounded":
+                        continue
+                    for line_no, method, line in scan_interactive(fn_body, forbidden):
+                        failures.append(
+                            f"{surface}::{fn_name} is classified `bounded` but calls "
+                            f"the UNBOUNDED `{method}`.\n"
+                            f"      {line}\n"
+                            f"    A bounded classification standing on an unbounded "
+                            f"call makes the classification a claim nobody checks, and "
+                            f"lets the boundary violate the invariant in good faith."
+                        )
 
     if verbose:
         for surface, names in sorted(found.items()):
@@ -251,7 +299,28 @@ def self_test() -> int:
     else:
         print("self-test: prose naming an unbounded method → not flagged")
 
-    # (d) An unclassified method must fail, since that is the generalisation.
+    # (d) THE RELOCATION FIXTURE: a store method that LOOKS bounded and calls an
+    #     unbounded one. Without this the invariant can be made green without
+    #     being made true — move the unbounded fetch behind a bounded-looking
+    #     helper and the boundary calls it in good faith.
+    #
+    #     Not hypothetical: `resolve_at(id, cut)` is exactly this shape and was
+    #     classified `bounded` from its signature on the first pass. This check
+    #     is what corrected it.
+    relocated = """
+    pub fn resolve_at(&self, id: &EntityId, as_known_at_ms: i64) -> Answer {
+        Ok(self.identity_view_at(as_known_at_ms)?.resolve_at(id))
+    }
+    """
+    if not scan_interactive(relocated, forbidden):
+        print("SELF-TEST FAIL: a bounded-LOOKING helper wrapping an unbounded "
+              "call was NOT caught — the invariant could be made green without "
+              "being made true.")
+        failed = 1
+    else:
+        print("self-test: bounded-looking helper over an unbounded call → caught")
+
+    # (e) An unclassified method must fail, since that is the generalisation.
     stripped = {k: v for k, v in baseline["world_store"].items() if k != "history"}
     if "history" in stripped:
         print("SELF-TEST FAIL: fixture construction error.")
