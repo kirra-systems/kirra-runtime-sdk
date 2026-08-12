@@ -2042,7 +2042,9 @@ pressure that produced every stale claim this box already documents.
       (`lineage_selection`, `RuleId`'s first non-reducer); compaction degrades
       rather than refusing; `provenance` is carried verbatim, since walking it
       is the Tier 4 structure `KIRRA-WM-EXPLAIN-TIER-001` keeps out.
-- [x] **3g — Degradation propagation.** ✅ **DONE 2026-08-11** — see *"3g:
+- [x] **3g — Degradation propagation.** ✅ **DONE 2026-08-11**, follow-up closed
+      **2026-08-12** (`history` + `subject_summary`; see *"3g follow-up closed:
+      two families, two mechanisms"*) — see *"3g:
       the boundary finally carries completeness"* below. Every answer family preserves
       `Full`/`Degraded` **independently of the payload outcome**, not just
       `subject_summary`. Retention may reduce answer precision; Tier 3 makes the
@@ -2973,8 +2975,8 @@ after evidence was lost.**
 **Scope, stated because it is narrower than the box's wording.** `ask_as_of` is
 one family. 3g says *every* family; the ones that exist at the boundary are `ask`
 (structurally `Full`, and now knowably so) and this. `history` and
-`subject_summary` remain unpropagated, and a boundary query for them is the
-follow-up. A replayed answer also does not resolve object identity —
+`subject_summary` were unpropagated at the time of writing; the follow-up below
+closed both. A replayed answer also does not resolve object identity —
 `ObjectIdentity::NotResolvedInReplay`, renamed from `NotResolvedAtPin` since it
 now covers both replay families. Here the axes would actually AGREE (both this
 query and `identity_view_at` cut on transaction time), so that is a scope
@@ -3405,6 +3407,120 @@ once an applicable entry exists. The `Caller` variant stays as the honest interi
 while `RULED` is small.
 
 ---
+
+### 3g follow-up closed: two families, two mechanisms — 2026-08-12
+
+3g shipped with a stated limit — `ask_as_of` carried completeness and `history`
+and `subject_summary` did not. This closes both, under one acceptance rule:
+
+> A boundary answer must never report `Full` when evidence required by that
+> family may have been removed. Conservative `Degraded` is allowed; silent loss
+> is not.
+
+#### Neither family lost completeness — neither family EXISTED at the boundary
+
+`WorldView` exposed exactly `ask` and `ask_as_of`, so "unpropagated" understated
+it: there was no `history` query and no `subject_summary` query to propagate
+through. That made the acceptance rule a construction constraint rather than a
+migration, and it is why this landed as two new queries rather than two patches.
+
+#### The two mechanisms are genuinely different, and forcing one type would have lied
+
+Both PROPAGATE rather than recompute — a second verdict at the boundary is a
+second implementation of the rule governing whether an answer can be trusted.
+But they propagate different types, because the store computes them from
+different things:
+
+| Family | Signal | Computed from |
+|---|---|---|
+| `history` | `Resolution` | citations overlapping a queried RANGE |
+| `subject_summary` | `SummaryCoverage` | the evidence behind ONE folded row |
+
+Coercing `SummaryCoverage::Degraded { summaries }` into
+`Resolution::Degraded { spans, summaries }` requires inventing `spans: vec![]`,
+which reads as *"no compacted span bore on this"* — false, and false in the
+reassuring direction. So `SummaryLookup` carries the native type. **One source
+of truth per family beats one type across families.**
+
+#### `answer_admissibility` is in history's version set for REFUSAL, not filtering
+
+The subtlest membership call in the module, and the one most likely to be
+"fixed" wrongly. History does **not** filter on admissibility: a claim `ask`
+declines to serve is still part of the record, and hiding it would make history
+lie about the past exactly as an admissibility filter on a lineage would hide
+the evidence an investigator came for.
+
+It is in the set because history still RESOLVES each claim's policy, so 3e's
+fail-closed refusal on unclassified semantics reaches this family. Changing the
+rule can turn a history answer into a refusal — that is the membership test, and
+the test does not care that the rule is consulted for refusal rather than for
+dropping rows. Two separate tests pin the two halves, because as one assertion
+they would read as one fact.
+
+`world_current_fold` and `entity_fold` are both OUT and asserted so: history
+returns raw confirmed claims in generation order, folding nothing and resolving
+no identity.
+
+#### The conservative citation rule is PINNED, not sharpened
+
+`resolution_for`'s citation check is store-wide, so one retained citation
+degrades every subject's history — including subjects the compacted span never
+touched. The tempting cleanup is to scope it to the queried subject. That would
+convert a conservative signal into an exact-loss detector, and an exact-loss
+detector that is wrong is silent.
+
+The consequence is structural rather than stylistic: the `Full` arm is only
+reachable in a store with **no citations at all**, so the two history controls
+need two separate stores. A reader who consolidates them will find the Full arm
+unreachable, which is the intended tripwire.
+
+#### Numerical reconciliation is not evidence coverage
+
+The invariant this half exists for:
+
+> Successful numerical reconciliation does not imply complete evidence coverage.
+
+`reconciled_observation_count` and `reconciled_first_observed_ms` genuinely
+reconstruct their pre-compaction values from citations. `provenance_head` and
+`last_event_id` cannot be reconstructed at all — a citation names a span, not
+the events inside it — and for a fully compacted subject `retained` is `None`
+and those fields do not exist. `SummaryLookup::is_degraded` therefore reads
+`coverage` and only `coverage`; there is deliberately no constructor taking a
+reconciliation result.
+
+#### Six mutations, and the one that separates two controls
+
+| # | Mutation | Reds |
+|---|---|---|
+| 1 | history: force `Full` | `a_compacted_history_reports_degraded` |
+| 2 | history: force `Degraded` | `an_uncompacted_history_reports_full` |
+| 3 | summary: `is_degraded` → `false` | both summary-degraded controls |
+| 4 | summary: `is_degraded` defers to reconciliation | both summary-degraded controls |
+| 5 | history: swallow the `policy_for` refusal | `an_unruled_claim_refuses_the_whole_history` |
+| 6 | fixture: drop the post-compaction rebuild | `reconciliation_does_not_upgrade_completeness` ONLY |
+
+Mutations 3 and 4 red the same pair, so on mutation evidence alone the
+reconciliation control looks redundant. Mutation 6 is the separating case,
+reddening it alone at `left: 4, right: 3`: what the extra control buys is proof
+that reconstruction genuinely SUCCEEDS in the fixture, so the degraded verdict
+is held *despite* working reconciliation rather than alongside broken
+reconciliation.
+
+#### Two fixture facts that cost a red test each
+
+Recorded because the wrong version of both looks entirely reasonable:
+
+* **`fold()` does not build `subject_summary`.** `fold_subject_summary()` is a
+  separate call, and a fixture running only the first produces ZERO summaries —
+  every subject-summary control would then pass vacuously against a store that
+  had never summarised anything.
+* **The summary must be rebuilt AFTER compaction.** Folding first leaves the
+  pre-compaction total in the row and the citation adds the removed event back
+  on top of a count that never lost it: measured at `reconciled = 4` against a
+  true 3. The fixture would have looked green while double-counting.
+* **`is_admissible` drops `Expired` and `Inadmissible`, not staleness.** A stale
+  claim is served by `ask` carrying a `Stale` grade, so the first draft of the
+  history/`ask` contrast failed on its own premise and now uses expiry.
 
 ### 3f closed: lineage is a query family, not a field — 2026-08-12
 

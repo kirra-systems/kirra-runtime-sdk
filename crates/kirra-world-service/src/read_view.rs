@@ -98,6 +98,7 @@ use kirra_world::resolution::{resolve, RefusalReason, ResolutionOutcome};
 use kirra_world_store::compaction::Resolution;
 use kirra_world_store::entity_projection::IdentityView;
 use kirra_world_store::snapshot::SnapshotCoordinate;
+use kirra_world_store::subject_projection::SubjectSummaryAnswer;
 use kirra_world_store::{ProjectedClaim, StoreError, TrustAxes, TrustGrade, Validity, WorldStore};
 
 use crate::answer_ref::QueryKind;
@@ -683,6 +684,110 @@ impl<'a> WorldView<'a> {
         })
     }
 
+    /// **Every confirmed claim ever recorded about `subject`, and how much of
+    /// that record survives** — the 3g follow-up.
+    ///
+    /// # This does NOT filter on admissibility, and the version set says it does
+    ///
+    /// Each claim's freshness policy is still RESOLVED, so 3e's fail-closed
+    /// refusal on unclassified semantics reaches this family — an unruled claim
+    /// refuses the whole query here exactly as it does in [`Self::ask`]. But no
+    /// claim is dropped for being stale.
+    ///
+    /// The distinction is the whole design. `ask` answers *"what is true now"*,
+    /// where serving a claim past its freshness budget is the error 3e exists
+    /// to prevent. This answers *"what has ever been claimed"*, where a claim
+    /// that has since gone stale is not a claim to hide — it is the record.
+    /// Filtering here would make history lie about the past in exactly the way
+    /// an admissibility filter on a lineage would hide the evidence an
+    /// investigator came for.
+    ///
+    /// # The completeness is the store's, propagated
+    ///
+    /// [`WorldStore::history`] already decides `Full` vs `Degraded` against the
+    /// retained citations and summaries. This carries that verdict across
+    /// unchanged, exactly as [`Self::ask_as_of`] does. A second judgement here
+    /// would be a second implementation of the rule governing whether an answer
+    /// can be trusted, and the two would drift.
+    ///
+    /// That verdict is deliberately CONSERVATIVE and this does not sharpen it:
+    /// the store's citation check is store-wide, so a retained citation with no
+    /// summaries degrades every subject's history, including subjects the
+    /// compacted span never touched. Over-reporting `Degraded` is the safe
+    /// direction and the acceptance rule this family is held to — *"never
+    /// report `Full` when required evidence may have been removed"* — permits
+    /// it. Narrowing the check to the queried subject would turn a conservative
+    /// signal into an exact-loss detector, and an exact-loss detector that is
+    /// wrong is silent.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::ask`].
+    pub fn history(&self, subject: &str) -> Result<TemporalLookup, AskError> {
+        let answer = self.store.history(subject)?;
+        let completeness = answer.resolution;
+
+        let mut answers = Vec::new();
+        for claim in &answer.claims {
+            // Resolved and DISCARDED, deliberately. The `?` is the entire
+            // reason this call is here: it propagates 3e's refusal for an
+            // unclassified claim. The budget it yields is then handed to
+            // `assemble` for the recorded grade, and is NOT used to filter.
+            let budget = self.policy_for(claim)?.budget();
+            answers.push(assemble(
+                claim,
+                // The claim's OWN transaction time is the clock, not a caller's
+                // "now". A history entry's grade describes what the claim was
+                // when it was made; grading the whole record against the moment
+                // somebody happened to run the query would make the same
+                // history read differently on every call.
+                claim.txn_time_ms.max(0).unsigned_abs(),
+                budget,
+                // A replay does not resolve identity — the same limit
+                // `ask_as_of` states, for the same reason: identity is a second
+                // projection with its own coordinate.
+                ObjectIdentity::NotResolvedInReplay,
+            )?);
+        }
+
+        // `NoneAdmissible` is unreachable here BY CONSTRUCTION, because nothing
+        // is filtered. An empty history means the log holds no confirmed claim
+        // for this subject — and if evidence was compacted away, the
+        // completeness alongside says so rather than the reason code.
+        let lookup = if answers.is_empty() {
+            WorldLookup::Unknown(UnknownReason::NoClaim)
+        } else {
+            WorldLookup::Answered(answers)
+        };
+        Ok(TemporalLookup {
+            lookup,
+            completeness,
+            semantics: SemanticVersions::for_query(QueryKind::SubjectHistory),
+        })
+    }
+
+    /// **The aggregate summary for `subject`, and how much of the evidence
+    /// behind it survives** — the 3g follow-up.
+    ///
+    /// # Errors
+    ///
+    /// [`AskError::Store`] on any read failure.
+    pub fn subject_summary(&self, subject: &str) -> Result<SummaryLookup, AskError> {
+        // Filtered by subject at the boundary, which is the one narrowing that
+        // cannot disagree with the store: it is an equality on the same string
+        // the store keyed by. Completeness is not touched.
+        let found = self
+            .store
+            .subject_summaries_with_coverage()?
+            .into_iter()
+            .find(|s| s.subject == subject);
+
+        Ok(SummaryLookup {
+            summary: found,
+            semantics: SemanticVersions::for_query(QueryKind::SubjectSummary),
+        })
+    }
+
     /// **The ruled disposition for one claim, or a refusal.**
     ///
     /// The single place a claim's semantics become a freshness policy, so the
@@ -871,6 +976,86 @@ fn assemble(
         provenance,
         event_id: claim.event_id.clone(),
     })
+}
+
+/// **One subject's summary and its evidence coverage** — the 3g follow-up.
+///
+/// # Why this carries `SummaryCoverage` and not `Resolution`
+///
+/// Every other family's completeness is a [`Resolution`], and making this one
+/// match would be tidier. It would also require inventing a field.
+///
+/// The two signals are computed from different things and have different
+/// shapes. `Resolution::Degraded` carries `{spans, summaries}` — a
+/// RANGE-oriented verdict, built from the compaction citations overlapping a
+/// queried interval. [`SummaryCoverage::Degraded`] carries `{summaries}` alone
+/// — a PER-SUBJECT verdict, recorded by the fold about the evidence behind one
+/// row. Coercing the second into the first means passing `spans: vec![]`, which
+/// reads as *"no compacted span bore on this"*. That is false, and false in the
+/// reassuring direction, which is the one direction this architecture must
+/// never round toward.
+///
+/// So the native type crosses the boundary unchanged. One source of truth per
+/// family beats one type across families.
+///
+/// # Numerical reconciliation is NOT evidence coverage
+///
+/// [`SubjectSummaryAnswer::reconciled_observation_count`] and
+/// [`SubjectSummaryAnswer::reconciled_first_observed_ms`] can both reconstruct
+/// their pre-compaction values from citations. It is tempting to read that
+/// success as completeness — the numbers add up, so nothing was lost.
+///
+/// They are not the same claim, and the gap between them is exactly where a
+/// silent loss would live. A citation names a SPAN; it does not name the events
+/// inside it. So `observation_count` and `first_observed_ms` reconstruct, while
+/// `provenance_head` and `last_event_id` cannot — and for a subject whose every
+/// contributing event was compacted, [`SubjectSummaryAnswer::retained`] is
+/// `None` and those fields do not exist at all. An answer reporting `Complete`
+/// because two counts reconciled would be asserting something true of two
+/// numbers about the whole answer contract.
+///
+/// [`Self::is_degraded`] therefore reads `coverage` and ONLY `coverage`. There
+/// is deliberately no constructor taking a reconciliation result.
+#[derive(Debug, Clone)]
+pub struct SummaryLookup {
+    summary: Option<SubjectSummaryAnswer>,
+    semantics: SemanticVersions,
+}
+
+impl SummaryLookup {
+    /// The summary and its coverage, or `None` if the store has never
+    /// summarised this subject.
+    ///
+    /// `None` means *"not summarised"*, which is distinct from a summary whose
+    /// evidence was compacted: that one is `Some`, with `Degraded` coverage
+    /// and possibly no retained
+    /// aggregates. The store goes to real trouble to keep those apart —
+    /// a fully compacted subject used to vanish entirely — and collapsing them
+    /// here would undo it.
+    #[must_use]
+    pub fn summary(&self) -> Option<&SubjectSummaryAnswer> {
+        self.summary.as_ref()
+    }
+
+    /// Whether evidence behind this summary has been compacted away.
+    ///
+    /// Derived from `coverage` alone — never from whether reconciliation
+    /// succeeded. See the type's own note on why those differ.
+    ///
+    /// An unsummarised subject is NOT degraded: there is no evidence claimed
+    /// and none missing.
+    #[must_use]
+    pub fn is_degraded(&self) -> bool {
+        self.summary
+            .as_ref()
+            .is_some_and(|s| s.coverage.is_degraded())
+    }
+
+    /// The rules this answer was produced under.
+    #[must_use]
+    pub fn semantics(&self) -> &SemanticVersions {
+        &self.semantics
+    }
 }
 
 /// **A bitemporal answer and its completeness** — Tier 3 box 3g.

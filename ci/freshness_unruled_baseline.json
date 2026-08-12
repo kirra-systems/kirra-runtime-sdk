@@ -16,6 +16,11 @@
   ],
   "unruled": [
     {
+      "kind": "not_a_ruled_kind",
+      "predicate": "whatever",
+      "why": "The 3g follow-up's negative control. Deliberately names a class no ruling will ever cover, so `an_unruled_claim_refuses_the_whole_history` can prove that 3e's fail-closed refusal reaches the history family -- which is the ONLY reason `answer_admissibility` is in that family's version set. Ruling it would delete the test's premise."
+    },
+    {
       "kind": "observation",
       "predicate": null,
       "why": "A payload-only observation. `KIRRA-WM-CLAIM-SHAPES-001` makes this a legitimate shape, but what an untyped payload MEANS temporally cannot be ruled in general -- it depends on what the payload carries, which is precisely the thing no key can see."

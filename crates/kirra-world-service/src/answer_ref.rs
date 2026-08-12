@@ -98,6 +98,22 @@ pub enum QueryKind {
     /// ([`crate::read_view::TemporalLookup::semantics`]), and that set has to
     /// be derived in the one place every set is derived.
     AsOfSubject,
+    /// [`crate::read_view::WorldView::history`] — every confirmed claim ever
+    /// recorded about one subject, in generation order.
+    ///
+    /// Distinct from [`Self::AsOfSubject`] despite both replaying the log: that
+    /// one answers *"what held at an instant"* and returns a SET, this one
+    /// answers *"what has ever been claimed"* and returns a SEQUENCE whose
+    /// order is part of the answer.
+    SubjectHistory,
+    /// [`crate::read_view::WorldView::subject_summary`] — the aggregate
+    /// summary for one subject, and how much of its evidence survives.
+    ///
+    /// The one family whose completeness is NOT a
+    /// [`kirra_world_store::Resolution`]. See
+    /// [`crate::read_view::SummaryLookup`] for why coercing it into one would
+    /// have to invent a field.
+    SubjectSummary,
     /// [`crate::lineage::LineageRef`] — one page of the evidence bearing on a
     /// subject at a pinned generation.
     ///
