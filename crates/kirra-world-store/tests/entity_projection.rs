@@ -473,3 +473,146 @@ fn the_two_folds_share_one_checkpoint_table() {
         cleanup(&path);
     }
 }
+
+// --------------------------------------------------------------- box 3d ---
+
+/// A graph whose redirects are actually TRAVERSED.
+///
+/// Not `scenario()`, and that distinction cost a red test: in that fixture `a`
+/// is contradicted, so `resolve` refuses at `a` before following any edge —
+/// which made an under-fetch of the entity `a` points at invisible. A
+/// reachability control needs a graph where reachability is exercised.
+///
+/// `a -> b -> c` is a two-hop chain, so the walk must load a SECOND-level
+/// neighbour; `d` is a lone established entity (a dead end); `e` is absent.
+fn chain_scenario() -> Vec<IdentityAdjudication> {
+    vec![
+        IdentityAdjudication::Assert(AssertIdentity::new(eid("a"), just(), at())),
+        IdentityAdjudication::Assert(AssertIdentity::new(eid("b"), just(), at())),
+        IdentityAdjudication::Assert(AssertIdentity::new(eid("c"), just(), at())),
+        IdentityAdjudication::Assert(AssertIdentity::new(eid("d"), just(), at())),
+        merge(&["a"], "b"),
+        merge(&["b"], "c"),
+    ]
+}
+
+/// **The control that lets the bounded loader exist at all.**
+///
+/// `resolve_bounded` loads only the entities within `MAX_REDIRECT_EDGES` hops of
+/// the queried id; `identity_view` loads the whole graph. They hand the SAME
+/// `resolve` two differently-sized views, so they must reach identical outcomes
+/// — asserted rather than assumed, because a loader that under-fetches produces
+/// a plausible wrong answer (`DanglingRedirect`, or a redirect chain that stops
+/// early) rather than a crash.
+///
+/// Swept over every id in the fixture, not a chosen one: the shapes that break
+/// a reachability loader are the ones nobody picks — a retired dead end, a
+/// split successor reached only backwards through `origin`, an id absent from
+/// the graph entirely.
+///
+/// Added on box 3d for the same reason #1440 added
+/// `narrowing_never_removes_what_the_rule_would_keep`: a narrowing is only safe
+/// when something watches it.
+#[test]
+fn bounded_resolution_agrees_with_whole_graph_resolution() {
+    let path = tmp("3d-agreement");
+    let mut s = WorldStore::open(&path).expect("open");
+    seed(&mut s, &chain_scenario());
+    s.fold_entity_projection().expect("fold");
+
+    let whole = s.identity_view().expect("whole graph");
+    let ids = ["a", "b", "c", "d", "never-heard-of-it"];
+
+    let mut degenerate = 0;
+    for id in ids {
+        let e = eid(id);
+        let expected = kirra_world::resolution::resolve(&whole, &e);
+        let actual = s.resolve_bounded(&e).expect("bounded resolve");
+        assert_eq!(
+            actual, expected,
+            "bounded and whole-graph resolution disagree for {id} — the loader \
+             under-fetched a reachable entity, which changes truth rather than \
+             merely costing less"
+        );
+        if matches!(
+            expected,
+            kirra_world::resolution::ResolutionOutcome::Unknown
+        ) {
+            degenerate += 1;
+        }
+    }
+    assert!(
+        degenerate < ids.len(),
+        "every id resolved to Unknown — the fixture proves nothing about \
+         redirect following"
+    );
+}
+
+/// **A storage fault during the bounded preload must FAIL, never become Unknown.**
+///
+/// The reason the loader preloads at all. `AdjudicationGraph::lifecycle_of`
+/// returns `Option` with no error channel, and its own documentation warns that
+/// a storage-backed implementation must not turn a read failure into `None`,
+/// because that reports an existing id as no-such-entity. Preloading keeps the
+/// fallible work ahead of the walk — this proves the refusal actually arrives
+/// rather than being swallowed into an answer.
+#[test]
+fn a_corrupt_reachable_row_refuses_rather_than_resolving_to_unknown() {
+    let path = tmp("3d-corrupt");
+    let mut s = WorldStore::open(&path).expect("open");
+    seed(&mut s, &chain_scenario());
+    s.fold_entity_projection().expect("fold");
+
+    // `a` is merged into `b`, so `b`'s row is REACHABLE from `a` — corrupting it
+    // is corrupting something the walk needs, not merely something nearby.
+    s.raw_execute_for_test(
+        "UPDATE entities_projection SET lifecycle = 'not_a_lifecycle' WHERE entity_id = 'b'",
+    )
+    .expect("corrupt");
+
+    let err = s
+        .resolve_bounded(&eid("a"))
+        .expect_err("a corrupt reachable row must refuse");
+    assert!(
+        matches!(err, StoreError::CorruptEntityProjectionRow { .. }),
+        "expected a fail-closed corrupt-row refusal, got {err:?}"
+    );
+}
+
+/// **The under-fetch control: proving the agreement test can go red.**
+///
+/// Deleting a reachable row simulates exactly what a loader bug would do — the
+/// entity exists in the whole-graph view and is missing from the bounded one.
+/// Agreement must break. Without this, `bounded_resolution_agrees_with_...`
+/// could be passing because both sides are trivially equal on this fixture.
+#[test]
+fn under_fetching_a_reachable_entity_breaks_agreement() {
+    let path = tmp("3d-underfetch");
+    let mut s = WorldStore::open(&path).expect("open");
+    seed(&mut s, &chain_scenario());
+    s.fold_entity_projection().expect("fold");
+
+    let whole = s.identity_view().expect("whole graph");
+    let expected = kirra_world::resolution::resolve(&whole, &eid("a"));
+    assert!(
+        matches!(
+            expected,
+            kirra_world::resolution::ResolutionOutcome::Located { .. }
+        ),
+        "the control needs an id that RESOLVES THROUGH the entity it is about to \
+         lose; a refusal at `a` would make the deletion invisible — which is \
+         exactly how the first draft of this test passed vacuously"
+    );
+
+    // Remove the row `a` redirects to. The whole-graph view above already holds
+    // it; the bounded loader will not find it.
+    s.raw_execute_for_test("DELETE FROM entities_projection WHERE entity_id = 'b'")
+        .expect("delete");
+
+    let actual = s.resolve_bounded(&eid("a")).expect("bounded resolve");
+    assert_ne!(
+        actual, expected,
+        "removing a reachable entity must change the bounded answer — if it does \
+         not, the agreement test cannot detect an under-fetching loader"
+    );
+}

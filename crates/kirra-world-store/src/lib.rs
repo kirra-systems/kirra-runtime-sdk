@@ -230,6 +230,20 @@ pub enum StoreError {
     /// recorded, it just may not be *labelled* — and a caller who asked for a
     /// label should learn it did not get one.
     UnboundSubjectNotStorable,
+    /// The identity closure reachable from an id exceeded
+    /// [`snapshot::MAX_IDENTITY_CLOSURE`].
+    ///
+    /// A REFUSAL rather than a truncation, deliberately. Handing the resolver a
+    /// truncated graph would turn a `TraversalBudgetExceeded` refusal into a
+    /// `DanglingRedirect` one — a wrong answer about why the graph could not be
+    /// resolved, which is exactly the confusion the `AdjudicationGraph` trait's
+    /// no-error-channel contract exists to prevent.
+    IdentityClosureTooLarge {
+        /// The id the walk started from.
+        from: String,
+        /// The cap that was hit.
+        limit: usize,
+    },
     /// A stored entity-projection row could not be read back faithfully.
     ///
     /// **Refused, never repaired.** The columns are written only by the fold,
@@ -359,6 +373,11 @@ impl std::fmt::Display for StoreError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Sqlite(e) => write!(f, "sqlite: {e}"),
+            Self::IdentityClosureTooLarge { from, limit } => write!(
+                f,
+                "identity closure reachable from {from} exceeds {limit} entities; \
+                 refused rather than truncated"
+            ),
             Self::CorruptEntityProjectionRow { detail } => {
                 write!(f, "corrupt entities_projection row: {detail}")
             }
@@ -1604,6 +1623,39 @@ impl WorldStore {
     /// [`IdentityView::generation`]: entity_projection::IdentityView::generation
     pub fn identity_view(&self) -> Result<entity_projection::IdentityView, StoreError> {
         self.read_snapshot()?.identity_view()
+    }
+
+    /// **Resolve one id against the live identity graph, bounded** — box 3d.
+    ///
+    /// The bounded counterpart to `identity_view().resolve(id)`. Loads only the
+    /// entities within `MAX_REDIRECT_EDGES` hops of `id` and resolves over that,
+    /// so the work is bounded by the traversal budget rather than by the size of
+    /// the graph.
+    ///
+    /// The resolution RULE is unchanged: this hands a smaller `IdentityView` to
+    /// the same `kirra_world::resolution::resolve`. Only the loading is
+    /// different, which is why
+    /// `bounded_resolution_agrees_with_whole_graph_resolution` can assert the
+    /// two are identical rather than merely similar.
+    ///
+    /// # Errors
+    ///
+    /// [`StoreError::CorruptEntityProjectionRow`] if a reachable row cannot be
+    /// read back faithfully — failing closed BEFORE the walk, which is what
+    /// keeps a storage fault from being read as "no such entity".
+    /// [`StoreError::IdentityClosureTooLarge`] if the reachable closure exceeds
+    /// [`snapshot::MAX_IDENTITY_CLOSURE`]; refused, never truncated.
+    pub fn resolve_bounded(
+        &self,
+        id: &kirra_world::reference::EntityId,
+    ) -> Result<kirra_world::resolution::ResolutionOutcome, StoreError> {
+        let rows = snapshot::load_reachable_entity_projection_on(&self.conn, id)?;
+        // Generation 0: this view is a REACHABLE SUBSET, not a snapshot of the
+        // projection, so stamping it with the projection's head would label a
+        // partial graph as a complete state of the world — the mislabelling
+        // `IdentityView::generation` is relied upon not to do.
+        let view = entity_projection::IdentityView::new(rows, 0);
+        Ok(kirra_world::resolution::resolve(&view, id))
     }
 
     /// **The identity graph as it stood at a past instant** — §6.3, Tier 2 2d.

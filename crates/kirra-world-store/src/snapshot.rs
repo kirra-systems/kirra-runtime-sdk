@@ -803,12 +803,181 @@ pub(crate) fn load_entity_projection_on(
     let mut out = BTreeMap::new();
     let mut rows = stmt.query([])?;
     while let Some(r) = rows.next()? {
-        let id: String = r.get(0)?;
-        let token: String = r.get(1)?;
-        let redirect: Option<String> = r.get(2)?;
-        let origin: Option<String> = r.get(3)?;
-        let contradicted: i64 = r.get(4)?;
-        let detail: Option<String> = r.get(5)?;
+        let (id, entity) = decode_entity_row(r)?;
+        out.insert(id, entity);
+    }
+    Ok(out)
+}
+
+/// The largest reachable identity closure this will load before refusing.
+///
+/// Far above `MAX_REDIRECT_EDGES` on purpose: this is not the traversal bound,
+/// it is the backstop that keeps a pathological graph from making a "bounded"
+/// read unbounded again. Hitting it is a refusal, never a truncation.
+pub const MAX_IDENTITY_CLOSURE: usize = 4_096;
+
+/// **The entity rows reachable from `from`, and nothing else** — box 3d.
+///
+/// The bounded counterpart to [`load_entity_projection_on`], which loads the
+/// WHOLE graph. `kirra_world::resolution::resolve` already caps its walk at
+/// `MAX_REDIRECT_EDGES`, so a resolution touches at most that many entities
+/// however large the graph is — the unboundedness was never in the traversal,
+/// only in materialising everything before it.
+///
+/// # Why a preloader and not a lazy `AdjudicationGraph`
+///
+/// The obvious fix — implement the trait over per-id SQL reads — is ruled out by
+/// the trait itself. `lifecycle_of` returns `Option<Lifecycle>` with no error
+/// channel, and its documentation is explicit that an implementation backed by
+/// storage must NOT turn a read failure into `None`, because that reports an
+/// existing id as no-such-entity; it prescribes doing the fallible work BEFORE
+/// resolving. This keeps that order: every row is read and decoded here, failing
+/// closed, and the walk then runs over what was loaded.
+///
+/// # Why not a recursive CTE
+///
+/// `WITH RECURSIVE` over `json_each(redirect)` would also bound the read, and
+/// would put edge-following logic in SQL — a SECOND implementation of the
+/// traversal rule that `resolve` owns. This codebase has repeatedly paid for
+/// duplicated semantics drifting; the loader deliberately follows edges with the
+/// same decoded `Lifecycle` the fold wrote, and decides nothing about them.
+///
+/// # The superset argument, and why truncation is refused
+///
+/// This loads every entity within `MAX_REDIRECT_EDGES` hops of `from`, which is
+/// a SUPERSET of anything the walk can reach before exhausting its budget.
+/// Over-fetching is harmless — a superset yields the identical walk — while
+/// under-fetching changes truth, so the bias is deliberate.
+///
+/// A closure larger than [`MAX_IDENTITY_CLOSURE`] is REFUSED rather than
+/// truncated. Handing the walk a truncated graph would turn a
+/// `TraversalBudgetExceeded` refusal into a `DanglingRedirect` one — a wrong
+/// answer about WHY the graph could not be resolved, which is precisely the
+/// confusion the trait's no-error-channel contract exists to prevent.
+pub(crate) fn load_reachable_entity_projection_on(
+    conn: &Connection,
+    from: &kirra_world::reference::EntityId,
+) -> Result<BTreeMap<String, ProjectedEntity>, StoreError> {
+    let mut out = BTreeMap::new();
+    if !table_exists(conn, "entities_projection")? {
+        return Ok(out);
+    }
+    let mut stmt = conn.prepare(
+        "SELECT entity_id, lifecycle, redirect, origin, contradicted, contradiction
+         FROM entities_projection WHERE entity_id = ?1",
+    )?;
+
+    // Breadth-FIRST and depth-capped, not node-capped: the walk's budget counts
+    // HOPS, so "everything within MAX_REDIRECT_EDGES hops" is the set that
+    // provably contains whatever it can reach. A node cap would truncate by
+    // discovery order instead, which a deep chain slips through.
+    let mut frontier: Vec<String> = vec![from.as_str().to_string()];
+    for _ in 0..=kirra_world::resolution::MAX_REDIRECT_EDGES {
+        if frontier.is_empty() {
+            break;
+        }
+        let mut next: Vec<String> = Vec::new();
+        for id in frontier.drain(..) {
+            if out.contains_key(&id) {
+                continue;
+            }
+            if out.len() >= MAX_IDENTITY_CLOSURE {
+                return Err(StoreError::IdentityClosureTooLarge {
+                    from: from.as_str().to_string(),
+                    limit: MAX_IDENTITY_CLOSURE,
+                });
+            }
+            // Two-step rather than `query_row(.., decode_entity_row)`: the
+            // decoder returns `StoreError`, and rusqlite's row mapper may only
+            // return `rusqlite::Error`. Collapsing them would mean decoding
+            // inside the mapper and losing the fail-closed corrupt-row detail.
+            let raw: Option<EntityRowColumns> = stmt
+                .query_row(params![&id], |r| {
+                    Ok((
+                        r.get(0)?,
+                        r.get(1)?,
+                        r.get(2)?,
+                        r.get(3)?,
+                        r.get(4)?,
+                        r.get(5)?,
+                    ))
+                })
+                .optional()?;
+            let Some(raw) = raw else {
+                // Absent is a legitimate answer the walk must see for itself —
+                // it is how `DanglingRedirect` and `Unknown` are distinguished.
+                continue;
+            };
+            let (key, entity) = decode_entity_columns(raw.0, raw.1, raw.2, raw.3, raw.4, raw.5)?;
+            next.extend(neighbours(&entity));
+            out.insert(key, entity);
+        }
+        frontier = next;
+    }
+    Ok(out)
+}
+
+/// The ids one entity's lifecycle points at.
+///
+/// Reads the DECODED lifecycle rather than the stored JSON, so the loader
+/// follows exactly the edges the fold recorded and invents no notion of its own.
+fn neighbours(entity: &ProjectedEntity) -> Vec<String> {
+    use kirra_world::entity::Lifecycle;
+    match &entity.lifecycle {
+        Lifecycle::Merged { into } => vec![into.as_str().to_string()],
+        Lifecycle::Superseded { by } => by.iter().map(|e| e.as_str().to_string()).collect(),
+        Lifecycle::Split { from } => vec![from.as_str().to_string()],
+        _ => Vec::new(),
+    }
+}
+
+/// Decode ONE `entities_projection` row, failing closed.
+///
+/// Extracted so the whole-graph loader and the bounded one decode by calling
+/// the same code rather than by two implementations agreeing. A drifted decoder
+/// would be worse than a drifted query: it could make the two loaders disagree
+/// about an entity's LIFECYCLE, which changes what `resolve` answers.
+fn decode_entity_row(r: &rusqlite::Row<'_>) -> Result<(String, ProjectedEntity), StoreError> {
+    decode_entity_columns(
+        r.get(0)?,
+        r.get(1)?,
+        r.get(2)?,
+        r.get(3)?,
+        r.get(4)?,
+        r.get(5)?,
+    )
+}
+
+/// The six columns of an `entities_projection` row, as read.
+///
+/// Named so the bounded loader can hold one without a six-deep tuple type at
+/// the call site; the decode below still takes them positionally, because they
+/// are read positionally.
+type EntityRowColumns = (
+    String,
+    String,
+    Option<String>,
+    Option<String>,
+    i64,
+    Option<String>,
+);
+
+/// The decode itself, over already-read columns.
+///
+/// Separate from [`decode_entity_row`] because rusqlite's row mapper may only
+/// return `rusqlite::Error`, while this fails closed with
+/// [`StoreError::CorruptEntityProjectionRow`] carrying which row and why. The
+/// bounded loader reads the columns first and decodes here for that reason.
+#[allow(clippy::too_many_arguments)]
+fn decode_entity_columns(
+    id: String,
+    token: String,
+    redirect: Option<String>,
+    origin: Option<String>,
+    contradicted: i64,
+    detail: Option<String>,
+) -> Result<(String, ProjectedEntity), StoreError> {
+    {
         let contradiction = match (contradicted != 0, detail.as_deref()) {
             (false, _) => None,
             (true, Some(raw)) => Some(entity_projection::contradiction_from_json(raw).map_err(
@@ -837,16 +1006,15 @@ pub(crate) fn load_entity_projection_on(
                 detail: format!("{id}: inadmissible entity id: {e:?}"),
             }
         })?;
-        out.insert(
+        Ok((
             id,
             ProjectedEntity {
                 entity,
                 lifecycle,
                 contradiction,
             },
-        );
+        ))
     }
-    Ok(out)
 }
 
 /// Compacted spans that removed anything at or below `generation`.
