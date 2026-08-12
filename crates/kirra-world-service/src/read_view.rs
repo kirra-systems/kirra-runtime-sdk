@@ -769,18 +769,20 @@ impl<'a> WorldView<'a> {
     /// **The aggregate summary for `subject`, and how much of the evidence
     /// behind it survives** — the 3g follow-up.
     ///
+    /// The read is BOUNDED — see
+    /// [`WorldStore::subject_summary_with_coverage`], which narrows both of its
+    /// sources in SQL rather than scanning the store.
+    ///
     /// # Errors
     ///
     /// [`AskError::Store`] on any read failure.
     pub fn subject_summary(&self, subject: &str) -> Result<SummaryLookup, AskError> {
-        // Filtered by subject at the boundary, which is the one narrowing that
-        // cannot disagree with the store: it is an equality on the same string
-        // the store keyed by. Completeness is not touched.
-        let found = self
-            .store
-            .subject_summaries_with_coverage()?
-            .into_iter()
-            .find(|s| s.subject == subject);
+        // The BOUNDED per-subject read, not the bulk call filtered down. The
+        // bulk one loads every retained row and every citation in the store and
+        // groups once — right for "every subject", quadratically wrong as the
+        // basis for "this subject". Caught in review on #1441, and the same
+        // finding as #1440's unbounded lineage fetch against the same clause.
+        let found = self.store.subject_summary_with_coverage(subject)?;
 
         Ok(SummaryLookup {
             summary: found,

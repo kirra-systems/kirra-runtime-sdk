@@ -3506,7 +3506,50 @@ that reconstruction genuinely SUCCEEDS in the fixture, so the degraded verdict
 is held *despite* working reconciliation rather than alongside broken
 reconciliation.
 
-#### Two fixture facts that cost a red test each
+#### Review follow-up: the per-subject query stood on a whole-store scan
+
+Caught in review, and it is the SAME finding as #1440's unbounded lineage
+fetch — against the same clause, one PR later.
+
+`WorldView::subject_summary` called `subject_summaries_with_coverage()` and
+filtered. That call is a BULK API and optimised as one: it loads every retained
+row and every citation in the store and groups once, *because* the per-subject
+rescan it replaced was quadratic. Standing a single-subject query on it inverts
+that optimisation exactly — `O(total subjects + total citations)` to read one
+row, on tables that grow for a store's whole life.
+
+`KIRRA-WM-ANSWER-IDENTITY-001` clause 2 is *"queries are bounded"*, and it was
+violated the same invisible way as on #1440: the returned answer was correct and
+bounded, so only the WORK was unbounded and nothing showed it.
+
+That the same class of defect recurred one PR after being written up is the
+useful part. Fixing the instance did not generalise; **a per-query bound is not
+a property anything currently checks**, and both times it took a reviewer. A
+gate that flags a bounded-looking boundary query built on an unbounded store
+call would be the real remedy, and is recorded here as not built.
+
+The fix follows #1440's shape. `WorldStore::subject_summary_with_coverage`
+narrows both sources in SQL (`subject_summaries_for`,
+`load_summaries(Some(..))`), and the coverage verdict is EXTRACTED
+(`subject_projection::coverage_from_citations`) so the bulk and narrowed paths
+run the same code rather than two implementations agreeing.
+`the_narrowed_and_bulk_coverage_paths_agree` sweeps every subject the bulk call
+knows — including the citation-only one a naive per-subject read drops — plus a
+subject in neither.
+
+Three mutations, run:
+
+| Mutation | Reds |
+|---|---|
+| narrowed path drops citation-only subjects | the agreement test |
+| narrowed path reports `Complete` for a degraded subject | the agreement test |
+| the SHARED rule stops matching `None`-kind citations | **four pre-existing tests** |
+
+The third is the one that justifies the extraction: mutating the shared
+derivation reds the tests that guarded it when it was inline, so moving it out
+of `subject_summaries_with_coverage` weakened nothing.
+
+#### Three fixture facts that cost a red test each
 
 Recorded because the wrong version of both looks entirely reasonable:
 

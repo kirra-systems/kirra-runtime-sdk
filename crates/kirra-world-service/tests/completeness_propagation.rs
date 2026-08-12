@@ -76,15 +76,18 @@
 //! `Full` has to describe the whole answer contract, not the two numbers that
 //! survived.
 //!
-//! # Two fixture facts that were measured, not assumed
+//! # Three fixture facts that were measured, not assumed
 //!
-//! Both cost a red test first, and both are recorded because the wrong version
+//! Each cost a red test first, and each is recorded because the wrong version
 //! looks entirely reasonable:
 //!
 //! * `fold()` does **not** build `subject_summary` — `fold_subject_summary()`
 //!   is a separate call. A fixture running only the first produces ZERO
 //!   summaries, and every subject-summary control would pass vacuously against
 //!   a store that had never summarised anything.
+//! * The summary must be rebuilt **after** compaction, not merely folded before
+//!   it — measured at `reconciled = 4` against a true 3. The argument is on
+//!   `holed_store`, which is where someone changing the fixture will be.
 //! * `is_admissible` drops `Expired` validity and `Inadmissible` grade — **not**
 //!   staleness. A stale claim is served by `ask`, carrying a `Stale` grade. The
 //!   first draft of `history_keeps_a_claim_that_ask_refuses_to_serve` used

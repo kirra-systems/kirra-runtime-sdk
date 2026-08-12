@@ -3736,20 +3736,15 @@ impl WorldStore {
                 .push(c);
         }
 
+        // Delegated to the SHARED derivation rather than restated, so this and
+        // the per-subject `subject_summary_with_coverage` cannot drift. The
+        // grouping above is a fetch narrowing; the verdict is the rule.
         let coverage_for = |kind: SummaryKind, subject: &str| -> SummaryCoverage {
             let Some(group) = citations_by_subject.get(subject) else {
                 return SummaryCoverage::Complete;
             };
-            let mine: Vec<_> = group
-                .iter()
-                .filter(|c| c.subject_kind.as_deref().is_none_or(|k| k == kind.as_str()))
-                .map(|c| (*c).clone())
-                .collect();
-            if mine.is_empty() {
-                SummaryCoverage::Complete
-            } else {
-                SummaryCoverage::Degraded { summaries: mine }
-            }
+            let owned: Vec<DegradedSummary> = group.iter().map(|c| (*c).clone()).collect();
+            subject_projection::coverage_from_citations(kind, &owned)
         };
 
         let mut out: Vec<SubjectSummaryAnswer> = retained
@@ -3776,11 +3771,7 @@ impl WorldStore {
             // The RECORDED kind when there is one. `Unlabelled` is the fallback
             // for a pre-migration citation only -- and it is a guess there,
             // which is why the column exists.
-            let kind = c
-                .subject_kind
-                .as_deref()
-                .and_then(|k| SummaryKind::from_projection_column(k).ok())
-                .unwrap_or(SummaryKind::Unlabelled);
+            let kind = subject_projection::kind_of_citation(c);
             if !known.contains(&(kind, c.subject.as_str())) {
                 cited_only.insert((kind, c.subject.as_str()));
             }
@@ -3795,6 +3786,76 @@ impl WorldStore {
         }
         out.sort_by(|a, b| a.subject.cmp(&b.subject));
         Ok(out)
+    }
+
+    /// **One subject's summary, with how complete it is** — the bounded
+    /// per-subject read.
+    ///
+    /// # Why this exists alongside the bulk call
+    ///
+    /// [`Self::subject_summaries_with_coverage`] is a BULK API and is optimised
+    /// as one: it loads every retained row and every citation in the store and
+    /// groups once, precisely because the per-subject rescan it replaced was
+    /// quadratic. Answering a single-subject question through it inverts that
+    /// optimisation — you pay `O(total subjects + total citations)` to read one
+    /// row, on a store where both tables grow for its whole life.
+    ///
+    /// `KIRRA-WM-ANSWER-IDENTITY-001` clause 2 is *"queries are bounded"*, and
+    /// a per-subject boundary query standing on a whole-store scan is not,
+    /// however correct its answer. Both narrowings here are SQL
+    /// (`subject_summaries_for`, `load_summaries(Some(..))`).
+    ///
+    /// # The verdict is the SAME code, not the same logic
+    ///
+    /// Coverage comes from [`subject_projection::coverage_from_citations`],
+    /// which the bulk path also calls. Two implementations that agree today
+    /// are two implementations that can disagree later, and a disagreement
+    /// here is a subject reported `Complete` by one path and `Degraded` by the
+    /// other. `the_narrowed_and_bulk_coverage_paths_agree` holds them together.
+    ///
+    /// Returns `None` when the store has neither a retained row nor a citation
+    /// for `subject` — *"never summarised"*, which is distinct from *"its
+    /// evidence was removed"*.
+    ///
+    /// # Errors
+    ///
+    /// [`StoreError::Sqlite`] on any storage failure;
+    /// [`StoreError::CorruptRow`] if a stored kind token cannot be read.
+    pub fn subject_summary_with_coverage(
+        &self,
+        subject: &str,
+    ) -> Result<Option<subject_projection::SubjectSummaryAnswer>, StoreError> {
+        use subject_projection::SubjectSummaryAnswer;
+
+        let citations = self.load_summaries(Some(subject))?;
+        let retained = self.subject_summaries_for(subject)?;
+
+        // A retained row wins: it carries aggregates a citation cannot supply.
+        // `subject_summaries_for` orders by kind, so the first is deterministic
+        // rather than whichever SQLite happened to return.
+        if let Some(row) = retained.into_iter().next() {
+            let coverage =
+                subject_projection::coverage_from_citations(row.subject_kind, &citations);
+            return Ok(Some(SubjectSummaryAnswer {
+                subject_kind: row.subject_kind,
+                subject: row.subject.clone(),
+                coverage,
+                retained: Some(row),
+            }));
+        }
+
+        // Known only by citation — the case the bulk call was extended to stop
+        // losing, and which a naive per-subject read would drop again.
+        let Some(first) = citations.first() else {
+            return Ok(None);
+        };
+        let kind = subject_projection::kind_of_citation(first);
+        Ok(Some(SubjectSummaryAnswer {
+            subject_kind: kind,
+            subject: subject.to_owned(),
+            retained: None,
+            coverage: subject_projection::coverage_from_citations(kind, &citations),
+        }))
     }
 
     /// Every **resolved entity** this store has summarised.
