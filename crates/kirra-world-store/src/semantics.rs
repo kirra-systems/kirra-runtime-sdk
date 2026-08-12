@@ -99,6 +99,16 @@ pub enum RuleId {
     /// [`crate::subject_projection::subject_fold_step`] — the subject summary
     /// fold.
     SubjectSummaryFold,
+    /// [`crate::lineage::select_lineage`] — the lineage selection rule.
+    ///
+    /// Not a *reducer*, and included anyway. The membership test this module
+    /// applies is *"can changing this alter a derived answer"*, not *"is this a
+    /// fold"* — and lineage selection can alter one four ways at once: the
+    /// events chosen, the generation bound, the order, and where a page ends.
+    /// A recorded lineage reference whose page-2 cursor was minted under a
+    /// different ordering describes a different set of evidence while looking
+    /// identical.
+    LineageSelection,
 }
 
 impl RuleId {
@@ -113,6 +123,7 @@ impl RuleId {
             Self::WorldCurrentFold => "world_current_fold",
             Self::EntityFold => "entity_fold",
             Self::SubjectSummaryFold => "subject_summary_fold",
+            Self::LineageSelection => "lineage_selection",
         }
     }
 
@@ -126,6 +137,7 @@ impl RuleId {
             RuleId::WorldCurrentFold,
             RuleId::EntityFold,
             RuleId::SubjectSummaryFold,
+            RuleId::LineageSelection,
         ]
     }
 }
@@ -188,6 +200,14 @@ pub const SEMANTICS: &[RuleSpec] = &[
         source_pin: "2faa627ee865dd00229b52960b35d250caadc42acf4b10aef7bb48f97ecebb85",
         source_file: "crates/kirra-world-store/src/subject_projection.rs",
         span: "subject_summary_fold",
+    },
+    RuleSpec {
+        rule: RuleId::LineageSelection,
+        version: 1,
+        corpus_digest: "750c6e83b752ea7743032696b2a57b40134e97a91492961513a61e5a1fb8bc55",
+        source_pin: "e25f2863158f146facab6c2a135c0e6b6efb0fdaa50ee139329bf4b340baa964",
+        source_file: "crates/kirra-world-store/src/lineage.rs",
+        span: "lineage_selection",
     },
 ];
 
@@ -456,6 +476,110 @@ pub fn render_subjects(rows: &BTreeMap<SubjectKey, ProjectedSubject>) -> String 
     out
 }
 
+/// The lineage selection rule's corpus input — the **evidence**.
+///
+/// Supplied deliberately **out of generation order**, so a rule that dropped the
+/// sort produces a different rendering rather than accidentally the same one.
+///
+/// | Event | What it holds open |
+/// |---|---|
+/// | gen 5, `package_17` | supplied FIRST, so ordering is discriminated |
+/// | gen 1, `package_17` | the oldest, and the first page's head |
+/// | gen 3, **`other_subject`** | the **subject filter** — a rule ignoring it interleaves this at position 3 |
+/// | gen 2, `package_17`, **candidate** | candidates are lineage; a rule that filtered on `claim_status` like the claim fold does would drop it |
+/// | gen 4, `package_17` | an ordinary interior event |
+/// | gen 9, `package_17` | **above the pin** in the queries that bound at 5 — the historical-correctness axis |
+#[must_use]
+pub fn lineage_corpus() -> Vec<crate::lineage::LineageEvent> {
+    let ev = |generation: i64,
+              subject: &str,
+              claim_status: crate::ClaimStatus,
+              writer_class: crate::WriterClass| {
+        crate::lineage::LineageEvent {
+            generation,
+            event_id: format!("ev-{generation}"),
+            observation_id: format!("obs-{generation}"),
+            txn_time_ms: 1_000 + generation,
+            valid_from_ms: 1_000 + generation,
+            valid_to_ms: None,
+            source: "warehouse-scanner".to_string(),
+            source_version: "1.0.0".to_string(),
+            writer_class,
+            claim_status,
+            provenance: format!("[\"obs-{generation}\"]"),
+            kind: "mission".to_string(),
+            subject: subject.to_string(),
+            predicate: Some("last_seen_at".to_string()),
+            object: Some(format!("dock-{generation}")),
+            chain_digest: format!("chain-{generation}"),
+        }
+    };
+    use crate::{ClaimStatus::*, WriterClass::*};
+    vec![
+        ev(5, "package_17", Confirmed, Sensor),
+        ev(1, "package_17", Confirmed, Sensor),
+        ev(3, "other_subject", Confirmed, Sensor),
+        ev(2, "package_17", Candidate, LlmCandidate),
+        ev(4, "package_17", Confirmed, Sensor),
+        ev(9, "package_17", Confirmed, Sensor),
+    ]
+}
+
+/// The queries the lineage corpus is rendered under.
+///
+/// A selection rule is a function of the query as well as the data, so the
+/// corpus has to be a set of *queries* — one input rendered once would pin the
+/// ordering and leave the bound, the cursor and the page boundary unexercised.
+///
+/// | Label | Holds open |
+/// |---|---|
+/// | `bounded` | the generation bound (gen 9 excluded) and the subject filter (gen 3 excluded), in one query |
+/// | `page_1` / `page_2` / `page_3` | the cursor walk: fills, resumes, and ends — a rule that mis-set the cursor by one moves `page_2` |
+/// | `exactly_full` | a page whose length equals the limit and which IS complete — the off-by-one that reports a successor that does not exist |
+/// | `other_subject` | the subject filter's **positive** control: a rule that dropped every non-matching row rather than filtering by the queried value would empty this |
+#[must_use]
+pub fn lineage_queries() -> Vec<(&'static str, &'static str, i64, crate::lineage::LineagePage)> {
+    let page = |limit: usize, after: Option<i64>| {
+        crate::lineage::LineagePage::new(limit, after)
+            .expect("the corpus queries must be valid, or they pin an error")
+    };
+    vec![
+        ("bounded", "package_17", 5, page(10, None)),
+        ("page_1", "package_17", 9, page(2, None)),
+        ("page_2", "package_17", 9, page(2, Some(2))),
+        ("page_3", "package_17", 9, page(2, Some(5))),
+        ("exactly_full", "package_17", 5, page(4, None)),
+        ("other_subject", "other_subject", 9, page(10, None)),
+    ]
+}
+
+/// Render the lineage selection rule's verdict over its corpus.
+///
+/// Renders the selected **generations** and the boundary, not whole events: the
+/// rule decides *which* events and *in what order*, and it cannot change an
+/// event's own fields. Rendering the fields would make the digest move when an
+/// unrelated column changed, which is the reflexive re-pinning these digests
+/// exist to avoid.
+#[must_use]
+pub fn render_lineage(selection: &crate::lineage::SelectedLineage) -> String {
+    use crate::lineage::PageBoundary;
+    let mut out = String::new();
+    for e in &selection.events {
+        out.push_str(&e.generation.to_string());
+        out.push(FIELD);
+    }
+    match &selection.boundary {
+        PageBoundary::Complete => out.push_str("complete"),
+        PageBoundary::More {
+            next_after_generation,
+        } => {
+            out.push_str("more:");
+            out.push_str(&next_after_generation.to_string());
+        }
+    }
+    out
+}
+
 /// **Run one rule's corpus through the real reducer and render the result.**
 ///
 /// This is the value the declared [`RuleSpec::corpus_digest`] is a digest of. It
@@ -479,6 +603,21 @@ pub fn corpus_rendering(rule: RuleId) -> String {
                 &subject_projection::subject_fold_all(corpus.iter())
                     .expect("the subject corpus must fold, or it is pinning an error"),
             )
+        }
+        RuleId::LineageSelection => {
+            let mut out = String::new();
+            for (label, subject, at_generation, page) in lineage_queries() {
+                out.push_str(label);
+                out.push(FIELD);
+                out.push_str(&render_lineage(&crate::lineage::select_lineage(
+                    lineage_corpus(),
+                    subject,
+                    at_generation,
+                    page,
+                )));
+                out.push(ROW);
+            }
+            out
         }
     }
 }

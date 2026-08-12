@@ -243,17 +243,8 @@ impl<'a> ReadSnapshot<'a> {
     /// query, which rule 3 puts in the error channel. Generation `0` is legal
     /// and reconstructs the empty projection that preceded every event.
     pub fn read_at_generation(&self, generation: i64) -> Result<PinnedRead, StoreError> {
-        if generation < 0 {
-            return Err(StoreError::InvalidGeneration {
-                requested: generation,
-            });
-        }
-
-        let head = checkpoint_on(&self.tx, projection::CURRENT_PROJECTION)?.0;
-        if generation > head {
-            return Ok(PinnedRead::Irreproducible(Irreproducible::NotYetReached {
-                head,
-            }));
+        if let Some(reason) = self.coordinate_reached(generation)? {
+            return Ok(PinnedRead::Irreproducible(reason));
         }
 
         // Compaction check BEFORE the replay, deliberately. Replaying first and
@@ -271,6 +262,96 @@ impl<'a> ReadSnapshot<'a> {
             generation,
             rows: replay_to(&self.tx, generation)?,
         }))
+    }
+
+    /// **Does this coordinate exist yet?** — the half of reproducibility that
+    /// every pinned read answers the same way.
+    ///
+    /// Shared rather than repeated. The compaction half is deliberately NOT
+    /// here, because the two pinned families answer it differently and one
+    /// helper returning both would hide that: a projection replay must REFUSE a
+    /// compacted coordinate (a fold over a log with holes is silently wrong),
+    /// while a lineage read DEGRADES (the removed spans are themselves a fact,
+    /// and `Resolution::Degraded` is the type for it). Merging them would force
+    /// one family to take the other's answer.
+    ///
+    /// # Errors
+    ///
+    /// [`StoreError::InvalidGeneration`] for a negative generation — a malformed
+    /// query rather than an unreachable one, so it goes in the error channel.
+    fn coordinate_reached(&self, generation: i64) -> Result<Option<Irreproducible>, StoreError> {
+        if generation < 0 {
+            return Err(StoreError::InvalidGeneration {
+                requested: generation,
+            });
+        }
+        let head = checkpoint_on(&self.tx, projection::CURRENT_PROJECTION)?.0;
+        Ok((generation > head).then_some(Irreproducible::NotYetReached { head }))
+    }
+
+    /// **One page of a subject's lineage, as it stood at `generation`** —
+    /// box 3f.
+    ///
+    /// `KIRRA-WM-EXPLAIN-TIER-001` asks Tier 3 for a lineage contract that is
+    /// *bounded and paginated, with truncation visible* and *historically
+    /// correct*. The selection rule — which events, in what order, where the
+    /// page ends — is [`crate::lineage::select_lineage`], versioned and
+    /// corpus-pinned; this supplies it with candidates and the compaction
+    /// verdict.
+    ///
+    /// # Compaction DEGRADES here rather than refusing
+    ///
+    /// [`Self::read_at_generation`] refuses a compacted coordinate, and must:
+    /// a projection folded from a log with holes in it is silently wrong, and
+    /// looks exactly like a correct one. Lineage is not folded — it is the
+    /// evidence itself — so a page missing a compacted span is *incomplete*
+    /// rather than *wrong*, and the citations say exactly which generations were
+    /// removed and under which digest. Refusing would discard a usable answer;
+    /// `Resolution::Degraded` is 3g's type for precisely this.
+    ///
+    /// The split mirrors one this store already makes: `read_composed_at_generation`
+    /// refuses while `as_of_composed` degrades.
+    ///
+    /// **No summaries ride along, and that is not an omission.** A
+    /// [`crate::DegradedSummary`] summarises folded *claims* for a key; it is
+    /// not a stand-in for removed evidence *rows*, so offering one here would
+    /// answer a question lineage did not ask. The spans are what name the loss.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::coordinate_reached`].
+    pub fn lineage_at_generation(
+        &self,
+        subject: &str,
+        generation: i64,
+        page: crate::lineage::LineagePage,
+    ) -> Result<PinnedLineage, StoreError> {
+        if let Some(reason) = self.coordinate_reached(generation)? {
+            return Ok(PinnedLineage::Irreproducible(reason));
+        }
+
+        let spans = compacted_at_or_below(&self.tx, generation)?;
+        let completeness = if spans.is_empty() {
+            crate::Resolution::Full
+        } else {
+            crate::Resolution::Degraded {
+                spans,
+                summaries: Vec::new(),
+            }
+        };
+
+        Ok(PinnedLineage::Reproduced {
+            // The fetch is narrowed to the most the rule can consume (see
+            // `lineage_candidates`); the rule still decides everything. The two
+            // are held in agreement by an explicit test rather than by reading.
+            selection: crate::lineage::select_lineage(
+                lineage_candidates(&self.tx, subject, generation, page)?,
+                subject,
+                generation,
+                page,
+            ),
+            completeness,
+        })
     }
 
     /// **Reconstruct claims AND identity at one generation — box 3h.**
@@ -513,6 +594,26 @@ impl PinnedComposition {
     pub fn generation(&self) -> i64 {
         self.projection.generation()
     }
+}
+
+/// The outcome of a pinned lineage read — box 3f.
+///
+/// Note the asymmetry with [`PinnedComposedRead`], which is deliberate and
+/// documented on [`ReadSnapshot::lineage_at_generation`]: only *"that coordinate
+/// does not exist yet"* refuses here. Compaction rides on the reproduced arm as
+/// a [`crate::Resolution`], because removed evidence is a fact a lineage answer
+/// can report rather than a reason it cannot be given.
+#[derive(Debug, Clone)]
+pub enum PinnedLineage {
+    /// The page, and whether compaction bore on it.
+    Reproduced {
+        /// The selected events and the page boundary.
+        selection: crate::lineage::SelectedLineage,
+        /// Whether compaction removed evidence at or below this coordinate.
+        completeness: crate::Resolution,
+    },
+    /// The coordinate has not been reached.
+    Irreproducible(Irreproducible),
 }
 
 /// The outcome of a composed generation-pinned read.
@@ -874,6 +975,135 @@ pub(crate) fn replay_identity_to(
     Ok(entity_projection::IdentityView::new(acc, head))
 }
 
+/// The candidate events [`crate::lineage::select_lineage`] rules over, narrowed
+/// to the most the rule can possibly consume for this request.
+///
+/// # The narrowing is a fetch bound, NOT a second implementation of the rule
+///
+/// An earlier draft of this fetched every event recorded under `subject` and let
+/// the rule bound it, reasoning that a query which pre-applied the generation
+/// bound, the ordering and the page would be a second implementation of a
+/// versioned rule — the drift `read_composed_at_generation` was corrected for on
+/// #1437, *"in a place where nothing would notice."*
+///
+/// That reasoning was right about the hazard and wrong about the remedy. Leaving
+/// the fetch unbounded made a two-event page over a long-lived subject load that
+/// subject's entire history into memory, so the page bound governed the answer
+/// but nothing governed the work — a resource ceiling that grows with how long
+/// the system has been running, on an auditor-reachable read.
+///
+/// The remedy the #1437 lesson actually points at is not *"never pre-narrow"* —
+/// it is *"never pre-narrow anywhere that nothing would notice."* So the
+/// narrowing is supplied together with the thing that notices:
+/// `narrowing_never_removes_what_the_rule_would_keep` runs the rule over the
+/// narrowed candidates AND over the unnarrowed ones and asserts the two
+/// selections are identical, across the corpus and every page position. Tighten
+/// this query past the rule and that test goes red.
+///
+/// # Why `limit + 1`
+///
+/// The rule distinguishes a page that is exactly full and complete from one with
+/// a successor by looking for an event beyond the page — its own comment says
+/// *"one over the limit is fetched conceptually here."* Fetching exactly
+/// `limit + 1` makes that actual: one probe row, so `More` stays detectable, and
+/// never the whole tail.
+///
+/// The rule still applies every filter, the ordering and the truncation itself.
+/// It is idempotent over this narrowing — re-filtering an already-filtered set
+/// is a no-op — which is what makes the agreement test a tautology when the two
+/// agree and a failure the moment they do not.
+pub(crate) fn lineage_candidates(
+    conn: &Connection,
+    subject: &str,
+    at_generation: i64,
+    page: crate::lineage::LineagePage,
+) -> Result<Vec<crate::lineage::LineageEvent>, StoreError> {
+    if !table_exists(conn, "world_events")? {
+        return Ok(Vec::new());
+    }
+    // `after_generation` is exclusive, matching the rule's `e.generation > a`.
+    // `i64::MIN` admits everything, so an absent cursor needs no second query.
+    let after = page.after_generation().unwrap_or(i64::MIN);
+    // `limit` is validated into `1..=MAX_LINEAGE_PAGE` at construction, so this
+    // cannot overflow and the cast is lossless.
+    let probe = i64::try_from(page.limit())
+        .unwrap_or(i64::MAX)
+        .saturating_add(1);
+    let mut stmt = conn.prepare(
+        "SELECT generation, event_id, observation_id, txn_time_ms, valid_from_ms,
+                valid_to_ms, source, source_version, writer_class, claim_status,
+                provenance, kind, subject, predicate, object, chain_digest
+         FROM world_events
+         WHERE subject = ?1 AND generation <= ?2 AND generation > ?3
+         ORDER BY generation ASC
+         LIMIT ?4",
+    )?;
+    let rows = stmt.query_map(params![subject, at_generation, after, probe], |r| {
+        Ok(crate::lineage::LineageEvent {
+            generation: r.get(0)?,
+            event_id: r.get(1)?,
+            observation_id: r.get(2)?,
+            txn_time_ms: r.get(3)?,
+            valid_from_ms: r.get(4)?,
+            valid_to_ms: r.get(5)?,
+            source: r.get(6)?,
+            source_version: r.get(7)?,
+            writer_class: crate::WriterClass::from_stored(&r.get::<_, String>(8)?),
+            claim_status: crate::ClaimStatus::from_stored(&r.get::<_, String>(9)?),
+            provenance: r.get(10)?,
+            kind: r.get(11)?,
+            subject: r.get(12)?,
+            predicate: r.get(13)?,
+            object: r.get(14)?,
+            chain_digest: r.get(15)?,
+        })
+    })?;
+    Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+}
+
+/// Every event recorded under `subject`, narrowed by nothing but the subject.
+///
+/// The reference set the narrowed [`lineage_candidates`] is held against. Exists
+/// ONLY for `narrowing_never_removes_what_the_rule_would_keep` — the production
+/// path must never call it, or the resource bound it was written to enforce is
+/// gone.
+#[cfg(test)]
+fn lineage_candidates_unnarrowed(
+    conn: &Connection,
+    subject: &str,
+) -> Result<Vec<crate::lineage::LineageEvent>, StoreError> {
+    if !table_exists(conn, "world_events")? {
+        return Ok(Vec::new());
+    }
+    let mut stmt = conn.prepare(
+        "SELECT generation, event_id, observation_id, txn_time_ms, valid_from_ms,
+                valid_to_ms, source, source_version, writer_class, claim_status,
+                provenance, kind, subject, predicate, object, chain_digest
+         FROM world_events WHERE subject = ?1",
+    )?;
+    let rows = stmt.query_map(params![subject], |r| {
+        Ok(crate::lineage::LineageEvent {
+            generation: r.get(0)?,
+            event_id: r.get(1)?,
+            observation_id: r.get(2)?,
+            txn_time_ms: r.get(3)?,
+            valid_from_ms: r.get(4)?,
+            valid_to_ms: r.get(5)?,
+            source: r.get(6)?,
+            source_version: r.get(7)?,
+            writer_class: crate::WriterClass::from_stored(&r.get::<_, String>(8)?),
+            claim_status: crate::ClaimStatus::from_stored(&r.get::<_, String>(9)?),
+            provenance: r.get(10)?,
+            kind: r.get(11)?,
+            subject: r.get(12)?,
+            predicate: r.get(13)?,
+            object: r.get(14)?,
+            chain_digest: r.get(15)?,
+        })
+    })?;
+    Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+}
+
 pub(crate) fn table_exists(conn: &Connection, name: &str) -> Result<bool, StoreError> {
     let n: Option<i64> = conn
         .query_row(
@@ -883,4 +1113,159 @@ pub(crate) fn table_exists(conn: &Connection, name: &str) -> Result<bool, StoreE
         )
         .optional()?;
     Ok(n.is_some())
+}
+
+#[cfg(test)]
+mod lineage_fetch_tests {
+    use super::*;
+    use crate::lineage::{select_lineage, LineagePage};
+    use crate::{ClaimStatus, EventId, NewEvent, ObservationId, WorldStore, WriterClass};
+
+    fn tmp(name: &str) -> std::path::PathBuf {
+        let mut p = std::env::temp_dir();
+        p.push(format!(
+            "kirra-world-lineage-fetch-{}-{}.sqlite",
+            name,
+            std::process::id()
+        ));
+        for s in ["", "-wal", "-shm"] {
+            let mut q = p.as_os_str().to_os_string();
+            q.push(s);
+            let _ = std::fs::remove_file(std::path::PathBuf::from(q));
+        }
+        p
+    }
+
+    /// The log's head, read straight from the event table.
+    ///
+    /// Deliberately NOT the `world_current` checkpoint `lineage_at_generation`
+    /// bounds against: this fixture never folds, and lineage reads evidence
+    /// rather than a projection, so the events exist regardless.
+    fn max_generation(conn: &Connection) -> i64 {
+        conn.query_row("SELECT MAX(generation) FROM world_events", [], |r| r.get(0))
+            .expect("a written log has a head")
+    }
+
+    fn append(s: &mut WorldStore, id: &str, subject: &str) {
+        let event_id = EventId::new(id).expect("admissible event id");
+        let observation_id = ObservationId::new(id).expect("admissible observation id");
+        s.append(&NewEvent {
+            event_id: &event_id,
+            observation_id: &observation_id,
+            txn_time_ms: 1_000,
+            valid_from_ms: 1_000,
+            valid_to_ms: None,
+            source: "sensor-a",
+            source_version: "0.1.0",
+            writer_class: WriterClass::Sensor,
+            claim_status: ClaimStatus::Confirmed,
+            provenance: &[],
+            frame_id: None,
+            map_id: None,
+            kind: "observation",
+            subject,
+            subject_ref: None,
+            predicate: Some("at"),
+            object: Some("bench"),
+            payload: r#"{"n":1}"#,
+            payload_schema: 1,
+            retention_class: "raw",
+            trust: None,
+        })
+        .expect("append");
+    }
+
+    /// **The tripwire that lets `lineage_candidates` narrow at all.**
+    ///
+    /// The narrowed fetch and the rule are two expressions of the same bounds,
+    /// and #1437 is the record of what happens when two such expressions drift
+    /// somewhere nothing is watching. This is the watching.
+    ///
+    /// It asserts the property that makes the narrowing sound: the rule's answer
+    /// over the narrowed candidates is IDENTICAL to its answer over every event
+    /// the subject has. Not merely "the page looks right" — identical, including
+    /// the boundary, so a narrowing that ate the `More` probe fails here even
+    /// though every returned event was correct.
+    ///
+    /// Swept across page positions rather than checked once, because the two
+    /// bounds that can disagree are the cursor and the probe, and both are
+    /// invisible on a first page that fits.
+    #[test]
+    fn narrowing_never_removes_what_the_rule_would_keep() {
+        let mut s = WorldStore::open(&tmp("agreement")).unwrap();
+        for i in 1..=9 {
+            append(&mut s, &format!("ev-{i}"), "subject-a");
+            // A second subject interleaved throughout, so a narrowing that lost
+            // the subject filter would also be caught here.
+            append(&mut s, &format!("other-{i}"), "subject-b");
+        }
+
+        let snap = s.read_snapshot().unwrap();
+        let head = max_generation(&snap.tx);
+
+        let mut checked = 0;
+        for limit in [1_usize, 2, 3, 9, 18] {
+            for cursor in [None, Some(0_i64), Some(3), Some(9), Some(head)] {
+                for at in [head, head / 2, 1] {
+                    let page = LineagePage::new(limit, cursor).expect("valid page");
+
+                    let narrowed = select_lineage(
+                        lineage_candidates(&snap.tx, "subject-a", at, page).unwrap(),
+                        "subject-a",
+                        at,
+                        page,
+                    );
+                    let full = select_lineage(
+                        lineage_candidates_unnarrowed(&snap.tx, "subject-a").unwrap(),
+                        "subject-a",
+                        at,
+                        page,
+                    );
+
+                    assert_eq!(
+                        narrowed, full,
+                        "narrowed and unnarrowed disagree at limit {limit}, \
+                         cursor {cursor:?}, generation {at} — the fetch has been \
+                         tightened past the rule"
+                    );
+                    checked += 1;
+                }
+            }
+        }
+        // The sweep is only evidence if it ran; a bound that silently produced
+        // no cases would pass every assertion above.
+        assert_eq!(checked, 75, "the sweep did not cover what it claims to");
+    }
+
+    /// The narrowing's REASON, asserted rather than described: a small page over
+    /// a long history fetches a small number of rows.
+    ///
+    /// Without this, a later refactor could restore the unbounded fetch and only
+    /// the agreement test would run — which the unbounded fetch also passes, it
+    /// being the thing the narrowed one is compared against.
+    #[test]
+    fn a_small_page_over_a_long_history_fetches_a_small_number_of_rows() {
+        let mut s = WorldStore::open(&tmp("bounded")).unwrap();
+        for i in 1..=200 {
+            append(&mut s, &format!("ev-{i}"), "subject-a");
+        }
+
+        let snap = s.read_snapshot().unwrap();
+        let head = max_generation(&snap.tx);
+        let page = LineagePage::new(2, None).expect("valid page");
+
+        let fetched = lineage_candidates(&snap.tx, "subject-a", head, page).unwrap();
+        assert_eq!(
+            fetched.len(),
+            3,
+            "a 2-event page must fetch the page plus ONE probe row, not the history"
+        );
+
+        let all = lineage_candidates_unnarrowed(&snap.tx, "subject-a").unwrap();
+        assert_eq!(
+            all.len(),
+            200,
+            "the history really is long — the bound is not vacuous"
+        );
+    }
 }

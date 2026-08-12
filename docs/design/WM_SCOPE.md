@@ -2035,9 +2035,13 @@ pressure that produced every stale claim this box already documents.
       semantics. `KIRRA-WM-FRESHNESS-POLICY-001`. The fourth `Unknown` freshness
       variant is **decided and omitted** — no reachable case exists; see the
       state machine in the closure.
-- [ ] **3f — Lineage retrieval contract.** Deterministic, bounded, paginated,
-      truncation visible, historically correct. Consumed by Tier 4's `Explain`;
-      does not render.
+- [x] **3f — Lineage retrieval contract.** ✅ **DONE 2026-08-12** — see *"3f
+      closed: lineage is a query family, not a field"* below. Deterministic,
+      bounded, paginated, truncation visible, historically correct. Its own
+      query family with a `LineageRef` and a one-rule version set
+      (`lineage_selection`, `RuleId`'s first non-reducer); compaction degrades
+      rather than refusing; `provenance` is carried verbatim, since walking it
+      is the Tier 4 structure `KIRRA-WM-EXPLAIN-TIER-001` keeps out.
 - [x] **3g — Degradation propagation.** ✅ **DONE 2026-08-11** — see *"3g:
       the boundary finally carries completeness"* below. Every answer family preserves
       `Full`/`Degraded` **independently of the payload outcome**, not just
@@ -3399,3 +3403,188 @@ is safer than the global default it replaced — the classification is a value
 somebody wrote, greppable and reviewable — and it should move to the ruled table
 once an applicable entry exists. The `Caller` variant stays as the honest interim
 while `RULED` is small.
+
+---
+
+### 3f closed: lineage is a query family, not a field — 2026-08-12
+
+`KIRRA-WM-EXPLAIN-TIER-001` asked Tier 3 for *"only the deterministic lineage
+CONTRACT that Tier 4 consumes"*, with two constraints attached: **bounded and
+paginated, with truncation visible**, and **historically correct**.
+
+The scoping call was between a *walk from an answer* — follow the
+`EvidenceDigest` a `WorldAnswer` already carries — and a **query family of its
+own**, with a reference and a version set. The family was chosen, and the
+difference turned out to be more than symmetry: a walk has no pagination story,
+so *"truncation visible"* would have had nothing to bite on, and no version set,
+so a change to which evidence is returned would have reached recorded references
+silently.
+
+#### The rule is versioned because it can change an answer four ways
+
+`lineage_selection` (`kirra_world_store::lineage::select_lineage`) is
+`RuleId`'s fourth member and its first non-reducer. The membership test this
+tier applies is *"can changing this alter a derived answer"*, not *"is this a
+fold"*, and lineage selection can alter one along four axes at once: which
+events are chosen, the generation bound, the order, and where a page ends.
+
+The sharpest of those is the **cursor**. A recorded page-2 reference carries a
+cursor minted by the *old* ordering; replaying it under a new one returns a set
+that is neither the old page 2 nor the new one, and looks entirely ordinary. So
+a moved version refuses rather than replays, exactly as `KIRRA-WM-REDUCER-
+VERSION-001` requires.
+
+#### The dependency set is ONE rule, and the three absences are the claim
+
+| Rule | In? | Why |
+|---|---|---|
+| `lineage_selection` | yes | it decides which events, in what order, where the page ends |
+| `world_current_fold` | **no** | lineage returns evidence, not folded claims — nothing asks which claim won a key |
+| `entity_fold` | **no** | the subject is matched as written; no identity edges are followed |
+| `answer_admissibility` | **no** | an inadmissible claim is still evidence |
+
+The `answer_admissibility` exclusion looks careless and is the important one.
+Lineage exists to answer *"why does this answer say what it says"*, and an event
+that was rejected, or expired, or that an LLM proposed and nobody confirmed, is
+frequently the whole explanation. A lineage showing only servable claims would be
+silent in exactly the cases somebody is investigating. So `select_lineage`
+deliberately does **not** filter on `claim_status`, where `world_current` does.
+
+Each exclusion is also a **tripwire**, asserted in
+`the_lineage_query_depends_on_exactly_one_rule` rather than written down. The
+moment lineage follows an identity edge, `entity_fold` can change what it says
+and must join the set — and the assertion goes red first. That is how
+`entity_fold` entered `CurrentSubject`'s set in 3h.
+
+#### Compaction DEGRADES a lineage page; it does not refuse it
+
+`read_at_generation` refuses a compacted coordinate, and must: a projection
+folded from a log with holes is silently *wrong* and looks exactly like a
+correct one. Lineage is not folded — it is the evidence itself — so a page
+missing a compacted span is *incomplete* rather than wrong, and the citations
+name exactly which generations went and under which digest. The split mirrors
+one the store already makes (`read_composed_at_generation` refuses,
+`as_of_composed` degrades), and it is why `PinnedLineage::Irreproducible` carries
+only `NotYetReached`.
+
+Truncation and degradation are kept **independent**, both observable: a page cut
+short by the caller's own limit is complete evidence, bounded; a page missing a
+compacted span is evidence that no longer exists. Conflating them would cry wolf
+on every paginated read.
+
+#### The tier boundary is where the JSON array starts
+
+§7 records `Explain` as depending on *"derivation edges being real structure
+rather than a JSON array of identifiers"*. `provenance` **is** that array today,
+so a lineage entry carries it **verbatim and unparsed**. Walking it here would be
+Tier 3 inventing the structure whose absence is the reason `Explain` is Tier 4.
+The stopping point is the ruling, not an oversight.
+
+#### Review follow-up: the fetch was bounded by the rule, not by the query
+
+Shipped as reviewed. The first cut of `lineage_candidates` fetched **every**
+event recorded under the subject and let `select_lineage` bound the result,
+reasoning that a query which pre-applied the generation bound, the ordering and
+the page would be a second implementation of a versioned rule — the #1437 drift,
+*"in a place where nothing would notice."*
+
+That reasoning was right about the hazard and wrong about the remedy, and review
+caught it. A two-event page over a long-lived subject loaded that subject's
+entire history into memory: the page bound governed the *answer* while nothing
+governed the *work*, on an auditor-reachable read, with a ceiling that grows with
+how long the system has been running.
+
+It also sat against a standing ruling. `KIRRA-WM-ANSWER-IDENTITY-001` clause 2
+is *"queries are bounded"* — not a preference, but a consequence of D-9's
+measured 10.5 s p99 at 100 000 entities and ADR-0041 D-12's finding that **an
+unbounded query has no bounded cost whatever its scaling verdict.** A new query
+family whose fetch was unbounded by construction was in tension with the ruling
+the box was written under, and the tension was invisible because the answer it
+returned was correctly bounded.
+
+The remedy the #1437 lesson actually points at is not *"never pre-narrow"* — it
+is *"never pre-narrow anywhere that nothing would notice."* So the fetch is now
+narrowed to `subject`, the as-of bound, the cursor and `LIMIT limit + 1`, and the
+narrowing ships **with the thing that notices**:
+`narrowing_never_removes_what_the_rule_would_keep` runs the rule over the
+narrowed candidates and over the unnarrowed ones and asserts the two selections
+are identical — including the boundary — swept across 75 (limit, cursor,
+generation) combinations, since the two bounds that can disagree are the cursor
+and the probe and both are invisible on a first page that fits.
+
+`limit + 1` is what keeps `More` detectable: the rule's own comment already said
+*"one over the limit is fetched conceptually here"*, so the narrowing made actual
+what the rule had assumed.
+
+**Two tests, because one cannot catch both failures.** Four mutations were run:
+
+| Mutation | Agreement test | Bound test |
+|---|---|---|
+| no probe row (`limit` not `limit + 1`) | red | red |
+| as-of bound tightened to `<` | red | green |
+| cursor made inclusive | red | green |
+| **unbounded fetch restored** | **green** | **red** |
+
+The last row is the one worth keeping in view: the agreement test *cannot* catch
+a re-widening, because the unbounded fetch is the reference it compares against —
+re-widening makes the two sides identical, which is exactly what it asserts. That
+is why `a_small_page_over_a_long_history_fetches_a_small_number_of_rows` exists
+as a separate test rather than an extra assertion, and the division of labour is
+now demonstrated rather than argued.
+
+#### The mutation battery
+
+Ten mutations, run against the shipped code:
+
+| Mutation | Caught by |
+|---|---|
+| drop the generation bound | integration (the load-bearing test) |
+| drop the ordering | store unit + corpus control |
+| inclusive cursor | integration (pagination walk) |
+| `More` on a merely-full page | integration + store unit + corpus |
+| version check after the store read | integration (ordering test) |
+| `answer_admissibility` joins the set | 2 unit tests |
+| filter to confirmed claims | integration (candidate test) |
+| compaction refuses instead of degrading | integration (degradation test) |
+| drop the subject filter | store unit + corpus control |
+| `next_page` mints a successor past the end | integration |
+
+**Two survived the integration tests and were caught only at store level**, both
+found by running the mutation rather than by reading the code:
+
+* **ordering** — `generation` is `world_events`' primary key, so SQLite returns
+  rows in that order anyway and the unsorted rule accidentally agrees on every
+  store the tests can build;
+* **the subject filter** — the SQL pre-filters by subject, so
+  `another_subjects_evidence_is_not_in_this_lineage` tests the *query* and not
+  the *rule*.
+
+Both are recorded in the test file's own header, because the tempting conclusion
+— *"the integration tests cover these"* — is false, and a later reader deleting
+the store-level tests as redundant would remove the only coverage there is.
+
+The `More`-on-a-full-page mutation also survived the **first** draft of
+`the_final_page_yields_no_next_reference`, which asked for a 256-limit page over
+two events — a page that could not have been full. Sizing the bound to exactly
+the lineage length put the off-by-one under the test a reader would look in.
+
+A **faithfulness control** sits under the six corpus variants: the variant
+harness with every switch off must reproduce the real rendering byte for byte.
+Without it the six only assert that *something* differs, and a harness wrong in
+some seventh way would satisfy them all while naming the wrong axis.
+
+#### The honest limits
+
+* **Lineage follows no identity edges.** An adjudication recorded under a
+  merged-away alias is not in the canonical subject's lineage. Same limitation
+  `WorldView::ask` states for the subject side, same reason — reading the whole
+  equivalence class is a different query, not a flag on this one — and it is what
+  keeps `entity_fold` legitimately out of the version set.
+* **`LineageRef` is a separate type from `AnswerRef`.** `KIRRA-WM-ANSWER-
+  IDENTITY-001` lists the pagination bound among what a reference serializes;
+  `AnswerRef` has none because its family has no pages, and this one has no clock
+  or staleness budget because evidence does not go stale. One struct holding the
+  union would let a caller build a lineage reference carrying a staleness budget
+  — meaningless, but hashed into the reference's identity, so two references for
+  the same query would compare unequal. They share `QueryKind`,
+  `SemanticVersions`, the refusal ordering and the reproducibility horizon.

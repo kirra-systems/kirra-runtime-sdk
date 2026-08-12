@@ -36,6 +36,13 @@
         "corpus_digest": "c6458e88ed93ce2498a8b02f97e04bdfe3f2c666a1146ed34c081f4e56bcc33f",
         "source_pin": "93d1c69a10f75e8df9e39c9d3cee1a89733b76b8fac7f0b0a7203b25370e04ae"
       }
+    ],
+    "lineage_selection": [
+      {
+        "version": 1,
+        "corpus_digest": "750c6e83b752ea7743032696b2a57b40134e97a91492961513a61e5a1fb8bc55",
+        "source_pin": "e25f2863158f146facab6c2a135c0e6b6efb0fdaa50ee139329bf4b340baa964"
+      }
     ]
   }
 }

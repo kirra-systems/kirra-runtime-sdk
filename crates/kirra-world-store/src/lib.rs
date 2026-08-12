@@ -85,6 +85,7 @@ use rusqlite::{params, Connection, OptionalExtension};
 pub mod adjudication_record;
 pub mod compaction;
 pub mod entity_projection;
+pub mod lineage;
 pub mod projection;
 pub mod retention_driver;
 pub mod retention_sweeper;
@@ -2647,6 +2648,24 @@ impl WorldStore {
     ) -> Result<snapshot::PinnedComposedRead, StoreError> {
         self.read_snapshot()?
             .read_composed_at_generation(generation)
+    }
+
+    /// **One page of a subject's lineage at a pinned generation** — box 3f.
+    ///
+    /// See [`snapshot::ReadSnapshot::lineage_at_generation`], including why this
+    /// family degrades on compaction where the pinned projection read refuses.
+    ///
+    /// # Errors
+    ///
+    /// [`StoreError::InvalidGeneration`] for a negative generation.
+    pub fn lineage_at_generation(
+        &self,
+        subject: &str,
+        generation: i64,
+        page: lineage::LineagePage,
+    ) -> Result<snapshot::PinnedLineage, StoreError> {
+        self.read_snapshot()?
+            .lineage_at_generation(subject, generation, page)
     }
 
     /// **Claims and identity at ONE transaction-time cut.**
