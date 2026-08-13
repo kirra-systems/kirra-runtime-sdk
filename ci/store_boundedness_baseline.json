@@ -267,6 +267,14 @@
     "history_page": {
       "class": "bounded",
       "why": "Box 3d's bounded replacement for `history`. Narrows in SQL with `generation > cursor` and `LIMIT limit + 1` rather than fetching the record and truncating \u2014 #1440's lesson, since truncating after the fetch bounds the ANSWER while leaving the WORK unbounded, which is what made all three defects invisible. The boundary decision is `lineage::boundary_for`, shared with the lineage family so the off-by-one has one implementation."
+    },
+    "resolve_bounded_at": {
+      "class": "bounded",
+      "why": "Box 3d's bounded historical identity read. Discovers the adjudications affecting the queried id through the affected-entity reverse index, expands newly-named entities, and stops at the resolver's own MAX_REDIRECT_EDGES budget \u2014 so it folds the records bearing on one entity's identity rather than every adjudication in the log. The index supplies GENERATIONS only; every record is read from world_events and folded by the unchanged fold_adjudication, so the log remains the sole evidence."
+    },
+    "backfill_adjudication_affects": {
+      "class": "operational",
+      "why": "The one-time scan that fills the v6 reverse index on a migrated store. Deliberately a full scan and deliberately NOT on any request path \u2014 an explicit operational call rather than work hidden in `open`, so the cost lands where an operator can see it. This is exactly the trade box 3d is for: one operational scan buys bounded interactive reads."
     }
   },
   "read_snapshot": {

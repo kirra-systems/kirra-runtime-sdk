@@ -197,6 +197,39 @@ pub fn adjudication_subject(a: &IdentityAdjudication) -> &EntityId {
     }
 }
 
+/// **Every entity an adjudication affects** — box 3d's reverse-index key set.
+///
+/// The union of [`IdentityAdjudication::resulting_lifecycles`]'s keys and
+/// [`adjudication_subject`]. Those two functions already decide which entities
+/// an adjudication touches, and this composes them rather than deciding again:
+/// `resulting_lifecycles` remains the authority for identity semantics, and the
+/// index it feeds is only a materialised access path.
+///
+/// # Why the subject is included as well
+///
+/// `Assert` states no transition — it CREATES, so there is no prior state to
+/// move from — and its `resulting_lifecycles` is deliberately empty. Indexing
+/// only the lifecycle keys would therefore record nothing for an assertion, and
+/// an asserted entity would be undiscoverable by the very index meant to find
+/// it.
+///
+/// Including the subject also over-includes slightly elsewhere: a merge's
+/// survivor is indexed although its own lifecycle does not change. That is the
+/// safe direction and deliberately so — a superset costs a row, a subset
+/// changes history.
+#[must_use]
+pub fn adjudication_affects(a: &IdentityAdjudication) -> Vec<String> {
+    let mut out: Vec<String> = a
+        .resulting_lifecycles()
+        .into_iter()
+        .map(|(e, _)| e.as_str().to_owned())
+        .collect();
+    out.push(adjudication_subject(a).as_str().to_owned());
+    out.sort();
+    out.dedup();
+    out
+}
+
 /// The observation ids a row's `provenance` column should carry.
 ///
 /// [`Justification`] *is* provenance in the store's sense — §14.1's `Evidence`

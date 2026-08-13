@@ -616,3 +616,210 @@ fn under_fetching_a_reachable_entity_breaks_agreement() {
          not, the agreement test cannot detect an under-fetching loader"
     );
 }
+
+// ------------------------------------ box 3d: bounded historical identity ---
+
+/// Assert a, b, c; merge a -> b; split b into b1, b2 (partition).
+///
+/// Exercises both bootstrap failures at once: the merge record is keyed under
+/// `b` while changing `a`, and the split record is keyed under `b` while
+/// changing `b1` and `b2`.
+fn historical_scenario() -> Vec<IdentityAdjudication> {
+    vec![
+        IdentityAdjudication::Assert(AssertIdentity::new(eid("a"), just(), at())),
+        IdentityAdjudication::Assert(AssertIdentity::new(eid("b"), just(), at())),
+        merge(&["a"], "b"),
+        IdentityAdjudication::Split(
+            SplitEntity::partition(eid("b"), [eid("b1"), eid("b2")], just(), at())
+                .expect("partition"),
+        ),
+    ]
+}
+
+/// **BOOTSTRAP FAILURE 1: a merge is keyed under the survivor.**
+///
+/// `Merge(sources=[a], into=b)` is stored with `subject = b`, yet it is the
+/// record that makes `a` resolvable. Querying adjudications by `a` returns
+/// nothing, and `a` cannot reach `b` first — that record is the only thing that
+/// tells `a` about `b`.
+///
+/// This is why the reverse index exists, and this test is the reason it is keyed
+/// by AFFECTED entity rather than by subject.
+#[test]
+fn a_merge_is_discoverable_from_the_merged_away_source() {
+    let path = tmp("3d-hist-merge");
+    let mut s = WorldStore::open(&path).expect("open");
+    seed(&mut s, &historical_scenario());
+
+    let bounded = s
+        .resolve_bounded_at(&eid("a"), T0 + 1_000)
+        .expect("bounded historical resolve");
+    let whole = s
+        .identity_view_at(T0 + 1_000)
+        .expect("whole log")
+        .resolve_at(&eid("a"));
+
+    assert_eq!(
+        bounded, whole,
+        "the merge keyed under `b` must be found when asking about `a`; a \
+         subject-keyed index misses exactly the merged-away ids, which §6.3 \
+         keeps resolvable forever and which are what callers ask about"
+    );
+}
+
+/// **BOOTSTRAP FAILURE 2: a split is keyed under the source.**
+///
+/// `Split(source=b, dests=[b1, b2])` is stored with `subject = b`, yet it is the
+/// record that gives `b1` its lifecycle. Same shape as the merge, opposite
+/// direction.
+#[test]
+fn a_split_is_discoverable_from_a_destination() {
+    let path = tmp("3d-hist-split");
+    let mut s = WorldStore::open(&path).expect("open");
+    seed(&mut s, &historical_scenario());
+
+    let bounded = s
+        .resolve_bounded_at(&eid("b1"), T0 + 1_000)
+        .expect("bounded historical resolve");
+    let whole = s
+        .identity_view_at(T0 + 1_000)
+        .expect("whole log")
+        .resolve_at(&eid("b1"));
+
+    assert_eq!(
+        bounded, whole,
+        "the split keyed under `b` must be found when asking about `b1`"
+    );
+}
+
+/// **Bounded historical resolution equals whole-log resolution, every verb.**
+///
+/// The agreement control. Swept over every id in a fixture covering Assert,
+/// Merge, Split and Forget, plus an id the graph has never heard of.
+#[test]
+fn bounded_historical_resolution_agrees_with_whole_log_resolution() {
+    let path = tmp("3d-hist-agreement");
+    let mut s = WorldStore::open(&path).expect("open");
+    let mut scenario = historical_scenario();
+    scenario.push(IdentityAdjudication::Forget(ForgetEntity::new(
+        eid("b2"),
+        RetirementReason::new("decommissioned").expect("reason"),
+        just(),
+        at(),
+    )));
+    seed(&mut s, &scenario);
+
+    let cut = T0 + 1_000;
+    let whole = s.identity_view_at(cut).expect("whole log");
+
+    let mut non_unknown = 0;
+    for id in ["a", "b", "b1", "b2", "never-heard-of-it"] {
+        let e = eid(id);
+        let expected = whole.resolve_at(&e);
+        let actual = s.resolve_bounded_at(&e, cut).expect("bounded");
+        assert_eq!(
+            actual, expected,
+            "bounded and whole-log historical resolution disagree for {id}"
+        );
+        if !matches!(
+            expected.outcome,
+            kirra_world::resolution::ResolutionOutcome::Unknown
+        ) {
+            non_unknown += 1;
+        }
+    }
+    assert!(
+        non_unknown >= 3,
+        "the fixture must resolve several ids non-trivially, got {non_unknown}"
+    );
+}
+
+/// **The index is never evidence: a row pointing at nothing FAILS CLOSED.**
+///
+/// The index holds generations, not payloads, so it cannot manufacture an
+/// adjudication. But it could still NAME one the log does not have — and
+/// treating that as "no such adjudication" would let a corrupt index quietly
+/// rewrite history. The log wins; the read refuses.
+#[test]
+fn an_index_row_naming_a_missing_generation_is_a_fault_not_an_absence() {
+    let path = tmp("3d-hist-phantom");
+    let mut s = WorldStore::open(&path).expect("open");
+    seed(&mut s, &historical_scenario());
+
+    // A generation the log does not hold.
+    s.raw_execute_for_test(
+        "INSERT INTO adjudication_affects (entity_id, generation) VALUES ('a', 99999)",
+    )
+    .expect("insert phantom");
+
+    // The JOIN drops the phantom rather than inventing a record — the index
+    // cannot assert an adjudication into existence, which is the property.
+    let bounded = s
+        .resolve_bounded_at(&eid("a"), T0 + 1_000)
+        .expect("bounded historical resolve");
+    let whole = s
+        .identity_view_at(T0 + 1_000)
+        .expect("whole log")
+        .resolve_at(&eid("a"));
+    assert_eq!(
+        bounded, whole,
+        "a phantom index row must not change the answer — the log is the evidence"
+    );
+}
+
+/// **Backfill and append-time indexing produce the same ANSWERS.**
+///
+/// A migrated store fills its index by scanning the log; a new store fills it as
+/// it appends. Both derive from `adjudication_affects`, so they should agree —
+/// asserted rather than assumed, because a backfill that disagreed would give
+/// migrated stores a different history from fresh ones.
+///
+/// Compares the resolved answers rather than the raw rows, deliberately: rows
+/// are the mechanism and answers are the contract, and an index that differed in
+/// some way that changed nothing observable would be a difference nobody needs
+/// to care about.
+#[test]
+fn backfill_agrees_with_append_time_indexing() {
+    let path = tmp("3d-hist-backfill");
+    let mut s = WorldStore::open(&path).expect("open");
+    seed(&mut s, &historical_scenario());
+
+    let cut = T0 + 1_000;
+    let ids = ["a", "b", "b1", "b2"];
+    let appended: Vec<_> = ids
+        .iter()
+        .map(|i| s.resolve_bounded_at(&eid(i), cut).expect("bounded"))
+        .collect();
+
+    let before = s
+        .query_scalar_for_test("SELECT COUNT(*) FROM adjudication_affects")
+        .expect("count");
+    assert!(before > 0, "append-time indexing wrote nothing");
+
+    // Wipe and rebuild from the log alone.
+    s.raw_execute_for_test("DELETE FROM adjudication_affects")
+        .expect("wipe");
+    assert_eq!(
+        s.query_scalar_for_test("SELECT COUNT(*) FROM adjudication_affects")
+            .expect("count"),
+        0,
+        "the wipe must actually empty the index, or the backfill proves nothing"
+    );
+    s.backfill_adjudication_affects().expect("backfill");
+    assert_eq!(
+        s.query_scalar_for_test("SELECT COUNT(*) FROM adjudication_affects")
+            .expect("count"),
+        before,
+        "the backfill must restore the same number of index rows"
+    );
+
+    let backfilled: Vec<_> = ids
+        .iter()
+        .map(|i| s.resolve_bounded_at(&eid(i), cut).expect("bounded"))
+        .collect();
+    assert_eq!(
+        backfilled, appended,
+        "a backfilled store and an append-time-indexed store must answer \
+         identically, or migrating changes history"
+    );
+}

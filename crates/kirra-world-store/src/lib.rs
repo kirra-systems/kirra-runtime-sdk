@@ -987,6 +987,7 @@ pub fn schema_digest() -> String {
     effective.push_str(schema::SCHEMA_V3_MIGRATION);
     effective.push_str(schema::SCHEMA_V4_MIGRATION);
     effective.push_str(schema::SCHEMA_V5_MIGRATION);
+    effective.push_str(schema::SCHEMA_V6_MIGRATION);
     sha256_hex(effective.as_bytes())
 }
 
@@ -1041,6 +1042,7 @@ impl WorldStore {
             tx.execute_batch(schema::SCHEMA_V3_MIGRATION)?;
             tx.execute_batch(schema::SCHEMA_V4_MIGRATION)?;
             tx.execute_batch(schema::SCHEMA_V5_MIGRATION)?;
+            tx.execute_batch(schema::SCHEMA_V6_MIGRATION)?;
             tx.execute(
                 "INSERT INTO world_store_meta (key, value) VALUES ('schema_version', ?1)",
                 params![SCHEMA_VERSION.to_string()],
@@ -1142,6 +1144,15 @@ impl WorldStore {
         // `invalid_shape_rows`, never silently coerced.
         if from < 5 {
             tx.execute_batch(schema::SCHEMA_V5_MIGRATION)?;
+        }
+        // v6 ADDS a table and nothing else — no column change, no trigger, no
+        // touch of an existing row. An existing store migrates with an EMPTY
+        // index, which is why `backfill_adjudication_affects` exists and why it
+        // is an explicit operational step rather than work hidden in `open`:
+        // a full scan of the adjudication log belongs where an operator can see
+        // it, not on the path of whoever happens to open the store first.
+        if from < 6 {
+            tx.execute_batch(schema::SCHEMA_V6_MIGRATION)?;
         }
 
         // Digest before version, inside the transaction. The order no longer
@@ -1377,8 +1388,52 @@ impl WorldStore {
         let payload = adjudication_record::encode_adjudication(adjudication);
         let provenance = adjudication_record::adjudication_provenance(adjudication);
         let prov: Vec<&str> = provenance.iter().map(String::as_str).collect();
-        let subject = adjudication_record::adjudication_subject(adjudication).as_str();
+        let subject = adjudication_record::adjudication_subject(adjudication)
+            .as_str()
+            .to_owned();
+        let subject = subject.as_str();
 
+        let affected = adjudication_record::adjudication_affects(adjudication);
+
+        // The event and its index rows commit TOGETHER. An index that could lag
+        // the log by one crash would under-report exactly the newest
+        // adjudication — the one a historical read is most likely to need — and
+        // would do it silently, since a missing index row reads as "no such
+        // adjudication" rather than as damage.
+        //
+        // Explicit BEGIN/COMMIT rather than `unchecked_transaction`, because
+        // that borrows `self.conn` while `append` needs `&mut self`.
+        self.conn.execute_batch("BEGIN IMMEDIATE")?;
+        let generation = match self.append_adjudication_inner(row, &payload, &prov, subject) {
+            Ok(g) => g,
+            Err(e) => {
+                let _ = self.conn.execute_batch("ROLLBACK");
+                return Err(e);
+            }
+        };
+        for entity in &affected {
+            if let Err(e) = self.conn.execute(
+                "INSERT OR IGNORE INTO adjudication_affects (entity_id, generation)
+                 VALUES (?1, ?2)",
+                params![entity, generation],
+            ) {
+                let _ = self.conn.execute_batch("ROLLBACK");
+                return Err(e.into());
+            }
+        }
+        self.conn.execute_batch("COMMIT")?;
+        Ok(generation)
+    }
+
+    /// The event half of [`Self::append_adjudication`], split out so the
+    /// caller can hold a transaction across it and the index write.
+    fn append_adjudication_inner(
+        &mut self,
+        row: &adjudication_record::AdjudicationRow<'_>,
+        payload: &str,
+        prov: &[&str],
+        subject: &str,
+    ) -> Result<i64, StoreError> {
         self.append(&NewEvent {
             event_id: row.event_id,
             observation_id: row.observation_id,
@@ -1389,7 +1444,7 @@ impl WorldStore {
             source_version: row.source_version,
             writer_class: row.writer_class,
             claim_status: ClaimStatus::Confirmed,
-            provenance: &prov,
+            provenance: prov,
             frame_id: None,
             map_id: None,
             kind: adjudication_record::ADJUDICATION_KIND,
@@ -1397,11 +1452,226 @@ impl WorldStore {
             subject_ref: None,
             predicate: None,
             object: None,
-            payload: &payload,
+            payload,
             payload_schema: adjudication_record::ADJUDICATION_PAYLOAD_SCHEMA,
             retention_class: adjudication_record::ADJUDICATION_RETENTION_CLASS,
             trust: None,
         })
+    }
+
+    /// **Resolve one id against the identity graph as it stood at a cut,
+    /// bounded** — box 3d.
+    ///
+    /// The bounded counterpart to `identity_view_at(cut).resolve_at(id)`, which
+    /// replays EVERY adjudication in the log up to `as_known_at_ms` to answer
+    /// about one entity.
+    ///
+    /// # Why this needed an index and the live path did not
+    ///
+    /// Live identity is graph-local: `entities_projection` is keyed by entity,
+    /// so following redirects is a walk over rows you can look up. Historical
+    /// identity is RECONSTRUCTIVE — it folds adjudication events — and those are
+    /// keyed by the entity the judgement is ABOUT, not by the entities it
+    /// affects.
+    ///
+    /// That makes it non-graph-local, and the failure is a bootstrap one:
+    /// `Merge(sources=[A], into=B)` is keyed under `B`, yet it is the record
+    /// that makes `A` resolvable. Querying by `A` finds nothing, and `A` cannot
+    /// reach `B` first — that record is the only thing that tells `A` about `B`.
+    /// Split destinations have the same relationship to their source. So no
+    /// iteration over `subject` can discover them, which is why the reverse
+    /// index exists.
+    ///
+    /// # The index accelerates discovery; it does not define semantics
+    ///
+    /// It supplies GENERATIONS and nothing else. Every adjudication is then read
+    /// from `world_events` and decoded exactly as the whole-log path decodes it,
+    /// and folded by the unchanged `fold_adjudication`. The index holds no
+    /// payload, so it physically cannot manufacture an adjudication the log does
+    /// not have — and a generation it names that the log lacks fails closed
+    /// rather than resolving to a guess.
+    ///
+    /// # Errors
+    ///
+    /// [`StoreError::CorruptEntityProjectionRow`] on an undecodable payload or
+    /// an index row naming a generation `world_events` does not hold;
+    /// [`StoreError::IdentityClosureTooLarge`] if discovery exceeds
+    /// [`snapshot::MAX_IDENTITY_CLOSURE`] — refused, never truncated.
+    pub fn resolve_bounded_at(
+        &self,
+        id: &kirra_world::reference::EntityId,
+        as_known_at_ms: i64,
+    ) -> Result<entity_projection::HistoricalAnswer, StoreError> {
+        let mut acc = std::collections::BTreeMap::new();
+        let mut head: i64 = 0;
+        let mut seen_entities: std::collections::BTreeSet<String> =
+            std::collections::BTreeSet::new();
+        let mut seen_generations: std::collections::BTreeSet<i64> =
+            std::collections::BTreeSet::new();
+        let mut frontier: Vec<String> = vec![id.as_str().to_owned()];
+
+        // Depth-capped by the same budget the resolver enforces, so discovery
+        // stops where the walk would. Expanding newly-named entities is what
+        // makes this a closure rather than a single lookup: a merge found from
+        // `A` names `B`, and `B`'s own adjudications may name `C`.
+        for _ in 0..=kirra_world::resolution::MAX_REDIRECT_EDGES {
+            if frontier.is_empty() {
+                break;
+            }
+            let mut next: Vec<String> = Vec::new();
+            for entity in frontier.drain(..) {
+                if !seen_entities.insert(entity.clone()) {
+                    continue;
+                }
+                if seen_entities.len() > snapshot::MAX_IDENTITY_CLOSURE {
+                    return Err(StoreError::IdentityClosureTooLarge {
+                        from: id.as_str().to_owned(),
+                        limit: snapshot::MAX_IDENTITY_CLOSURE,
+                    });
+                }
+                for (generation, adjudication) in
+                    self.adjudications_affecting(&entity, as_known_at_ms)?
+                {
+                    if !seen_generations.insert(generation) {
+                        continue;
+                    }
+                    // Every entity this adjudication touches becomes a discovery
+                    // seed, which is what closes the bootstrap gap: reaching the
+                    // merge from `A` reveals `B` even though the record is keyed
+                    // under `B`.
+                    next.extend(adjudication_record::adjudication_affects(&adjudication));
+                    entity_projection::fold_adjudication(&mut acc, &adjudication, generation);
+                    head = head.max(generation);
+                }
+            }
+            frontier = next;
+        }
+
+        let resolution = self.identity_resolution_at()?;
+        let view = entity_projection::HistoricalIdentityView::new(
+            entity_projection::IdentityView::new(acc, head),
+            as_known_at_ms,
+            resolution,
+        );
+        Ok(view.resolve_at(id))
+    }
+
+    /// The adjudications affecting `entity` at or before `as_known_at_ms`.
+    ///
+    /// The index supplies the GENERATIONS; `world_events` supplies the records.
+    /// An index row naming a generation the log does not hold is a fault, not an
+    /// absence — the index is never evidence, so it may not assert an
+    /// adjudication into existence.
+    fn adjudications_affecting(
+        &self,
+        entity: &str,
+        as_known_at_ms: i64,
+    ) -> Result<Vec<(i64, kirra_world::adjudication::IdentityAdjudication)>, StoreError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT e.generation, e.payload, e.payload_schema, e.provenance
+             FROM adjudication_affects a
+             JOIN world_events e ON e.generation = a.generation
+             WHERE a.entity_id = ?1
+               AND e.claim_status = 'confirmed'
+               AND e.kind = ?2
+               AND e.txn_time_ms <= ?3
+             ORDER BY e.generation ASC",
+        )?;
+        let mapped = stmt.query_map(
+            params![
+                entity,
+                adjudication_record::ADJUDICATION_KIND,
+                as_known_at_ms
+            ],
+            |r| {
+                Ok((
+                    r.get::<_, i64>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, i64>(2)?,
+                    r.get::<_, String>(3)?,
+                ))
+            },
+        )?;
+
+        let mut out = Vec::new();
+        for row in mapped {
+            let (generation, payload, payload_schema, provenance) = row?;
+            let cited: Vec<String> = serde_json::from_str(&provenance).map_err(|e| {
+                StoreError::CorruptEntityProjectionRow {
+                    detail: format!("generation {generation}: provenance is not a JSON array: {e}"),
+                }
+            })?;
+            let adjudication =
+                adjudication_record::decode_adjudication(&payload, payload_schema, &cited)
+                    .map_err(|e| StoreError::CorruptEntityProjectionRow {
+                        detail: format!("generation {generation}: {e}"),
+                    })?;
+            out.push((generation, adjudication));
+        }
+        Ok(out)
+    }
+
+    /// **Populate the affected-entity index from the existing log** — box 3d.
+    ///
+    /// A v6 migration installs an EMPTY index, because it adds a table and
+    /// touches no row. This fills it, and is deliberately an explicit
+    /// operational call rather than work hidden inside `open`: it scans every
+    /// adjudication, and a full scan belongs where an operator can see it.
+    ///
+    /// Idempotent — `INSERT OR IGNORE` on the same primary key — so running it
+    /// twice, or after new appends have already indexed themselves, converges
+    /// rather than double-counting.
+    ///
+    /// The rows it writes are derived by the SAME
+    /// [`adjudication_record::adjudication_affects`] the append path uses, so a
+    /// backfilled store and an append-time-indexed store agree by construction
+    /// rather than by two code paths happening to match.
+    ///
+    /// # Errors
+    ///
+    /// [`StoreError::CorruptEntityProjectionRow`] if a stored adjudication
+    /// cannot be decoded — fail-closed, since an index built over a payload
+    /// nobody could read would be an index nobody can trust.
+    pub fn backfill_adjudication_affects(&mut self) -> Result<usize, StoreError> {
+        let mut rows: Vec<(i64, String, i64, String)> = Vec::new();
+        {
+            let mut stmt = self.conn.prepare(
+                "SELECT generation, payload, payload_schema, provenance
+                 FROM world_events
+                 WHERE claim_status = 'confirmed' AND kind = ?1
+                 ORDER BY generation ASC",
+            )?;
+            let mapped = stmt.query_map(params![adjudication_record::ADJUDICATION_KIND], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
+            })?;
+            for row in mapped {
+                rows.push(row?);
+            }
+        }
+
+        let mut written = 0usize;
+        let tx = self.conn.unchecked_transaction()?;
+        for (generation, payload, payload_schema, provenance) in rows {
+            let cited: Vec<String> = serde_json::from_str(&provenance).map_err(|e| {
+                StoreError::CorruptEntityProjectionRow {
+                    detail: format!("generation {generation}: provenance is not a JSON array: {e}"),
+                }
+            })?;
+            let adjudication =
+                adjudication_record::decode_adjudication(&payload, payload_schema, &cited)
+                    .map_err(|e| StoreError::CorruptEntityProjectionRow {
+                        detail: format!("generation {generation}: {e}"),
+                    })?;
+            for entity in adjudication_record::adjudication_affects(&adjudication) {
+                written += tx.execute(
+                    "INSERT OR IGNORE INTO adjudication_affects (entity_id, generation)
+                     VALUES (?1, ?2)",
+                    params![entity, generation],
+                )?;
+            }
+        }
+        tx.commit()?;
+        Ok(written)
     }
 
     /// Install the entity projection's DDL, lazily.
