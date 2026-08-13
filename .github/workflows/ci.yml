@@ -1675,6 +1675,22 @@ jobs:
         run: |
           python3 ci/check_world_semantics.py --self-test
           python3 ci/check_world_semantics.py
+      - name: Kirra World query-boundedness gate (Tier 3 box 3d)
+        # THE RULE (KIRRA-WM-ANSWER-IDENTITY-001 clause 2): an interactive query
+        # may not hide an unbounded store operation behind a bounded-looking API.
+        #
+        # Three defects in three consecutive PRs violated this invisibly — each
+        # returned a correctly bounded ANSWER while doing unbounded WORK, so no
+        # behavioural test could see it and two took a reviewer to catch. The
+        # boundedness of a query is a STRUCTURAL property, not an observable one,
+        # which is why it needs a gate rather than tests.
+        #
+        # Self-test first: it proves the gate still rejects the historical defect
+        # shape (bounded public request -> unbounded store call -> post-fetch
+        # truncation) rather than merely passing on a clean tree.
+        run: |
+          python3 ci/check_query_boundedness.py --self-test
+          python3 ci/check_query_boundedness.py
       - name: Kirra World freshness-coverage gate (Tier 3 box 3e)
         # THE RULE (KIRRA-WM-FRESHNESS-POLICY-001): freshness semantics are
         # centrally ruled by claim kind. Timeless must be explicitly granted,

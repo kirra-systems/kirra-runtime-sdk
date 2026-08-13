@@ -1502,50 +1502,11 @@ impl WorldStore {
         id: &kirra_world::reference::EntityId,
         as_known_at_ms: i64,
     ) -> Result<entity_projection::HistoricalAnswer, StoreError> {
-        let mut acc = std::collections::BTreeMap::new();
-        let mut head: i64 = 0;
-        let mut seen_entities: std::collections::BTreeSet<String> =
-            std::collections::BTreeSet::new();
-        let mut seen_generations: std::collections::BTreeSet<i64> =
-            std::collections::BTreeSet::new();
-        let mut frontier: Vec<String> = vec![id.as_str().to_owned()];
-
-        // Depth-capped by the same budget the resolver enforces, so discovery
-        // stops where the walk would. Expanding newly-named entities is what
-        // makes this a closure rather than a single lookup: a merge found from
-        // `A` names `B`, and `B`'s own adjudications may name `C`.
-        for _ in 0..=kirra_world::resolution::MAX_REDIRECT_EDGES {
-            if frontier.is_empty() {
-                break;
-            }
-            let mut next: Vec<String> = Vec::new();
-            for entity in frontier.drain(..) {
-                if !seen_entities.insert(entity.clone()) {
-                    continue;
-                }
-                if seen_entities.len() > snapshot::MAX_IDENTITY_CLOSURE {
-                    return Err(StoreError::IdentityClosureTooLarge {
-                        from: id.as_str().to_owned(),
-                        limit: snapshot::MAX_IDENTITY_CLOSURE,
-                    });
-                }
-                for (generation, adjudication) in
-                    self.adjudications_affecting(&entity, as_known_at_ms)?
-                {
-                    if !seen_generations.insert(generation) {
-                        continue;
-                    }
-                    // Every entity this adjudication touches becomes a discovery
-                    // seed, which is what closes the bootstrap gap: reaching the
-                    // merge from `A` reveals `B` even though the record is keyed
-                    // under `B`.
-                    next.extend(adjudication_record::adjudication_affects(&adjudication));
-                    entity_projection::fold_adjudication(&mut acc, &adjudication, generation);
-                    head = head.max(generation);
-                }
-            }
-            frontier = next;
-        }
+        let (acc, head) = bounded_identity_acc_on(
+            &self.conn,
+            &[id.as_str().to_owned()],
+            IdentityCut::TxnTimeAtMost(as_known_at_ms),
+        )?;
 
         let resolution = self.identity_resolution_at()?;
         let view = entity_projection::HistoricalIdentityView::new(
@@ -1562,55 +1523,6 @@ impl WorldStore {
     /// An index row naming a generation the log does not hold is a fault, not an
     /// absence — the index is never evidence, so it may not assert an
     /// adjudication into existence.
-    fn adjudications_affecting(
-        &self,
-        entity: &str,
-        as_known_at_ms: i64,
-    ) -> Result<Vec<(i64, kirra_world::adjudication::IdentityAdjudication)>, StoreError> {
-        let mut stmt = self.conn.prepare(
-            "SELECT e.generation, e.payload, e.payload_schema, e.provenance
-             FROM adjudication_affects a
-             JOIN world_events e ON e.generation = a.generation
-             WHERE a.entity_id = ?1
-               AND e.claim_status = 'confirmed'
-               AND e.kind = ?2
-               AND e.txn_time_ms <= ?3
-             ORDER BY e.generation ASC",
-        )?;
-        let mapped = stmt.query_map(
-            params![
-                entity,
-                adjudication_record::ADJUDICATION_KIND,
-                as_known_at_ms
-            ],
-            |r| {
-                Ok((
-                    r.get::<_, i64>(0)?,
-                    r.get::<_, String>(1)?,
-                    r.get::<_, i64>(2)?,
-                    r.get::<_, String>(3)?,
-                ))
-            },
-        )?;
-
-        let mut out = Vec::new();
-        for row in mapped {
-            let (generation, payload, payload_schema, provenance) = row?;
-            let cited: Vec<String> = serde_json::from_str(&provenance).map_err(|e| {
-                StoreError::CorruptEntityProjectionRow {
-                    detail: format!("generation {generation}: provenance is not a JSON array: {e}"),
-                }
-            })?;
-            let adjudication =
-                adjudication_record::decode_adjudication(&payload, payload_schema, &cited)
-                    .map_err(|e| StoreError::CorruptEntityProjectionRow {
-                        detail: format!("generation {generation}: {e}"),
-                    })?;
-            out.push((generation, adjudication));
-        }
-        Ok(out)
-    }
-
     /// **Populate the affected-entity index from the existing log** — box 3d.
     ///
     /// A v6 migration installs an EMPTY index, because it adds a table and
@@ -2044,7 +1956,7 @@ impl WorldStore {
     /// # Errors
     ///
     /// As [`Self::identity_view_at`].
-    pub fn resolve_at(
+    pub fn resolve_at_whole_graph(
         &self,
         id: &kirra_world::reference::EntityId,
         as_known_at_ms: i64,
@@ -3014,6 +2926,75 @@ impl WorldStore {
     /// # Errors
     ///
     /// As [`Self::as_of`] and [`Self::identity_view_at`].
+    /// **Claims AND historical identity at one cut, both bounded** — box 3d.
+    ///
+    /// The bounded replacement for [`Self::as_of_composed`], and deliberately
+    /// ONE primitive rather than two bounded calls a caller stitches together.
+    ///
+    /// # Why not two calls
+    ///
+    /// Box 3h established that a historical answer must observe claims and
+    /// identity at ONE coordinate. Replacing `as_of_composed` with a bounded
+    /// claims read plus a bounded identity read would satisfy boundedness and
+    /// quietly reintroduce the cross-read incoherence 3h closed — closing 3d by
+    /// breaking 3h. The transaction below is what makes that impossible, exactly
+    /// as it does for the unbounded original.
+    ///
+    /// # What is bounded, and what is not
+    ///
+    /// The claims half was ALREADY bounded — `as_of` is keyed by subject. Only
+    /// the identity half was not: it replayed every adjudication in the log. It
+    /// now folds only the records bearing on the objects these claims name,
+    /// discovered through the affected-entity reverse index.
+    ///
+    /// The resolver, the fold and the completeness semantics are untouched.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::as_of_composed`], plus the index-backed discovery errors of
+    /// [`Self::resolve_bounded_at`].
+    pub fn as_of_composed_bounded(
+        &self,
+        subject: &str,
+        valid_at_ms: i64,
+        as_known_at_ms: i64,
+    ) -> Result<snapshot::TemporalComposition, StoreError> {
+        // One snapshot for both halves — the same mechanism as the unbounded
+        // original, kept deliberately identical so the coherence argument does
+        // not have to be re-made.
+        let tx = self.conn.unchecked_transaction()?;
+        let answer = self.as_of(subject, valid_at_ms, as_known_at_ms)?;
+
+        // Seeded from the objects these claims actually name. A claim with no
+        // object contributes no seed, so a subject whose claims are all
+        // value-shaped folds no adjudications at all.
+        let seeds: Vec<String> = answer
+            .claims
+            .iter()
+            .filter_map(|c| c.object.clone())
+            .collect();
+        let (acc, head) = bounded_identity_acc_on(
+            &self.conn,
+            &seeds,
+            IdentityCut::TxnTimeAtMost(as_known_at_ms),
+        )?;
+        drop(tx);
+
+        Ok(snapshot::TemporalComposition::new(
+            answer,
+            entity_projection::IdentityView::new(acc, head),
+        ))
+    }
+
+    /// **Claims AND historical identity at one transaction-time cut** — box 3h.
+    ///
+    /// The UNBOUNDED form, retained for operators and analysis: the identity
+    /// half replays every adjudication in the log. Box 3d replaced its use at
+    /// the answer boundary with [`Self::as_of_composed_bounded`].
+    ///
+    /// # Errors
+    ///
+    /// [`StoreError::Sqlite`] on any read failure.
     pub fn as_of_composed(
         &self,
         subject: &str,
@@ -4506,4 +4487,144 @@ pub struct HistoryPage {
     pub answer: compaction::TemporalAnswer,
     /// Whether more claims follow this page.
     pub boundary: lineage::PageBoundary,
+}
+
+/// The adjudications affecting `entity` at or before `as_known_at_ms` — box 3d.
+///
+/// A free function over a `Connection` so both `WorldStore` and a
+/// `ReadSnapshot`'s transaction can use it: the composed historical read must
+/// take BOTH halves from one snapshot, so it cannot route through a method that
+/// binds a different connection.
+///
+/// The index supplies the GENERATIONS; `world_events` supplies the records. An
+/// index row naming a generation the log does not hold contributes nothing —
+/// the index is never evidence, so it may not assert an adjudication into
+/// existence.
+pub(crate) fn adjudications_affecting_on(
+    conn: &rusqlite::Connection,
+    entity: &str,
+    bound: IdentityCut,
+) -> Result<Vec<(i64, kirra_world::adjudication::IdentityAdjudication)>, StoreError> {
+    // The AXIS is part of the bound, not assumed. A transaction-time cut and a
+    // generation cut are different questions, and using one where the other is
+    // meant admits adjudications recorded after the coordinate — silently
+    // breaking box 3h's guarantee that a pinned answer resolves identity as it
+    // stood THEN. Caught while wiring the pinned path, which had been handed
+    // `i64::MAX` as a transaction time.
+    let column = match bound {
+        IdentityCut::TxnTimeAtMost(_) => "e.txn_time_ms",
+        IdentityCut::GenerationAtMost(_) => "e.generation",
+    };
+    let value = match bound {
+        IdentityCut::TxnTimeAtMost(v) | IdentityCut::GenerationAtMost(v) => v,
+    };
+    let mut stmt = conn.prepare(&format!(
+        "SELECT e.generation, e.payload, e.payload_schema, e.provenance
+         FROM adjudication_affects a
+         JOIN world_events e ON e.generation = a.generation
+         WHERE a.entity_id = ?1
+           AND e.claim_status = 'confirmed'
+           AND e.kind = ?2
+           AND {column} <= ?3
+         ORDER BY e.generation ASC"
+    ))?;
+    let mapped = stmt.query_map(
+        params![entity, adjudication_record::ADJUDICATION_KIND, value],
+        |r| {
+            Ok((
+                r.get::<_, i64>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, i64>(2)?,
+                r.get::<_, String>(3)?,
+            ))
+        },
+    )?;
+    let mut out = Vec::new();
+    for row in mapped {
+        let (generation, payload, payload_schema, provenance) = row?;
+        let cited: Vec<String> = serde_json::from_str(&provenance).map_err(|e| {
+            StoreError::CorruptEntityProjectionRow {
+                detail: format!("generation {generation}: provenance is not a JSON array: {e}"),
+            }
+        })?;
+        let adjudication =
+            adjudication_record::decode_adjudication(&payload, payload_schema, &cited).map_err(
+                |e| StoreError::CorruptEntityProjectionRow {
+                    detail: format!("generation {generation}: {e}"),
+                },
+            )?;
+        out.push((generation, adjudication));
+    }
+    Ok(out)
+}
+
+/// **Fold the identity records bearing on `seeds` at a cut, bounded** — box 3d.
+///
+/// The shared closure build. Discovers adjudications through the reverse index,
+/// expands every entity each one names — which is what closes the bootstrap gap,
+/// since reaching a merge from its source reveals the survivor the record is
+/// keyed under — and stops at the resolver's own traversal budget.
+///
+/// Returns the accumulator and the highest generation folded, ready for
+/// `IdentityView::new`.
+pub(crate) fn bounded_identity_acc_on(
+    conn: &rusqlite::Connection,
+    seeds: &[String],
+    bound: IdentityCut,
+) -> Result<
+    (
+        std::collections::BTreeMap<String, entity_projection::ProjectedEntity>,
+        i64,
+    ),
+    StoreError,
+> {
+    let mut acc = std::collections::BTreeMap::new();
+    let mut head: i64 = 0;
+    let mut seen_entities: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    let mut seen_generations: std::collections::BTreeSet<i64> = std::collections::BTreeSet::new();
+    let mut frontier: Vec<String> = seeds.to_vec();
+
+    for _ in 0..=kirra_world::resolution::MAX_REDIRECT_EDGES {
+        if frontier.is_empty() {
+            break;
+        }
+        let mut next: Vec<String> = Vec::new();
+        for entity in frontier.drain(..) {
+            if !seen_entities.insert(entity.clone()) {
+                continue;
+            }
+            if seen_entities.len() > snapshot::MAX_IDENTITY_CLOSURE {
+                return Err(StoreError::IdentityClosureTooLarge {
+                    from: seeds.join(", "),
+                    limit: snapshot::MAX_IDENTITY_CLOSURE,
+                });
+            }
+            for (generation, adjudication) in adjudications_affecting_on(conn, &entity, bound)? {
+                if !seen_generations.insert(generation) {
+                    continue;
+                }
+                next.extend(adjudication_record::adjudication_affects(&adjudication));
+                entity_projection::fold_adjudication(&mut acc, &adjudication, generation);
+                head = head.max(generation);
+            }
+        }
+        frontier = next;
+    }
+    Ok((acc, head))
+}
+
+/// **Which axis bounds a historical identity read** — box 3d.
+///
+/// A transaction-time cut and a generation cut answer different questions, and
+/// an untyped `i64` lets one be passed where the other is meant. That is not
+/// hypothetical: the pinned composed read was first written passing `i64::MAX`
+/// as a transaction time, which would have admitted adjudications recorded
+/// AFTER the pinned coordinate — silently breaking box 3h's guarantee that a
+/// recorded reference resolves identity as it stood then.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum IdentityCut {
+    /// Bitemporal: adjudications known by this transaction time.
+    TxnTimeAtMost(i64),
+    /// Generation-pinned: adjudications at or below this log position.
+    GenerationAtMost(i64),
 }

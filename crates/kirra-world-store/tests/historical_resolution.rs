@@ -191,7 +191,9 @@ fn a_query_between_two_merges_stops_at_the_first() {
 
     // Between the two merges: `a` is `b`, and `c` is not yet in the picture.
     assert_eq!(
-        s.resolve_at(&eid("a"), t(3)).expect("resolve").outcome,
+        s.resolve_at_whole_graph(&eid("a"), t(3))
+            .expect("resolve")
+            .outcome,
         ResolutionOutcome::Located {
             entity: eid("b"),
             hops: 1,
@@ -202,7 +204,9 @@ fn a_query_between_two_merges_stops_at_the_first() {
 
     // After the second: the same id now means `c`, through two hops.
     assert_eq!(
-        s.resolve_at(&eid("a"), t(4)).expect("resolve").outcome,
+        s.resolve_at_whole_graph(&eid("a"), t(4))
+            .expect("resolve")
+            .outcome,
         ResolutionOutcome::Located {
             entity: eid("c"),
             hops: 2,
@@ -211,7 +215,9 @@ fn a_query_between_two_merges_stops_at_the_first() {
 
     // ...and the earlier answer is unchanged by having asked the later one.
     assert_eq!(
-        s.resolve_at(&eid("a"), t(3)).expect("resolve").outcome,
+        s.resolve_at_whole_graph(&eid("a"), t(3))
+            .expect("resolve")
+            .outcome,
         ResolutionOutcome::Located {
             entity: eid("b"),
             hops: 1,
@@ -236,7 +242,9 @@ fn a_merge_recorded_later_does_not_affect_an_earlier_instant() {
     );
 
     assert_eq!(
-        s.resolve_at(&eid("a"), t(1)).expect("resolve").outcome,
+        s.resolve_at_whole_graph(&eid("a"), t(1))
+            .expect("resolve")
+            .outcome,
         ResolutionOutcome::Located {
             entity: eid("a"),
             hops: 0,
@@ -244,7 +252,9 @@ fn a_merge_recorded_later_does_not_affect_an_earlier_instant() {
         "before the merge was recorded, `a` is still `a`"
     );
     assert_eq!(
-        s.resolve_at(&eid("a"), t(2)).expect("resolve").outcome,
+        s.resolve_at_whole_graph(&eid("a"), t(2))
+            .expect("resolve")
+            .outcome,
         ResolutionOutcome::Located {
             entity: eid("b"),
             hops: 1,
@@ -267,12 +277,16 @@ fn an_entity_asserted_after_the_instant_is_unknown_at_it() {
     seed(&mut s, &[assert_id("a"), assert_id("b")]);
 
     assert_eq!(
-        s.resolve_at(&eid("b"), t(0)).expect("resolve").outcome,
+        s.resolve_at_whole_graph(&eid("b"), t(0))
+            .expect("resolve")
+            .outcome,
         ResolutionOutcome::Unknown,
         "`b` is asserted at t(1); at t(0) the graph has never heard of it"
     );
     assert_eq!(
-        s.resolve_at(&eid("b"), t(1)).expect("resolve").outcome,
+        s.resolve_at_whole_graph(&eid("b"), t(1))
+            .expect("resolve")
+            .outcome,
         ResolutionOutcome::Located {
             entity: eid("b"),
             hops: 0,
@@ -308,7 +322,9 @@ fn a_split_after_the_instant_does_not_reach_back_into_the_earlier_answer() {
     );
 
     assert_eq!(
-        s.resolve_at(&eid("a"), t(2)).expect("resolve").outcome,
+        s.resolve_at_whole_graph(&eid("a"), t(2))
+            .expect("resolve")
+            .outcome,
         ResolutionOutcome::Located {
             entity: eid("b"),
             hops: 1,
@@ -316,7 +332,9 @@ fn a_split_after_the_instant_does_not_reach_back_into_the_earlier_answer() {
         "before the partition, `a` is unambiguously `b`"
     );
     assert_eq!(
-        s.resolve_at(&eid("a"), t(3)).expect("resolve").outcome,
+        s.resolve_at_whole_graph(&eid("a"), t(3))
+            .expect("resolve")
+            .outcome,
         ResolutionOutcome::Ambiguous {
             successors: vec![eid("b1"), eid("b2")],
         },
@@ -444,7 +462,9 @@ fn an_instant_after_every_record_answers_as_the_head_does() {
 
     let current = s.identity_view().expect("current view");
     assert_eq!(
-        s.resolve_at(&eid("a"), t(10_000)).expect("resolve").outcome,
+        s.resolve_at_whole_graph(&eid("a"), t(10_000))
+            .expect("resolve")
+            .outcome,
         resolve(&current, &eid("a"))
     );
 
@@ -506,7 +526,9 @@ fn a_contradiction_refuses_at_and_after_it_arose_but_not_before() {
     );
 
     assert_eq!(
-        s.resolve_at(&eid("a"), t(3)).expect("resolve").outcome,
+        s.resolve_at_whole_graph(&eid("a"), t(3))
+            .expect("resolve")
+            .outcome,
         ResolutionOutcome::Located {
             entity: eid("b"),
             hops: 1,
@@ -514,7 +536,9 @@ fn a_contradiction_refuses_at_and_after_it_arose_but_not_before() {
         "before the second merge the history is consistent and answers"
     );
     assert_eq!(
-        s.resolve_at(&eid("a"), t(4)).expect("resolve").outcome,
+        s.resolve_at_whole_graph(&eid("a"), t(4))
+            .expect("resolve")
+            .outcome,
         ResolutionOutcome::Refused(RefusalReason::ContradictoryHistory { at: eid("a") }),
         "once both merges are visible the graph contradicts itself and must \
          refuse rather than pick one"
@@ -577,7 +601,9 @@ fn a_candidate_same_as_row_is_invisible_to_the_historical_fold() {
     .expect("append candidate");
 
     assert_eq!(
-        s.resolve_at(&eid("a"), t(2)).expect("resolve").outcome,
+        s.resolve_at_whole_graph(&eid("a"), t(2))
+            .expect("resolve")
+            .outcome,
         ResolutionOutcome::Located {
             entity: eid("a"),
             hops: 0,
@@ -585,7 +611,9 @@ fn a_candidate_same_as_row_is_invisible_to_the_historical_fold() {
         "a candidate merge must not redirect `a` at any instant"
     );
     assert_eq!(
-        s.resolve_at(&eid("a"), t(10)).expect("resolve").outcome,
+        s.resolve_at_whole_graph(&eid("a"), t(10))
+            .expect("resolve")
+            .outcome,
         ResolutionOutcome::Located {
             entity: eid("a"),
             hops: 0,
@@ -624,7 +652,7 @@ fn a_historical_answer_carries_a_resolution_and_it_is_full_because_adjudications
         &[assert_id("a"), assert_id("b"), merge(&["a"], "b")],
     );
 
-    let answer = s.resolve_at(&eid("a"), t(2)).expect("resolve");
+    let answer = s.resolve_at_whole_graph(&eid("a"), t(2)).expect("resolve");
     assert_eq!(answer.resolution, Resolution::Full);
     assert!(!answer.is_degraded());
     assert_eq!(
@@ -701,7 +729,7 @@ fn compacting_raw_observations_does_not_degrade_a_historical_identity_answer() {
         "nothing was compacted, so the assertion below would hold vacuously"
     );
 
-    let answer = s.resolve_at(&eid("a"), t(2)).expect("resolve");
+    let answer = s.resolve_at_whole_graph(&eid("a"), t(2)).expect("resolve");
     assert_eq!(
         answer.resolution,
         Resolution::Full,

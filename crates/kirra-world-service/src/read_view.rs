@@ -651,9 +651,19 @@ impl<'a> WorldView<'a> {
         // COMPOSED at one transaction-time cut. Objects resolve through the
         // identity graph as it stood at `as_known_at_ms`, so an adjudication
         // recorded after that instant cannot rewrite this answer.
+        // BOUNDED, and still ONE composed read — box 3d.
+        //
+        // `as_of_composed` replayed every adjudication in the log to build the
+        // identity half. The bounded form folds only the records bearing on the
+        // objects these claims name, discovered through the affected-entity
+        // reverse index.
+        //
+        // Deliberately NOT a bounded claims read plus a bounded identity read:
+        // that would satisfy boundedness while reintroducing the cross-read
+        // incoherence box 3h closed, i.e. closing 3d by breaking 3h.
         let composed = self
             .store
-            .as_of_composed(subject, valid_at_ms, as_known_at_ms)?;
+            .as_of_composed_bounded(subject, valid_at_ms, as_known_at_ms)?;
         // Both halves MOVED out together. An earlier draft cloned the identity
         // view and then dropped the original — a full copy of the entity graph
         // on every call, for nothing. Caught in review on #1438.

@@ -2019,7 +2019,10 @@ pressure that produced every stale claim this box already documents.
       `as_known_at` over a multi-projection answer is otherwise approximately a
       lie. `IdentityView` already records the single-snapshot argument for one
       walk; this is that argument across projections.
-- [~] **3d — Typed query engine.** The RATCHET half is ✅ **DONE 2026-08-10**
+- [~] **3d — Typed query engine.** The RATCHET half is ✅ **DONE 2026-08-10**;
+      the BOUNDEDNESS half ✅ **DONE 2026-08-12** (`ci/check_query_boundedness.py`
+      + the affected-entity reverse index; see *"3d: boundedness is structural,
+      not observable"*). The typed request/dispatch surface itself is still open
       (`ci/check_world_answer_boundary.py`); the typed engine itself is still
       open — see *"3d's ratchet closed ahead of its engine"* below. The only
       supported path for **domain questions**. Operational reads are explicitly carved out — `verify_chain`,
@@ -3407,6 +3410,119 @@ once an applicable entry exists. The `Caller` variant stays as the honest interi
 while `RULED` is small.
 
 ---
+
+### 3d: boundedness is structural, not observable — 2026-08-12
+
+`KIRRA-WM-ANSWER-IDENTITY-001` clause 2 is *"queries are bounded"*. Three
+defects in three consecutive PRs violated it, each invisibly:
+
+| PR | Query | Shape | Caught by |
+|---|---|---|---|
+| #1440 | `lineage` | per-page over a whole-history fetch | reviewer |
+| #1441 | `subject_summary` | per-subject over a whole-store scan | reviewer |
+| #1441 | `history` | no bound at all | nobody — written while documenting the other two |
+
+Building the gate found **two more** that three PRs and two reviews had passed
+over: `ask` loaded the entire entity graph to answer about one subject, and
+`AnswerRef::resolve` reconstructed the whole projection to re-execute one
+recorded answer.
+
+#### The mutation that proves a gate was necessary
+
+Rewriting `history_page` to fetch every row and truncate in Rust returns an
+**identical answer**. All 13 pagination controls pass. Nothing observable
+differs — which is the entire defect class in one mutation, and why review kept
+missing it.
+
+The gate missed it too, at first: rules 2 and 3 look for CALLS to unbounded
+methods, and that mutation calls nothing unbounded, it writes unbounded SQL
+inline. Rule 4 closes it — a `bounded`-classified method that accepts a page
+must carry a `LIMIT` in its own query.
+
+> Behavioural equivalence cannot prove bounded execution when the only
+> difference is where truncation happens.
+
+#### The classification is fail-closed, not a denylist
+
+Every public read method must be classified `bounded` / `unbounded` /
+`operational` with a reason, and an **unclassified method reds the gate** — 3e's
+pattern. A denylist fails the way the defects failed: a new method is not on it
+and nothing notices. This caught `resolve_bounded` one commit after the rule
+was written, on its own author.
+
+It also corrected a classification made from a signature: `resolve_at(id, cut)`
+reads as a point lookup and its body is
+`self.identity_view_at(cut)?.resolve_at(id)` — the whole graph, then an index.
+It had already been proposed as the *fix* for `ask`. Renamed
+`resolve_at_whole_graph`.
+
+#### Live identity is graph-local; historical identity is not
+
+`ask` was bounded by loading only the entities reachable from the objects its
+claims name — a depth-capped preload, because
+`AdjudicationGraph::lifecycle_of` has no error channel and its own docs forbid a
+storage-backed implementation turning a read failure into `None`. Fallible work
+happens before resolution; the resolver is untouched.
+
+That approach does **not** transfer to `ask_as_of`. Historical identity is
+RECONSTRUCTIVE — `identity_view_at` folds adjudication events — and those are
+keyed by the entity a judgement is ABOUT, not the entities it affects. The
+verb-by-verb adjacency map:
+
+| Verb | Keyed under | Lifecycle changes | Discoverable from the affected entity? |
+|---|---|---|---|
+| `Assert` | the entity | — (creates) | ✅ |
+| `Merge{sources, into}` | **`into`** | each `source` | ❌ |
+| `Split{source, dests}` | **`source`** | each `dest`; `source` if partition | ❌ for destinations |
+| `Forget` | the entity | the entity | ✅ |
+
+**A bootstrap failure.** `Merge(sources=[A], into=B)` is keyed under `B` yet is
+the record that makes `A` resolvable: querying by `A` finds nothing, and `A`
+cannot reach `B` first because that record is the only thing naming `B`. No
+iteration order escapes it.
+
+`adjudication_subject`'s own doc had already refused this exact index — *"a
+subject index that looks like it answers 'what happened to entity X' — and
+silently misses the merged-away ids, which are exactly the ones a caller is
+asking about — is worse than no index at all."*
+
+#### The reverse index, and why it cannot become evidence
+
+`adjudication_affects (entity_id, generation)` — generations and nothing else.
+A reader discovers WHICH generations to read, then reads the records from
+`world_events` and folds them with the unchanged `fold_adjudication`. The index
+holds no adjudication content, so it **physically cannot manufacture one**.
+
+Rows derive from `resulting_lifecycles()` ∪ `adjudication_subject()`, written
+transactionally with the event. `resulting_lifecycles` remains the authority for
+identity semantics; the index is a materialised access path.
+
+> The index may accelerate discovery; it may not define identity semantics.
+
+#### Bounding must not break 3h
+
+Both historical sites use ONE composed primitive rather than two bounded calls.
+A bounded claims read plus a bounded identity read would satisfy boundedness and
+reintroduce the cross-read incoherence box 3h closed — closing 3d by breaking
+3h.
+
+The axis is typed for the same reason: `IdentityCut::TxnTimeAtMost` versus
+`GenerationAtMost`. The pinned composed read was first written passing
+`i64::MAX` as a transaction time, which would have admitted adjudications
+recorded AFTER the pinned coordinate. An untyped `i64` let one axis be passed
+where the other was meant.
+
+Subject-filtering the CLAIMS replay is sound and identity-filtering is not:
+`fold_step` keys on `(subject, predicate_key)` and does no cross-subject work.
+That asymmetry is why one half needed a `WHERE` clause and the other needed an
+index.
+
+#### Where 3d stands
+
+The boundedness invariant is closed with **zero exceptions**: every interactive
+boundary query is bounded, and the gate is wired into CI with a self-test that
+still rejects the historical defect shape. The typed request/dispatch surface
+over the five families remains open.
 
 ### 3g follow-up closed: two families, two mechanisms — 2026-08-12
 

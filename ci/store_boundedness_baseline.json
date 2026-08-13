@@ -176,10 +176,6 @@
       "class": "operational",
       "why": "Returns a HANDLE, reading nothing. The rows come from `ReadSnapshot`'s own methods, which are classified separately below -- a snapshot must not become a way to reach an unbounded read without being seen."
     },
-    "resolve_at": {
-      "class": "unbounded",
-      "why": "SIGNATURE-BOUNDED, IMPLEMENTATION-UNBOUNDED \u2014 the literal defect shape, in the store. `resolve_at(id, cut)` takes one entity id and reads like a point lookup, but its body is `self.identity_view_at(cut)?.resolve_at(id)`: it materialises the WHOLE equivalence graph and then indexes it. Classified `bounded` on first pass from the signature alone, which is exactly the mistake the transitive check exists to catch, and it caught it."
-    },
     "resolved_entities": {
       "class": "unbounded",
       "why": "Every summarised entity in the store."
@@ -275,6 +271,14 @@
     "backfill_adjudication_affects": {
       "class": "operational",
       "why": "The one-time scan that fills the v6 reverse index on a migrated store. Deliberately a full scan and deliberately NOT on any request path \u2014 an explicit operational call rather than work hidden in `open`, so the cost lands where an operator can see it. This is exactly the trade box 3d is for: one operational scan buys bounded interactive reads."
+    },
+    "as_of_composed_bounded": {
+      "class": "bounded",
+      "why": "Box 3d. Both halves bounded inside ONE transaction: `as_of` was already subject-keyed, and the identity half now folds only the adjudications bearing on the objects those claims name, discovered through the affected-entity reverse index. Deliberately one primitive rather than two bounded calls \u2014 two would satisfy boundedness while reintroducing the cross-read incoherence box 3h closed."
+    },
+    "resolve_at_whole_graph": {
+      "class": "unbounded",
+      "why": "RENAMED from `resolve_at` on box 3d. Its body is `self.identity_view_at(cut)?.resolve_at(id)` \u2014 it materialises the WHOLE equivalence graph and then indexes it, so the old name read as a point lookup and was classified `bounded` from its signature on the first pass. The name now says what it does. Renaming also removes a real ambiguity in the gate's name-based scan: `HistoricalIdentityView::resolve_at` is a pure in-memory call on an already-loaded view, and sharing a name with an unbounded store method made every use of it look like a violation. `resolve_bounded_at` is the bounded form."
     }
   },
   "read_snapshot": {
@@ -309,6 +313,10 @@
     "identity_view_for": {
       "class": "bounded",
       "why": "Box 3d. Loads only the entities reachable from the seed ids within MAX_REDIRECT_EDGES hops, so `ask` pays O(predicates x budget) instead of O(entities) to resolve the objects its own claims name. Snapshot-scoped so the identity half of a composed answer is observed at the same point as the claims half \u2014 a WorldStore-level bounded resolve would be a second connection and would reintroduce the between-walks incoherence 3c closed."
+    },
+    "read_composed_subject_at_generation": {
+      "class": "bounded",
+      "why": "Box 3d. Re-executes a recorded reference with the identity half bounded to the adjudications bearing on the objects that subject's claims name, cut at the pinned GENERATION rather than a transaction time. Still ONE composed read taken from this snapshot's transaction: splitting it into a bounded claims read plus a bounded identity read would bound the work and reintroduce the cross-read incoherence box 3h closed. The reproducibility refusal is delegated to read_at_generation, so one refusal still covers both halves."
     }
   },
   "interactive_paths": {

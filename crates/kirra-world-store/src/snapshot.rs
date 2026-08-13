@@ -430,6 +430,83 @@ impl<'a> ReadSnapshot<'a> {
     /// # Errors
     ///
     /// As [`Self::read_at_generation`].
+    /// **Claims for ONE subject and its identity at a generation, bounded** —
+    /// box 3d.
+    ///
+    /// The bounded counterpart to [`Self::read_composed_at_generation`], which
+    /// reconstructs the WHOLE claims projection and replays EVERY adjudication
+    /// to re-execute a reference about one subject.
+    ///
+    /// # Still one composed read, and that is the point
+    ///
+    /// Box 3h's rule is that a historical answer resolves objects against the
+    /// identity graph as it stood at ITS coordinate. Splitting this into a
+    /// bounded claims read and a bounded identity read would bound the work and
+    /// reintroduce the incoherence 3h closed — closing 3d by breaking 3h. Both
+    /// halves are taken here, from this snapshot's transaction, at one
+    /// generation.
+    ///
+    /// The reproducibility refusal is DELEGATED to
+    /// [`Self::read_at_generation`] exactly as the unbounded form delegates it,
+    /// so "one refusal covers both halves" stays true because there is one
+    /// implementation of it rather than because copies agree.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::read_composed_at_generation`].
+    pub fn read_composed_subject_at_generation(
+        &self,
+        subject: &str,
+        generation: i64,
+    ) -> Result<PinnedComposedRead, StoreError> {
+        // The reproducibility guard, DELEGATED rather than restated — the same
+        // two checks in the same order as `read_at_generation`, reached through
+        // it so "one refusal covers both halves" stays true because there is one
+        // implementation. Only the REPLAY is narrowed below.
+        if let Some(reason) = self.coordinate_reached(generation)? {
+            return Ok(PinnedComposedRead::Irreproducible(reason));
+        }
+        let spans = compacted_at_or_below(&self.tx, generation)?;
+        if !spans.is_empty() {
+            return Ok(PinnedComposedRead::Irreproducible(
+                Irreproducible::Compacted { spans },
+            ));
+        }
+
+        let projection = PinnedProjection {
+            generation,
+            rows: replay_subject_to(&self.tx, subject, generation)?,
+        };
+
+        // Seeded from the objects THIS subject's claims name.
+        let seeds: Vec<String> = projection
+            .current(subject, i64::MAX)
+            .into_iter()
+            .filter_map(|c| c.object.clone())
+            .collect();
+        // GENERATION-bounded, not time-bounded: a recorded reference names a
+        // log position, and identity must be what it was at that position.
+        let (acc, head) = crate::bounded_identity_acc_on(
+            &self.tx,
+            &seeds,
+            crate::IdentityCut::GenerationAtMost(generation),
+        )?;
+
+        Ok(PinnedComposedRead::Reproduced(PinnedComposition {
+            projection,
+            identity: IdentityView::new(acc, head),
+        }))
+    }
+
+    /// **Claims AND identity at one generation** — box 3h.
+    ///
+    /// The UNBOUNDED form: it reconstructs the whole claims projection and
+    /// replays every adjudication. Box 3d replaced its use at the answer
+    /// boundary with [`Self::read_composed_subject_at_generation`].
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::read_at_generation`].
     pub fn read_composed_at_generation(
         &self,
         generation: i64,
@@ -1118,6 +1195,38 @@ pub(crate) fn replay_to(
     ))?;
     let mut acc = BTreeMap::new();
     let mut rows = stmt.query(params![generation])?;
+    while let Some(row) = rows.next()? {
+        projection::fold_step(&mut acc, claim_from_row(row)?);
+    }
+    Ok(acc)
+}
+
+/// Replay ONE subject's claims from the log up to `generation` — box 3d.
+///
+/// The bounded twin of [`replay_to`], which rebuilds the WHOLE claims
+/// projection to answer about one subject.
+///
+/// Subject-filtering is sound here and would NOT be sound for identity:
+/// `fold_step` keys on `(subject, predicate_key)` and does no cross-subject
+/// work, so folding one subject's rows yields exactly what folding everything
+/// and then selecting that subject yields. The identity fold has no such
+/// property, which is why its bounded form needed a reverse index instead of a
+/// `WHERE` clause.
+pub(crate) fn replay_subject_to(
+    conn: &Connection,
+    subject: &str,
+    generation: i64,
+) -> Result<BTreeMap<(String, String), ProjectedClaim>, StoreError> {
+    if !table_exists(conn, "world_events")? {
+        return Ok(BTreeMap::new());
+    }
+    let mut stmt = conn.prepare(&format!(
+        "SELECT {CLAIM_COLUMNS} FROM world_events
+         WHERE generation <= ?1 AND claim_status = 'confirmed' AND subject = ?2
+         ORDER BY generation ASC"
+    ))?;
+    let mut acc = BTreeMap::new();
+    let mut rows = stmt.query(params![generation, subject])?;
     while let Some(row) = rows.next()? {
         projection::fold_step(&mut acc, claim_from_row(row)?);
     }
