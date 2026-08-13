@@ -549,3 +549,84 @@ fn the_composed_read_holds_both_halves_at_the_same_cut() {
     drop(store);
     cleanup(&path);
 }
+
+// --------------------------------------------------------------- box 3d ---
+
+/// **`ask` resolves an object through a MULTI-HOP merge chain.**
+///
+/// The control for box 3d's bounded identity seeding. `ask` used to load the
+/// WHOLE entity graph to resolve the objects its claims name; it now seeds only
+/// those objects and loads their reachable closure.
+///
+/// A one-hop merge would not prove the seeding follows edges at all — resolving
+/// `a -> b` needs `b`'s row to know `b` is live, so a seed-only loader fails
+/// there too. But a TWO-hop chain is what separates "loads the seed and its
+/// neighbours" from "loads the reachable closure": a loader that stopped after
+/// one level would resolve `a` to a `DanglingRedirect` at `c`, which reads as a
+/// broken graph rather than as a truncated read.
+///
+/// Nothing covered this before 3d — object resolution through `ask` was only
+/// ever exercised at zero hops.
+#[test]
+fn ask_resolves_an_object_two_merges_deep() {
+    let path = tmp("3d-two-hop");
+    let mut store = WorldStore::open(&path).expect("open");
+
+    adjudicate(
+        &mut store,
+        "a1",
+        T0,
+        &IdentityAdjudication::Assert(AssertIdentity::new(eid("dock_alpha"), just(), at())),
+    );
+    adjudicate(
+        &mut store,
+        "a2",
+        T0 + 1,
+        &IdentityAdjudication::Assert(AssertIdentity::new(eid("dock_beta"), just(), at())),
+    );
+    adjudicate(
+        &mut store,
+        "a3",
+        T0 + 2,
+        &IdentityAdjudication::Assert(AssertIdentity::new(eid("dock_gamma"), just(), at())),
+    );
+    adjudicate(
+        &mut store,
+        "m1",
+        T0 + 3,
+        &IdentityAdjudication::Merge(
+            MergeEntities::new(vec![eid("dock_alpha")], eid("dock_beta"), just(), at())
+                .expect("merge"),
+        ),
+    );
+    adjudicate(
+        &mut store,
+        "m2",
+        T0 + 4,
+        &IdentityAdjudication::Merge(
+            MergeEntities::new(vec![eid("dock_beta")], eid("dock_gamma"), just(), at())
+                .expect("merge"),
+        ),
+    );
+    claim_pointing_at(&mut store, "c1", "dock_alpha", T0 + 5);
+    store.fold().expect("fold");
+    store.fold_entity_projection().expect("fold entities");
+
+    let view = WorldView::new(&store, FreshnessSource::Caller(FreshnessPolicy::Timeless));
+    let answer = view.ask("package_17", T0 + 10).expect("ask");
+
+    let WorldLookup::Answered(answers) = answer.lookup() else {
+        panic!("expected an answer, got {:?}", answer.lookup());
+    };
+    let identity = answers[0].object_identity();
+    assert_eq!(
+        identity,
+        &ObjectIdentity::Resolved {
+            entity: "dock_gamma".to_string(),
+            hops: 2,
+        },
+        "the object must resolve two merges deep — a seed-only or one-level \
+         loader reports a dangling redirect here, which looks like a broken \
+         graph rather than a truncated read"
+    );
+}

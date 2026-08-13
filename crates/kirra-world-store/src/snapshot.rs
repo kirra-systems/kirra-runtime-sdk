@@ -354,6 +354,37 @@ impl<'a> ReadSnapshot<'a> {
         })
     }
 
+    /// **The identity graph reachable from `seeds`, and nothing else** — box 3d.
+    ///
+    /// The bounded counterpart to [`Self::identity_view`], which loads every
+    /// entity in the store. An answer only ever resolves the objects its own
+    /// claims name, so loading the whole graph to resolve a handful of ids was
+    /// `O(entities)` work for an `O(predicates)` question.
+    ///
+    /// Snapshot-scoped deliberately: it reads through this snapshot's
+    /// transaction, so the identity half of a composed answer is observed at the
+    /// SAME point as the claims half. A `WorldStore`-level bounded resolve would
+    /// be a second connection and would reintroduce exactly the between-walks
+    /// incoherence this type exists to close.
+    ///
+    /// All seeds are loaded into ONE view rather than one view per object, so
+    /// every object in an answer resolves against the same graph.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::identity_view`], plus
+    /// [`StoreError::IdentityClosureTooLarge`] — refused, never truncated.
+    pub fn identity_view_for(
+        &self,
+        seeds: &[kirra_world::reference::EntityId],
+    ) -> Result<IdentityView, StoreError> {
+        let rows = load_reachable_entity_projection_on(&self.tx, seeds)?;
+        // Generation 0: a REACHABLE SUBSET is not a snapshot of the projection,
+        // and stamping it with the projection's head would label a partial graph
+        // as a complete state of the world.
+        Ok(IdentityView::new(rows, 0))
+    }
+
     /// **Reconstruct claims AND identity at one generation — box 3h.**
     ///
     /// 3h's rule is *"historical queries use historical identity and historical
@@ -395,6 +426,83 @@ impl<'a> ReadSnapshot<'a> {
     /// adjudications itself, up to `generation`, so the reconstruction is
     /// complete at that coordinate by construction. The gate is unnecessary
     /// rather than skipped.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::read_at_generation`].
+    /// **Claims for ONE subject and its identity at a generation, bounded** —
+    /// box 3d.
+    ///
+    /// The bounded counterpart to [`Self::read_composed_at_generation`], which
+    /// reconstructs the WHOLE claims projection and replays EVERY adjudication
+    /// to re-execute a reference about one subject.
+    ///
+    /// # Still one composed read, and that is the point
+    ///
+    /// Box 3h's rule is that a historical answer resolves objects against the
+    /// identity graph as it stood at ITS coordinate. Splitting this into a
+    /// bounded claims read and a bounded identity read would bound the work and
+    /// reintroduce the incoherence 3h closed — closing 3d by breaking 3h. Both
+    /// halves are taken here, from this snapshot's transaction, at one
+    /// generation.
+    ///
+    /// The reproducibility refusal is DELEGATED to
+    /// [`Self::read_at_generation`] exactly as the unbounded form delegates it,
+    /// so "one refusal covers both halves" stays true because there is one
+    /// implementation of it rather than because copies agree.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::read_composed_at_generation`].
+    pub fn read_composed_subject_at_generation(
+        &self,
+        subject: &str,
+        generation: i64,
+    ) -> Result<PinnedComposedRead, StoreError> {
+        // The reproducibility guard, DELEGATED rather than restated — the same
+        // two checks in the same order as `read_at_generation`, reached through
+        // it so "one refusal covers both halves" stays true because there is one
+        // implementation. Only the REPLAY is narrowed below.
+        if let Some(reason) = self.coordinate_reached(generation)? {
+            return Ok(PinnedComposedRead::Irreproducible(reason));
+        }
+        let spans = compacted_at_or_below(&self.tx, generation)?;
+        if !spans.is_empty() {
+            return Ok(PinnedComposedRead::Irreproducible(
+                Irreproducible::Compacted { spans },
+            ));
+        }
+
+        let projection = PinnedProjection {
+            generation,
+            rows: replay_subject_to(&self.tx, subject, generation)?,
+        };
+
+        // Seeded from the objects THIS subject's claims name.
+        let seeds: Vec<String> = projection
+            .current(subject, i64::MAX)
+            .into_iter()
+            .filter_map(|c| c.object.clone())
+            .collect();
+        // GENERATION-bounded, not time-bounded: a recorded reference names a
+        // log position, and identity must be what it was at that position.
+        let (acc, head) = crate::bounded_identity_acc_on(
+            &self.tx,
+            &seeds,
+            crate::IdentityCut::GenerationAtMost(generation),
+        )?;
+
+        Ok(PinnedComposedRead::Reproduced(PinnedComposition {
+            projection,
+            identity: IdentityView::new(acc, head),
+        }))
+    }
+
+    /// **Claims AND identity at one generation** — box 3h.
+    ///
+    /// The UNBOUNDED form: it reconstructs the whole claims projection and
+    /// replays every adjudication. Box 3d replaced its use at the answer
+    /// boundary with [`Self::read_composed_subject_at_generation`].
     ///
     /// # Errors
     ///
@@ -803,12 +911,190 @@ pub(crate) fn load_entity_projection_on(
     let mut out = BTreeMap::new();
     let mut rows = stmt.query([])?;
     while let Some(r) = rows.next()? {
-        let id: String = r.get(0)?;
-        let token: String = r.get(1)?;
-        let redirect: Option<String> = r.get(2)?;
-        let origin: Option<String> = r.get(3)?;
-        let contradicted: i64 = r.get(4)?;
-        let detail: Option<String> = r.get(5)?;
+        let (id, entity) = decode_entity_row(r)?;
+        out.insert(id, entity);
+    }
+    Ok(out)
+}
+
+/// The largest reachable identity closure this will load before refusing.
+///
+/// Far above `MAX_REDIRECT_EDGES` on purpose: this is not the traversal bound,
+/// it is the backstop that keeps a pathological graph from making a "bounded"
+/// read unbounded again. Hitting it is a refusal, never a truncation.
+pub const MAX_IDENTITY_CLOSURE: usize = 4_096;
+
+/// **The entity rows reachable from `from`, and nothing else** — box 3d.
+///
+/// The bounded counterpart to [`load_entity_projection_on`], which loads the
+/// WHOLE graph. `kirra_world::resolution::resolve` already caps its walk at
+/// `MAX_REDIRECT_EDGES`, so a resolution touches at most that many entities
+/// however large the graph is — the unboundedness was never in the traversal,
+/// only in materialising everything before it.
+///
+/// # Why a preloader and not a lazy `AdjudicationGraph`
+///
+/// The obvious fix — implement the trait over per-id SQL reads — is ruled out by
+/// the trait itself. `lifecycle_of` returns `Option<Lifecycle>` with no error
+/// channel, and its documentation is explicit that an implementation backed by
+/// storage must NOT turn a read failure into `None`, because that reports an
+/// existing id as no-such-entity; it prescribes doing the fallible work BEFORE
+/// resolving. This keeps that order: every row is read and decoded here, failing
+/// closed, and the walk then runs over what was loaded.
+///
+/// # Why not a recursive CTE
+///
+/// `WITH RECURSIVE` over `json_each(redirect)` would also bound the read, and
+/// would put edge-following logic in SQL — a SECOND implementation of the
+/// traversal rule that `resolve` owns. This codebase has repeatedly paid for
+/// duplicated semantics drifting; the loader deliberately follows edges with the
+/// same decoded `Lifecycle` the fold wrote, and decides nothing about them.
+///
+/// # The superset argument, and why truncation is refused
+///
+/// This loads every entity within `MAX_REDIRECT_EDGES` hops of `from`, which is
+/// a SUPERSET of anything the walk can reach before exhausting its budget.
+/// Over-fetching is harmless — a superset yields the identical walk — while
+/// under-fetching changes truth, so the bias is deliberate.
+///
+/// A closure larger than [`MAX_IDENTITY_CLOSURE`] is REFUSED rather than
+/// truncated. Handing the walk a truncated graph would turn a
+/// `TraversalBudgetExceeded` refusal into a `DanglingRedirect` one — a wrong
+/// answer about WHY the graph could not be resolved, which is precisely the
+/// confusion the trait's no-error-channel contract exists to prevent.
+pub(crate) fn load_reachable_entity_projection_on(
+    conn: &Connection,
+    seeds: &[kirra_world::reference::EntityId],
+) -> Result<BTreeMap<String, ProjectedEntity>, StoreError> {
+    let mut out = BTreeMap::new();
+    if !table_exists(conn, "entities_projection")? {
+        return Ok(out);
+    }
+    let mut stmt = conn.prepare(
+        "SELECT entity_id, lifecycle, redirect, origin, contradicted, contradiction
+         FROM entities_projection WHERE entity_id = ?1",
+    )?;
+
+    // Breadth-FIRST and depth-capped, not node-capped: the walk's budget counts
+    // HOPS, so "everything within MAX_REDIRECT_EDGES hops" is the set that
+    // provably contains whatever it can reach. A node cap would truncate by
+    // discovery order instead, which a deep chain slips through.
+    // Several seeds at once for a whole answer, not one call per object: the
+    // closures are unioned into ONE view so `resolve` sees the same graph for
+    // every object in an answer. Resolving each object against its own view
+    // would be a different composition, and a shared entity reached from two
+    // objects would be loaded twice.
+    let mut frontier: Vec<String> = seeds.iter().map(|e| e.as_str().to_string()).collect();
+    for _ in 0..=kirra_world::resolution::MAX_REDIRECT_EDGES {
+        if frontier.is_empty() {
+            break;
+        }
+        let mut next: Vec<String> = Vec::new();
+        for id in frontier.drain(..) {
+            if out.contains_key(&id) {
+                continue;
+            }
+            if out.len() >= MAX_IDENTITY_CLOSURE {
+                return Err(StoreError::IdentityClosureTooLarge {
+                    from: seeds
+                        .iter()
+                        .map(|e| e.as_str().to_string())
+                        .collect::<Vec<_>>()
+                        .join(", "),
+                    limit: MAX_IDENTITY_CLOSURE,
+                });
+            }
+            // Two-step rather than `query_row(.., decode_entity_row)`: the
+            // decoder returns `StoreError`, and rusqlite's row mapper may only
+            // return `rusqlite::Error`. Collapsing them would mean decoding
+            // inside the mapper and losing the fail-closed corrupt-row detail.
+            let raw: Option<EntityRowColumns> = stmt
+                .query_row(params![&id], |r| {
+                    Ok((
+                        r.get(0)?,
+                        r.get(1)?,
+                        r.get(2)?,
+                        r.get(3)?,
+                        r.get(4)?,
+                        r.get(5)?,
+                    ))
+                })
+                .optional()?;
+            let Some(raw) = raw else {
+                // Absent is a legitimate answer the walk must see for itself —
+                // it is how `DanglingRedirect` and `Unknown` are distinguished.
+                continue;
+            };
+            let (key, entity) = decode_entity_columns(raw.0, raw.1, raw.2, raw.3, raw.4, raw.5)?;
+            next.extend(neighbours(&entity));
+            out.insert(key, entity);
+        }
+        frontier = next;
+    }
+    Ok(out)
+}
+
+/// The ids one entity's lifecycle points at.
+///
+/// Reads the DECODED lifecycle rather than the stored JSON, so the loader
+/// follows exactly the edges the fold recorded and invents no notion of its own.
+fn neighbours(entity: &ProjectedEntity) -> Vec<String> {
+    use kirra_world::entity::Lifecycle;
+    match &entity.lifecycle {
+        Lifecycle::Merged { into } => vec![into.as_str().to_string()],
+        Lifecycle::Superseded { by } => by.iter().map(|e| e.as_str().to_string()).collect(),
+        Lifecycle::Split { from } => vec![from.as_str().to_string()],
+        _ => Vec::new(),
+    }
+}
+
+/// Decode ONE `entities_projection` row, failing closed.
+///
+/// Extracted so the whole-graph loader and the bounded one decode by calling
+/// the same code rather than by two implementations agreeing. A drifted decoder
+/// would be worse than a drifted query: it could make the two loaders disagree
+/// about an entity's LIFECYCLE, which changes what `resolve` answers.
+fn decode_entity_row(r: &rusqlite::Row<'_>) -> Result<(String, ProjectedEntity), StoreError> {
+    decode_entity_columns(
+        r.get(0)?,
+        r.get(1)?,
+        r.get(2)?,
+        r.get(3)?,
+        r.get(4)?,
+        r.get(5)?,
+    )
+}
+
+/// The six columns of an `entities_projection` row, as read.
+///
+/// Named so the bounded loader can hold one without a six-deep tuple type at
+/// the call site; the decode below still takes them positionally, because they
+/// are read positionally.
+type EntityRowColumns = (
+    String,
+    String,
+    Option<String>,
+    Option<String>,
+    i64,
+    Option<String>,
+);
+
+/// The decode itself, over already-read columns.
+///
+/// Separate from [`decode_entity_row`] because rusqlite's row mapper may only
+/// return `rusqlite::Error`, while this fails closed with
+/// [`StoreError::CorruptEntityProjectionRow`] carrying which row and why. The
+/// bounded loader reads the columns first and decodes here for that reason.
+#[allow(clippy::too_many_arguments)]
+fn decode_entity_columns(
+    id: String,
+    token: String,
+    redirect: Option<String>,
+    origin: Option<String>,
+    contradicted: i64,
+    detail: Option<String>,
+) -> Result<(String, ProjectedEntity), StoreError> {
+    {
         let contradiction = match (contradicted != 0, detail.as_deref()) {
             (false, _) => None,
             (true, Some(raw)) => Some(entity_projection::contradiction_from_json(raw).map_err(
@@ -837,16 +1123,15 @@ pub(crate) fn load_entity_projection_on(
                 detail: format!("{id}: inadmissible entity id: {e:?}"),
             }
         })?;
-        out.insert(
+        Ok((
             id,
             ProjectedEntity {
                 entity,
                 lifecycle,
                 contradiction,
             },
-        );
+        ))
     }
-    Ok(out)
 }
 
 /// Compacted spans that removed anything at or below `generation`.
@@ -910,6 +1195,38 @@ pub(crate) fn replay_to(
     ))?;
     let mut acc = BTreeMap::new();
     let mut rows = stmt.query(params![generation])?;
+    while let Some(row) = rows.next()? {
+        projection::fold_step(&mut acc, claim_from_row(row)?);
+    }
+    Ok(acc)
+}
+
+/// Replay ONE subject's claims from the log up to `generation` — box 3d.
+///
+/// The bounded twin of [`replay_to`], which rebuilds the WHOLE claims
+/// projection to answer about one subject.
+///
+/// Subject-filtering is sound here and would NOT be sound for identity:
+/// `fold_step` keys on `(subject, predicate_key)` and does no cross-subject
+/// work, so folding one subject's rows yields exactly what folding everything
+/// and then selecting that subject yields. The identity fold has no such
+/// property, which is why its bounded form needed a reverse index instead of a
+/// `WHERE` clause.
+pub(crate) fn replay_subject_to(
+    conn: &Connection,
+    subject: &str,
+    generation: i64,
+) -> Result<BTreeMap<(String, String), ProjectedClaim>, StoreError> {
+    if !table_exists(conn, "world_events")? {
+        return Ok(BTreeMap::new());
+    }
+    let mut stmt = conn.prepare(&format!(
+        "SELECT {CLAIM_COLUMNS} FROM world_events
+         WHERE generation <= ?1 AND claim_status = 'confirmed' AND subject = ?2
+         ORDER BY generation ASC"
+    ))?;
+    let mut acc = BTreeMap::new();
+    let mut rows = stmt.query(params![generation, subject])?;
     while let Some(row) = rows.next()? {
         projection::fold_step(&mut acc, claim_from_row(row)?);
     }

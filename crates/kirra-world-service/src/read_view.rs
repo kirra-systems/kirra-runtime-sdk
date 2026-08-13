@@ -566,9 +566,25 @@ impl<'a> WorldView<'a> {
             });
         }
 
-        // Loaded once for the whole answer, from the same snapshot as the
-        // claims. Per-claim reads would be both slower and incoherent.
-        let identity = snapshot.identity_view()?;
+        // BOUNDED, and loaded once for the whole answer from the same snapshot
+        // as the claims — box 3d.
+        //
+        // This was `snapshot.identity_view()`: the WHOLE entity graph, to answer
+        // a question about one subject. Correct, coherent, and `O(entities)`
+        // work for an `O(predicates)` question — the third instance of the
+        // defect class #1440 and #1441 fixed, found by the gate rather than by
+        // review, on the most-used query in the system.
+        //
+        // Only the objects this subject's claims actually name are seeded, so
+        // the load is bounded by the subject's predicate count times the
+        // resolver's own traversal budget. Still ONE view for the whole answer:
+        // per-claim views would resolve each object against a different graph.
+        let seeds: Vec<EntityId> = claims
+            .iter()
+            .filter_map(|c| c.object.as_deref())
+            .filter_map(|o| EntityId::new(o).ok())
+            .collect();
+        let identity = snapshot.identity_view_for(&seeds)?;
         let identity_is_current = snapshot.identity_is_current()?;
 
         let clock = now_ms.max(0).unsigned_abs();
@@ -635,9 +651,19 @@ impl<'a> WorldView<'a> {
         // COMPOSED at one transaction-time cut. Objects resolve through the
         // identity graph as it stood at `as_known_at_ms`, so an adjudication
         // recorded after that instant cannot rewrite this answer.
+        // BOUNDED, and still ONE composed read — box 3d.
+        //
+        // `as_of_composed` replayed every adjudication in the log to build the
+        // identity half. The bounded form folds only the records bearing on the
+        // objects these claims name, discovered through the affected-entity
+        // reverse index.
+        //
+        // Deliberately NOT a bounded claims read plus a bounded identity read:
+        // that would satisfy boundedness while reintroducing the cross-read
+        // incoherence box 3h closed, i.e. closing 3d by breaking 3h.
         let composed = self
             .store
-            .as_of_composed(subject, valid_at_ms, as_known_at_ms)?;
+            .as_of_composed_bounded(subject, valid_at_ms, as_known_at_ms)?;
         // Both halves MOVED out together. An earlier draft cloned the identity
         // view and then dropped the original — a full copy of the entity graph
         // on every call, for nothing. Caught in review on #1438.
@@ -723,8 +749,13 @@ impl<'a> WorldView<'a> {
     /// # Errors
     ///
     /// As [`Self::ask`].
-    pub fn history(&self, subject: &str) -> Result<TemporalLookup, AskError> {
-        let answer = self.store.history(subject)?;
+    pub fn history(
+        &self,
+        subject: &str,
+        page: kirra_world_store::lineage::LineagePage,
+    ) -> Result<HistoryLookup, AskError> {
+        let paged = self.store.history_page(subject, page)?;
+        let answer = paged.answer;
         let completeness = answer.resolution;
 
         let mut answers = Vec::new();
@@ -759,9 +790,10 @@ impl<'a> WorldView<'a> {
         } else {
             WorldLookup::Answered(answers)
         };
-        Ok(TemporalLookup {
+        Ok(HistoryLookup {
             lookup,
             completeness,
+            boundary: paged.boundary,
             semantics: SemanticVersions::for_query(QueryKind::SubjectHistory),
         })
     }
@@ -978,6 +1010,58 @@ fn assemble(
         provenance,
         event_id: claim.event_id.clone(),
     })
+}
+
+/// **One page of a subject's record, its completeness, and whether more follows.**
+///
+/// Box 3d gave `history` a page; this is `TemporalLookup` plus the page
+/// boundary. Kept a separate type rather than adding an `Option<PageBoundary>`
+/// to `TemporalLookup`, because `ask_as_of` has no pages and a nullable bound on
+/// a family that cannot have one is a field every reader has to ask about.
+///
+/// The two signals are INDEPENDENT and both observable, exactly as 3g requires:
+/// `boundary` is about this QUERY (did the caller's limit cut it short), while
+/// `completeness` is about the RECORD (was evidence removed). A page that is
+/// `More` and `Full` is an ordinary first page; one that is `Complete` and
+/// `Degraded` is the whole surviving record of something that lost evidence.
+#[derive(Debug, Clone)]
+pub struct HistoryLookup {
+    lookup: WorldLookup,
+    completeness: Resolution,
+    boundary: kirra_world_store::lineage::PageBoundary,
+    semantics: SemanticVersions,
+}
+
+impl HistoryLookup {
+    /// The claims in this page.
+    #[must_use]
+    pub fn lookup(&self) -> &WorldLookup {
+        &self.lookup
+    }
+
+    /// Whether the RECORD is whole, or what remains of it.
+    #[must_use]
+    pub fn completeness(&self) -> &Resolution {
+        &self.completeness
+    }
+
+    /// Whether compaction could have borne on this record.
+    #[must_use]
+    pub fn is_degraded(&self) -> bool {
+        self.completeness.is_degraded()
+    }
+
+    /// Whether more claims follow this PAGE.
+    #[must_use]
+    pub fn boundary(&self) -> &kirra_world_store::lineage::PageBoundary {
+        &self.boundary
+    }
+
+    /// The rules this answer was produced under.
+    #[must_use]
+    pub fn semantics(&self) -> &SemanticVersions {
+        &self.semantics
+    }
 }
 
 /// **One subject's summary and its evidence coverage** — the 3g follow-up.

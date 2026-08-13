@@ -115,6 +115,27 @@ pub enum PageBoundary {
     },
 }
 
+/// **Decide a page's boundary from an over-fetched result** — the shared rule.
+///
+/// Both the lineage selection and box 3d's paginated history fetch `limit + 1`
+/// and call this, so *"`More` only when an event actually follows, never when
+/// the page merely filled exactly"* has ONE implementation. Two copies of an
+/// off-by-one is how a caller paginating to exhaustion gains a wasted round trip
+/// on one family and not the other.
+///
+/// `fetched` is the count BEFORE truncation; `last_kept` is the generation of
+/// the final retained row.
+#[must_use]
+pub fn boundary_for(fetched: usize, limit: usize, last_kept: i64) -> PageBoundary {
+    if fetched > limit {
+        PageBoundary::More {
+            next_after_generation: last_kept,
+        }
+    } else {
+        PageBoundary::Complete
+    }
+}
+
 impl PageBoundary {
     /// Whether the page stopped short of the whole lineage.
     #[must_use]

@@ -113,7 +113,7 @@ pub const CHAIN_ALGORITHM: &str = "kirra-audit-hash/compute_record_hash_v2";
 /// | 3 | the `subject_kind` discriminant | `KIRRA-WM-CANDIDATE-ID-001` |
 /// | 4 | the `entity_id_mint` ledger | `WM_SCOPE.md` §5 |
 /// | 5 | the object-requires-predicate trigger | `KIRRA-WM-CLAIM-SHAPES-001` |
-pub const SCHEMA_VERSION: i64 = 5;
+pub const SCHEMA_VERSION: i64 = 6;
 
 /// **v2 — the four orthogonal trust axes, added additively.**
 ///
@@ -364,4 +364,58 @@ WHEN NEW.object IS NOT NULL AND NEW.predicate IS NULL
 BEGIN
     SELECT RAISE(ABORT, 'KIRRA-WM-CLAIM-SHAPES-001: an object-bearing claim requires a predicate');
 END;
+"#;
+
+/// **v6 — the affected-entity reverse index** (Tier 3 box 3d).
+///
+/// # The problem it exists for
+///
+/// An adjudication's `subject` column names the entity the judgement is ABOUT —
+/// a merge's SURVIVOR, a split's SOURCE — and
+/// [`super::adjudication_record::adjudication_subject`] says in its own doc that
+/// this "is not sufficient to find every entity an adjudication affects".
+///
+/// That makes historical identity reconstruction non-graph-local, and the
+/// failure is a bootstrap one: `Merge(sources=[A], into=B)` is keyed under `B`,
+/// but it is the record that makes `A` resolvable. Querying by `A` finds
+/// nothing, and `A` cannot reach `B` first — that record is the only thing that
+/// tells `A` about `B`. The same holds for split destinations against their
+/// source.
+///
+/// So a per-entity index over `subject` would silently miss exactly the
+/// merged-away ids callers ask about, since §6.3 keeps a merged id resolvable
+/// forever. This table closes that by keying on the AFFECTED entity instead.
+///
+/// # The index is never evidence
+///
+/// It stores `(entity_id, generation)` and NOTHING ELSE — no payload, no
+/// lifecycle, no redirect. A reader uses it to discover WHICH generations to
+/// read, then reads those adjudications from `world_events` as it always did.
+///
+/// That is structural rather than a promise: the index physically cannot
+/// manufacture an adjudication, because it holds no adjudication content. If it
+/// names a generation `world_events` does not have, the read fails closed. The
+/// hash-chained log remains the only evidence; this is a materialised access
+/// path over it.
+///
+/// # Derived from `resulting_lifecycles()`, not from a second opinion
+///
+/// Rows are written at append time from the union of
+/// `IdentityAdjudication::resulting_lifecycles()` keys and
+/// `adjudication_subject()` — the two functions that already decide which
+/// entities an adjudication touches. `resulting_lifecycles` stays the authority
+/// for identity semantics; this table only accelerates finding the records.
+///
+/// The subject is included as well as the lifecycle keys because `Assert`
+/// states no transition (it CREATES, so there is no prior state to move from)
+/// and would otherwise index nothing. Over-including is the safe direction: a
+/// superset costs a row, a subset changes history.
+pub const SCHEMA_V6_MIGRATION: &str = r#"
+CREATE TABLE IF NOT EXISTS adjudication_affects (
+    entity_id   TEXT    NOT NULL,
+    generation  INTEGER NOT NULL,
+    PRIMARY KEY (entity_id, generation)
+);
+CREATE INDEX IF NOT EXISTS adjudication_affects_by_entity
+    ON adjudication_affects (entity_id, generation);
 "#;

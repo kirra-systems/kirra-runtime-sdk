@@ -261,7 +261,17 @@ impl AnswerRef {
         // Reading the two halves separately would put a live `identity_view`
         // one autocomplete away, and today's merges would silently rewrite what
         // a recorded reference means.
-        let composed = match store.read_composed_at_generation(self.generation)? {
+        // BOUNDED, and still ONE composed read — box 3d.
+        //
+        // The unbounded form replayed EVERY adjudication in the log to
+        // re-execute a reference about one subject. This bounds the identity
+        // half to the records bearing on the objects this subject's claims name,
+        // discovered through the affected-entity reverse index and cut at the
+        // pinned GENERATION rather than a transaction time.
+        let composed = match store
+            .read_snapshot()?
+            .read_composed_subject_at_generation(&self.subject, self.generation)?
+        {
             PinnedComposedRead::Reproduced(c) => c,
             PinnedComposedRead::Irreproducible(reason) => {
                 return Ok(RefResolution::Irreproducible(reason))
