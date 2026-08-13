@@ -566,9 +566,25 @@ impl<'a> WorldView<'a> {
             });
         }
 
-        // Loaded once for the whole answer, from the same snapshot as the
-        // claims. Per-claim reads would be both slower and incoherent.
-        let identity = snapshot.identity_view()?;
+        // BOUNDED, and loaded once for the whole answer from the same snapshot
+        // as the claims — box 3d.
+        //
+        // This was `snapshot.identity_view()`: the WHOLE entity graph, to answer
+        // a question about one subject. Correct, coherent, and `O(entities)`
+        // work for an `O(predicates)` question — the third instance of the
+        // defect class #1440 and #1441 fixed, found by the gate rather than by
+        // review, on the most-used query in the system.
+        //
+        // Only the objects this subject's claims actually name are seeded, so
+        // the load is bounded by the subject's predicate count times the
+        // resolver's own traversal budget. Still ONE view for the whole answer:
+        // per-claim views would resolve each object against a different graph.
+        let seeds: Vec<EntityId> = claims
+            .iter()
+            .filter_map(|c| c.object.as_deref())
+            .filter_map(|o| EntityId::new(o).ok())
+            .collect();
+        let identity = snapshot.identity_view_for(&seeds)?;
         let identity_is_current = snapshot.identity_is_current()?;
 
         let clock = now_ms.max(0).unsigned_abs();

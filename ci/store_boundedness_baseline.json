@@ -293,6 +293,10 @@
     "read_composed_at_generation": {
       "class": "unbounded",
       "why": "Both projections at a generation."
+    },
+    "identity_view_for": {
+      "class": "bounded",
+      "why": "Box 3d. Loads only the entities reachable from the seed ids within MAX_REDIRECT_EDGES hops, so `ask` pays O(predicates x budget) instead of O(entities) to resolve the objects its own claims name. Snapshot-scoped so the identity half of a composed answer is observed at the same point as the claims half \u2014 a WorldStore-level bounded resolve would be a second connection and would reintroduce the between-walks incoherence 3c closed."
     }
   },
   "interactive_paths": {

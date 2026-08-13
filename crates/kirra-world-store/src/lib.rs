@@ -1649,7 +1649,8 @@ impl WorldStore {
         &self,
         id: &kirra_world::reference::EntityId,
     ) -> Result<kirra_world::resolution::ResolutionOutcome, StoreError> {
-        let rows = snapshot::load_reachable_entity_projection_on(&self.conn, id)?;
+        let rows =
+            snapshot::load_reachable_entity_projection_on(&self.conn, std::slice::from_ref(id))?;
         // Generation 0: this view is a REACHABLE SUBSET, not a snapshot of the
         // projection, so stamping it with the projection's head would label a
         // partial graph as a complete state of the world — the mislabelling

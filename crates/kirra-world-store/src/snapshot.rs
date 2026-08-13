@@ -354,6 +354,37 @@ impl<'a> ReadSnapshot<'a> {
         })
     }
 
+    /// **The identity graph reachable from `seeds`, and nothing else** — box 3d.
+    ///
+    /// The bounded counterpart to [`Self::identity_view`], which loads every
+    /// entity in the store. An answer only ever resolves the objects its own
+    /// claims name, so loading the whole graph to resolve a handful of ids was
+    /// `O(entities)` work for an `O(predicates)` question.
+    ///
+    /// Snapshot-scoped deliberately: it reads through this snapshot's
+    /// transaction, so the identity half of a composed answer is observed at the
+    /// SAME point as the claims half. A `WorldStore`-level bounded resolve would
+    /// be a second connection and would reintroduce exactly the between-walks
+    /// incoherence this type exists to close.
+    ///
+    /// All seeds are loaded into ONE view rather than one view per object, so
+    /// every object in an answer resolves against the same graph.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::identity_view`], plus
+    /// [`StoreError::IdentityClosureTooLarge`] — refused, never truncated.
+    pub fn identity_view_for(
+        &self,
+        seeds: &[kirra_world::reference::EntityId],
+    ) -> Result<IdentityView, StoreError> {
+        let rows = load_reachable_entity_projection_on(&self.tx, seeds)?;
+        // Generation 0: a REACHABLE SUBSET is not a snapshot of the projection,
+        // and stamping it with the projection's head would label a partial graph
+        // as a complete state of the world.
+        Ok(IdentityView::new(rows, 0))
+    }
+
     /// **Reconstruct claims AND identity at one generation — box 3h.**
     ///
     /// 3h's rule is *"historical queries use historical identity and historical
@@ -856,7 +887,7 @@ pub const MAX_IDENTITY_CLOSURE: usize = 4_096;
 /// confusion the trait's no-error-channel contract exists to prevent.
 pub(crate) fn load_reachable_entity_projection_on(
     conn: &Connection,
-    from: &kirra_world::reference::EntityId,
+    seeds: &[kirra_world::reference::EntityId],
 ) -> Result<BTreeMap<String, ProjectedEntity>, StoreError> {
     let mut out = BTreeMap::new();
     if !table_exists(conn, "entities_projection")? {
@@ -871,7 +902,12 @@ pub(crate) fn load_reachable_entity_projection_on(
     // HOPS, so "everything within MAX_REDIRECT_EDGES hops" is the set that
     // provably contains whatever it can reach. A node cap would truncate by
     // discovery order instead, which a deep chain slips through.
-    let mut frontier: Vec<String> = vec![from.as_str().to_string()];
+    // Several seeds at once for a whole answer, not one call per object: the
+    // closures are unioned into ONE view so `resolve` sees the same graph for
+    // every object in an answer. Resolving each object against its own view
+    // would be a different composition, and a shared entity reached from two
+    // objects would be loaded twice.
+    let mut frontier: Vec<String> = seeds.iter().map(|e| e.as_str().to_string()).collect();
     for _ in 0..=kirra_world::resolution::MAX_REDIRECT_EDGES {
         if frontier.is_empty() {
             break;
@@ -883,7 +919,11 @@ pub(crate) fn load_reachable_entity_projection_on(
             }
             if out.len() >= MAX_IDENTITY_CLOSURE {
                 return Err(StoreError::IdentityClosureTooLarge {
-                    from: from.as_str().to_string(),
+                    from: seeds
+                        .iter()
+                        .map(|e| e.as_str().to_string())
+                        .collect::<Vec<_>>()
+                        .join(", "),
                     limit: MAX_IDENTITY_CLOSURE,
                 });
             }
