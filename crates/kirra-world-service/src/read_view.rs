@@ -739,8 +739,13 @@ impl<'a> WorldView<'a> {
     /// # Errors
     ///
     /// As [`Self::ask`].
-    pub fn history(&self, subject: &str) -> Result<TemporalLookup, AskError> {
-        let answer = self.store.history(subject)?;
+    pub fn history(
+        &self,
+        subject: &str,
+        page: kirra_world_store::lineage::LineagePage,
+    ) -> Result<HistoryLookup, AskError> {
+        let paged = self.store.history_page(subject, page)?;
+        let answer = paged.answer;
         let completeness = answer.resolution;
 
         let mut answers = Vec::new();
@@ -775,9 +780,10 @@ impl<'a> WorldView<'a> {
         } else {
             WorldLookup::Answered(answers)
         };
-        Ok(TemporalLookup {
+        Ok(HistoryLookup {
             lookup,
             completeness,
+            boundary: paged.boundary,
             semantics: SemanticVersions::for_query(QueryKind::SubjectHistory),
         })
     }
@@ -994,6 +1000,58 @@ fn assemble(
         provenance,
         event_id: claim.event_id.clone(),
     })
+}
+
+/// **One page of a subject's record, its completeness, and whether more follows.**
+///
+/// Box 3d gave `history` a page; this is `TemporalLookup` plus the page
+/// boundary. Kept a separate type rather than adding an `Option<PageBoundary>`
+/// to `TemporalLookup`, because `ask_as_of` has no pages and a nullable bound on
+/// a family that cannot have one is a field every reader has to ask about.
+///
+/// The two signals are INDEPENDENT and both observable, exactly as 3g requires:
+/// `boundary` is about this QUERY (did the caller's limit cut it short), while
+/// `completeness` is about the RECORD (was evidence removed). A page that is
+/// `More` and `Full` is an ordinary first page; one that is `Complete` and
+/// `Degraded` is the whole surviving record of something that lost evidence.
+#[derive(Debug, Clone)]
+pub struct HistoryLookup {
+    lookup: WorldLookup,
+    completeness: Resolution,
+    boundary: kirra_world_store::lineage::PageBoundary,
+    semantics: SemanticVersions,
+}
+
+impl HistoryLookup {
+    /// The claims in this page.
+    #[must_use]
+    pub fn lookup(&self) -> &WorldLookup {
+        &self.lookup
+    }
+
+    /// Whether the RECORD is whole, or what remains of it.
+    #[must_use]
+    pub fn completeness(&self) -> &Resolution {
+        &self.completeness
+    }
+
+    /// Whether compaction could have borne on this record.
+    #[must_use]
+    pub fn is_degraded(&self) -> bool {
+        self.completeness.is_degraded()
+    }
+
+    /// Whether more claims follow this PAGE.
+    #[must_use]
+    pub fn boundary(&self) -> &kirra_world_store::lineage::PageBoundary {
+        &self.boundary
+    }
+
+    /// The rules this answer was produced under.
+    #[must_use]
+    pub fn semantics(&self) -> &SemanticVersions {
+        &self.semantics
+    }
 }
 
 /// **One subject's summary and its evidence coverage** — the 3g follow-up.

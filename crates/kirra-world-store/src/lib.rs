@@ -2843,6 +2843,75 @@ impl WorldStore {
     /// trajectory compaction removes. No time bounds are applied to the
     /// resolution, because none are applied to the query — any compacted event
     /// about this subject is one this answer is missing.
+    /// **One page of every confirmed claim about `subject`** — box 3d.
+    ///
+    /// The bounded replacement for [`Self::history`], which returns the whole
+    /// record with no page and no cursor. That method was the third instance of
+    /// the defect class box 3d exists to close, and the one that proved
+    /// per-query vigilance does not work: it was written in the PR that
+    /// documented the other two.
+    ///
+    /// # The page is applied in SQL, not after the fetch
+    ///
+    /// `#1440`'s lesson. Fetching the history and truncating would bound the
+    /// ANSWER while leaving the WORK unbounded, which is the exact shape that
+    /// made all three defects invisible. This narrows with `generation > cursor`
+    /// and `LIMIT limit + 1`.
+    ///
+    /// The `+ 1` is the probe that keeps `More` honest, and the boundary
+    /// decision itself is [`lineage::boundary_for`] — shared with the lineage
+    /// family rather than restated, so the off-by-one has one implementation.
+    ///
+    /// # Errors
+    ///
+    /// [`StoreError::Sqlite`] on any read failure.
+    pub fn history_page(
+        &self,
+        subject: &str,
+        page: lineage::LineagePage,
+    ) -> Result<HistoryPage, StoreError> {
+        let after = page.after_generation().unwrap_or(i64::MIN);
+        let probe = i64::try_from(page.limit())
+            .unwrap_or(i64::MAX)
+            .saturating_add(1);
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT {CLAIM_COLUMNS} FROM world_events
+             WHERE subject = ?1 AND claim_status = 'confirmed' AND generation > ?2
+             ORDER BY generation ASC
+             LIMIT ?3"
+        ))?;
+        let rows = stmt.query_map(params![subject, after, probe], claim_from_row)?;
+        let mut claims = rows.collect::<rusqlite::Result<Vec<_>>>()?;
+
+        let fetched = claims.len();
+        claims.truncate(page.limit());
+        let last_kept = claims.last().map_or(after, |c| c.generation);
+        let boundary = lineage::boundary_for(fetched, page.limit(), last_kept);
+
+        Ok(HistoryPage {
+            answer: TemporalAnswer {
+                claims,
+                // The store's verdict, unchanged. Deliberately NOT narrowed to
+                // the page: compaction that removed evidence outside this page
+                // still means this subject's record is incomplete, and a
+                // page-scoped completeness signal would report `Full` for a page
+                // that happens to miss the hole.
+                resolution: self.resolution_for(subject, None, None)?,
+            },
+            boundary,
+        })
+    }
+
+    /// **Every confirmed claim about `subject`** — the WHOLE record, unbounded.
+    ///
+    /// Retained for operators, rebuilds and analysis, and classified `unbounded`
+    /// so the gate keeps it off any request path. Box 3d replaced its use at the
+    /// answer boundary with [`Self::history_page`]: this returns everything a
+    /// subject has ever accumulated, which grows for the store's life.
+    ///
+    /// # Errors
+    ///
+    /// [`StoreError::Sqlite`] on any read failure.
     pub fn history(&self, subject: &str) -> Result<TemporalAnswer, StoreError> {
         let mut stmt = self.conn.prepare(&format!(
             "SELECT {CLAIM_COLUMNS} FROM world_events
@@ -4149,4 +4218,22 @@ fn rand_component() -> u128 {
     // The top 48 bits are the ULID's timestamp; mask them off so only the
     // 80-bit random field is populated.
     u128::from_be_bytes(buf) & ((1u128 << 80) - 1)
+}
+
+/// **One page of a subject's claim history, and how complete the record is.**
+///
+/// Box 3d's bounded replacement for the whole-history answer. Carries the two
+/// signals separately because they answer different questions: `boundary` says
+/// whether more claims follow in THIS query, and `answer.resolution` says
+/// whether evidence was removed from the record at all.
+///
+/// Conflating them would be the 3g mistake in miniature — a page cut short by
+/// the caller's own limit is complete evidence, bounded; a record missing a
+/// compacted span is evidence that no longer exists.
+#[derive(Debug, Clone)]
+pub struct HistoryPage {
+    /// The claims in this page, and the completeness of the whole record.
+    pub answer: compaction::TemporalAnswer,
+    /// Whether more claims follow this page.
+    pub boundary: lineage::PageBoundary,
 }

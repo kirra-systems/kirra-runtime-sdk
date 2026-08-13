@@ -64,6 +64,11 @@ BOUNDARY_SRC = REPO_ROOT / "crates" / "kirra-world-service" / "src"
 
 VALID_CLASSES = {"bounded", "unbounded", "operational"}
 
+# A method that accepts a page/cursor bound, and one that runs a SELECT. Used
+# together to demand that a paginated bounded method bounds its own query.
+PAGE_PARAM_RE = re.compile(r"\bpage\s*:|LineagePage|\blimit\s*:")
+SELECT_RE = re.compile(r"\bSELECT\b", re.I)
+
 # Methods compiled out of the production path. Auto-classified so the baseline
 # does not carry entries that buy no coverage.
 TEST_ONLY_SUFFIX = "_for_test"
@@ -229,6 +234,42 @@ def run(verbose: bool = False) -> list[str]:
                             f"    A bounded classification standing on an unbounded "
                             f"call makes the classification a claim nobody checks, and "
                             f"lets the boundary violate the invariant in good faith."
+                        )
+
+    # 4. A `bounded` method that TAKES a page must BOUND its own SQL.
+    #
+    # The hole mutation M1 exposed, and it is the sharpest one: rewriting
+    # `history_page` to fetch every row and truncate in Rust produces an
+    # IDENTICAL answer, so no behavioural test can catch it — every pagination
+    # control still passed. Rule 3 missed it too, because the method calls no
+    # unbounded helper; it simply writes unbounded SQL.
+    #
+    # That is the whole defect class in one mutation: the answer is bounded, the
+    # work is not, and nothing observable differs. So the check is structural —
+    # if a bounded method accepts a page, its query must carry a LIMIT.
+    for path in sorted(STORE_SRC.rglob("*.rs")):
+        text = path.read_text()
+        for surface, header in (
+            ("world_store", r"^impl WorldStore \{"),
+            ("read_snapshot", r"^impl<'a> ReadSnapshot<'a> \{"),
+        ):
+            for body in _impl_bodies(text, header):
+                for fn_name, fn_body in _fn_bodies(body):
+                    spec = baseline[surface].get(fn_name)
+                    if not spec or spec["class"] != "bounded":
+                        continue
+                    if not PAGE_PARAM_RE.search(fn_body):
+                        continue
+                    if not SELECT_RE.search(fn_body):
+                        continue
+                    if "LIMIT" not in fn_body:
+                        failures.append(
+                            f"{surface}::{fn_name} is classified `bounded` and takes a "
+                            f"page, but its SQL has no LIMIT.\n"
+                            f"    Fetching the whole set and truncating in Rust returns "
+                            f"the IDENTICAL answer, so no behavioural test can catch it "
+                            f"— which is exactly how #1440 and #1441 reached main.\n"
+                            f"    The bound has to reach the query."
                         )
 
     if verbose:

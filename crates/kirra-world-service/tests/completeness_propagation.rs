@@ -95,6 +95,7 @@
 
 use kirra_world_service::freshness::FreshnessSource;
 use kirra_world_service::read_view::{AskError, WorldLookup, WorldView};
+use kirra_world_store::lineage::LineagePage;
 use kirra_world_store::{ClaimStatus, EventId, NewEvent, ObservationId, WorldStore, WriterClass};
 
 const T0: i64 = 1_700_000_000_000;
@@ -218,7 +219,9 @@ fn answered(lookup: &WorldLookup) -> usize {
 #[test]
 fn a_compacted_history_reports_degraded() {
     let (store, _p) = holed_store("hist-degraded");
-    let lookup = view(&store).history("package_17").expect("history");
+    let lookup = view(&store)
+        .history("package_17", LineagePage::first())
+        .expect("history");
 
     assert!(
         lookup.is_degraded(),
@@ -237,8 +240,12 @@ fn both_history_arms_return_a_plausible_non_empty_record() {
     let (holed, _p1) = holed_store("hist-nonempty-holed");
     let (intact, _p2) = intact_store("hist-nonempty-intact");
 
-    let degraded = view(&holed).history("package_17").expect("history");
-    let full = view(&intact).history("package_17").expect("history");
+    let degraded = view(&holed)
+        .history("package_17", LineagePage::first())
+        .expect("history");
+    let full = view(&intact)
+        .history("package_17", LineagePage::first())
+        .expect("history");
 
     assert_eq!(
         answered(full.lookup()),
@@ -264,7 +271,9 @@ fn both_history_arms_return_a_plausible_non_empty_record() {
 #[test]
 fn an_uncompacted_history_reports_full() {
     let (store, _p) = intact_store("hist-full");
-    let lookup = view(&store).history("package_17").expect("history");
+    let lookup = view(&store)
+        .history("package_17", LineagePage::first())
+        .expect("history");
 
     assert!(
         !lookup.is_degraded(),
@@ -333,7 +342,9 @@ fn history_keeps_a_claim_that_ask_refuses_to_serve() {
          contrast below is vacuous"
     );
 
-    let record = v.history("package_17").expect("history");
+    let record = v
+        .history("package_17", LineagePage::first())
+        .expect("history");
     assert_eq!(
         answered(record.lookup()),
         1,
@@ -380,7 +391,7 @@ fn an_unruled_claim_refuses_the_whole_history() {
     store.fold().expect("fold");
 
     let err = view(&store)
-        .history("package_17")
+        .history("package_17", LineagePage::first())
         .expect_err("an unclassified claim must refuse the whole query");
     assert!(
         matches!(err, AskError::UnclassifiedFreshness { .. }),
@@ -487,5 +498,111 @@ fn an_unknown_subject_is_absent_rather_than_degraded() {
     assert!(
         !lookup.is_degraded(),
         "nothing was claimed about this subject, so nothing is missing"
+    );
+}
+
+// ------------------------------------------------- box 3d: history pages ---
+
+/// **A short page returns the page, not the record.**
+///
+/// The bound must reach the STORE. `history` used to fetch every confirmed claim
+/// about a subject and hand it all back — the third instance of the defect class
+/// box 3d closes, and the one written in the PR that documented the other two.
+#[test]
+fn a_history_page_returns_at_most_its_limit() {
+    let (store, _p) = intact_store("hist-page-limit");
+    let page = LineagePage::new(2, None).expect("valid page");
+    let lookup = view(&store).history("package_17", page).expect("history");
+
+    assert_eq!(
+        answered(lookup.lookup()),
+        2,
+        "three claims exist; a limit of 2 must return 2"
+    );
+    assert!(
+        lookup.boundary().is_truncated(),
+        "a third claim follows, so the page must say so"
+    );
+}
+
+/// **Paginating to exhaustion returns the whole record exactly once.**
+///
+/// The cursor walk. A page that reported `More` forever, or one whose cursor was
+/// inclusive and repeated a claim, would both still pass the limit test above.
+#[test]
+fn paginating_a_history_walks_the_record_without_gaps_or_repeats() {
+    let (store, _p) = intact_store("hist-page-walk");
+    let v = view(&store);
+
+    let mut seen: Vec<String> = Vec::new();
+    let mut cursor = None;
+    for _ in 0..10 {
+        let page = LineagePage::new(1, cursor).expect("valid page");
+        let lookup = v.history("package_17", page).expect("history");
+        if let WorldLookup::Answered(answers) = lookup.lookup() {
+            for a in answers {
+                seen.push(a.event_id().to_string());
+            }
+        }
+        match lookup.boundary() {
+            kirra_world_store::lineage::PageBoundary::More {
+                next_after_generation,
+            } => cursor = Some(*next_after_generation),
+            kirra_world_store::lineage::PageBoundary::Complete => break,
+        }
+    }
+
+    assert_eq!(
+        seen.len(),
+        3,
+        "the walk must visit every claim exactly once"
+    );
+    let mut unique = seen.clone();
+    unique.sort();
+    unique.dedup();
+    assert_eq!(unique.len(), 3, "an inclusive cursor would repeat a claim");
+}
+
+/// **A page that exactly fills is NOT `More`.**
+///
+/// The off-by-one `lineage::boundary_for` owns. Asking for exactly the record's
+/// length must report `Complete`, or a caller paginating to exhaustion makes one
+/// wasted round trip on every record whose length divides the page size.
+///
+/// Sized to the record deliberately — #1440's first draft of this control asked
+/// for a 256-limit page over two events, a page that could not have been full,
+/// and the mutation survived it.
+#[test]
+fn a_history_page_that_exactly_fills_is_complete() {
+    let (store, _p) = intact_store("hist-page-exact");
+    let page = LineagePage::new(3, None).expect("valid page");
+    let lookup = view(&store).history("package_17", page).expect("history");
+
+    assert_eq!(answered(lookup.lookup()), 3, "the whole record");
+    assert!(
+        !lookup.boundary().is_truncated(),
+        "the page holds the entire record, so nothing follows it"
+    );
+}
+
+/// **Page boundary and record completeness are independent.**
+///
+/// 3g's rule, applied to a paginated family. A page cut short by the caller's
+/// own limit is complete evidence; a record missing a compacted span is evidence
+/// that no longer exists. Reporting one as the other in either direction would
+/// make a routine first page look like data loss, or data loss look routine.
+#[test]
+fn a_truncated_page_over_a_degraded_record_reports_both() {
+    let (store, _p) = holed_store("hist-page-degraded");
+    let page = LineagePage::new(1, None).expect("valid page");
+    let lookup = view(&store).history("package_17", page).expect("history");
+
+    assert!(
+        lookup.boundary().is_truncated(),
+        "two claims survive and the limit is 1, so more follows"
+    );
+    assert!(
+        lookup.is_degraded(),
+        "evidence was compacted away, which the page bound says nothing about"
     );
 }
