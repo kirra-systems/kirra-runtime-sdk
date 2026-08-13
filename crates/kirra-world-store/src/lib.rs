@@ -1421,7 +1421,15 @@ impl WorldStore {
                 return Err(e.into());
             }
         }
-        self.conn.execute_batch("COMMIT")?;
+        // A failing COMMIT leaves the transaction OPEN — SQLite can return
+        // `SQLITE_BUSY` here and keep it active. Returning without rolling back
+        // would poison the connection: every later append fails with "cannot
+        // start a transaction within a transaction", which reports the wrong
+        // fault and buries this one. Roll back, then surface the real error.
+        if let Err(e) = self.conn.execute_batch("COMMIT") {
+            let _ = self.conn.execute_batch("ROLLBACK");
+            return Err(e.into());
+        }
         Ok(generation)
     }
 
@@ -1488,15 +1496,23 @@ impl WorldStore {
     /// from `world_events` and decoded exactly as the whole-log path decodes it,
     /// and folded by the unchanged `fold_adjudication`. The index holds no
     /// payload, so it physically cannot manufacture an adjudication the log does
-    /// not have — and a generation it names that the log lacks fails closed
-    /// rather than resolving to a guess.
+    /// not have: a generation it names that the log lacks contributes NOTHING to
+    /// the fold — the join drops it, and the answer is the one the log supports.
+    ///
+    /// That is a drop, not a refusal, and the asymmetry is deliberate. A phantom
+    /// row carries no evidence, so discarding it cannot lose any; refusing on it
+    /// would instead turn an index that merely runs ahead of what the log still
+    /// retains into a hard read failure. The dangerous direction is the opposite
+    /// one — a MISSING row for an adjudication the log does hold, which reads as
+    /// silent absence — and that is what the omitted-`Merge`-source and
+    /// omitted-`Split`-destination mutations exist to catch.
     ///
     /// # Errors
     ///
     /// [`StoreError::CorruptEntityProjectionRow`] on an undecodable payload or
-    /// an index row naming a generation `world_events` does not hold;
-    /// [`StoreError::IdentityClosureTooLarge`] if discovery exceeds
-    /// [`snapshot::MAX_IDENTITY_CLOSURE`] — refused, never truncated.
+    /// unreadable provenance; [`StoreError::IdentityClosureTooLarge`] if
+    /// discovery exceeds [`snapshot::MAX_IDENTITY_CLOSURE`] — refused, never
+    /// truncated.
     pub fn resolve_bounded_at(
         &self,
         id: &kirra_world::reference::EntityId,
@@ -1517,12 +1533,6 @@ impl WorldStore {
         Ok(view.resolve_at(id))
     }
 
-    /// The adjudications affecting `entity` at or before `as_known_at_ms`.
-    ///
-    /// The index supplies the GENERATIONS; `world_events` supplies the records.
-    /// An index row naming a generation the log does not hold is a fault, not an
-    /// absence — the index is never evidence, so it may not assert an
-    /// adjudication into existence.
     /// **Populate the affected-entity index from the existing log** — box 3d.
     ///
     /// A v6 migration installs an EMPTY index, because it adds a table and

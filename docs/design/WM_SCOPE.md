@@ -3442,6 +3442,20 @@ must carry a `LIMIT` in its own query.
 > Behavioural equivalence cannot prove bounded execution when the only
 > difference is where truncation happens.
 
+Rule 4 then shipped **armed by accident**, and review caught it. It asked whether
+a method takes a page by searching the method BODY, but a parameter is declared
+in the signature — so it fired on `history_page` only because an unrelated code
+comment inside it contained the English phrase *"the page:"*. Deleting that
+comment made an unbounded `history_page` pass the gate. The rule now reads the
+signature, and both halves are comment-stripped so prose can neither arm it nor
+disarm it; the self-test carries a fixture with no prose at all, plus one proving
+a `// no LIMIT needed` comment cannot silence it.
+
+> A structural check that depends on prose is a behavioural check wearing a
+> structural shape. The rule written to catch invisible unboundedness was itself
+> invisibly unarmed — and only a mutation run against the *gate*, not the code,
+> could show it.
+
 #### The classification is fail-closed, not a denylist
 
 Every public read method must be classified `bounded` / `unbounded` /

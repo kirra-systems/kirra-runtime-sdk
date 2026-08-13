@@ -89,8 +89,16 @@ def _impl_bodies(text: str, header_re: str) -> list[str]:
     return bodies
 
 
-def _fn_bodies(impl_body: str) -> list[tuple[str, str]]:
-    """(name, body) for each `pub fn` in an impl body, brace-matched."""
+def _fn_bodies(impl_body: str) -> list[tuple[str, str, str]]:
+    """(name, signature, body) for each `pub fn` in an impl body, brace-matched.
+
+    The SIGNATURE is returned separately because rule 4 asks a question the body
+    cannot answer: *does this method accept a page?* That is declared in the
+    parameter list, and an earlier revision tested the body alone — so the rule
+    fired on `history_page` only because an unrelated code comment inside it
+    happened to contain the English phrase `the page:`. Deleting a comment
+    disarmed the check. A structural rule may not depend on prose.
+    """
     out = []
     for m in re.finditer(r"\n    pub fn ([a-z_0-9]+)\s*(?:<[^>]*>)?\s*\(", impl_body):
         i = impl_body.find("{", m.end())
@@ -103,8 +111,28 @@ def _fn_bodies(impl_body: str) -> list[tuple[str, str]]:
             elif impl_body[j] == "}":
                 depth -= 1
             j += 1
-        out.append((m.group(1), impl_body[i:j]))
+        out.append((m.group(1), impl_body[m.start() : i], impl_body[i:j]))
     return out
+
+
+def strip_comments(text: str) -> str:
+    """`text` with `//` comments removed, line structure preserved.
+
+    Used on BOTH halves of rule 4. Prose must be unable to arm the rule (a
+    comment reading `the page:` is not a page parameter) and equally unable to
+    disarm it (a comment mentioning `LIMIT` is not a bounded query).
+    """
+    return "\n".join(line.split("//")[0] for line in text.splitlines())
+
+
+def page_bound_violation(signature: str, body: str) -> bool:
+    """True when a method ACCEPTS a page bound but its own SQL carries none."""
+    sig, code = strip_comments(signature), strip_comments(body)
+    if not PAGE_PARAM_RE.search(sig):
+        return False
+    if not SELECT_RE.search(code):
+        return False
+    return "LIMIT" not in code
 
 
 def public_methods(path: Path, header_re: str) -> set[str]:
@@ -222,7 +250,7 @@ def run(verbose: bool = False) -> list[str]:
             ("read_snapshot", r"^impl<'a> ReadSnapshot<'a> \{"),
         ):
             for body in _impl_bodies(text, header):
-                for fn_name, fn_body in _fn_bodies(body):
+                for fn_name, _sig, fn_body in _fn_bodies(body):
                     spec = baseline[surface].get(fn_name)
                     if not spec or spec["class"] != "bounded":
                         continue
@@ -254,15 +282,11 @@ def run(verbose: bool = False) -> list[str]:
             ("read_snapshot", r"^impl<'a> ReadSnapshot<'a> \{"),
         ):
             for body in _impl_bodies(text, header):
-                for fn_name, fn_body in _fn_bodies(body):
+                for fn_name, fn_sig, fn_body in _fn_bodies(body):
                     spec = baseline[surface].get(fn_name)
                     if not spec or spec["class"] != "bounded":
                         continue
-                    if not PAGE_PARAM_RE.search(fn_body):
-                        continue
-                    if not SELECT_RE.search(fn_body):
-                        continue
-                    if "LIMIT" not in fn_body:
+                    if page_bound_violation(fn_sig, fn_body):
                         failures.append(
                             f"{surface}::{fn_name} is classified `bounded` and takes a "
                             f"page, but its SQL has no LIMIT.\n"
@@ -361,7 +385,57 @@ def self_test() -> int:
     else:
         print("self-test: bounded-looking helper over an unbounded call → caught")
 
-    # (e) An unclassified method must fail, since that is the generalisation.
+    # (e) RULE 4, THE M1 SHAPE: a page-taking method whose SQL carries no bound.
+    #     Fetch everything, truncate in Rust — an identical answer, so no
+    #     behavioural test can see it. This fixture carries no prose at all,
+    #     which is the point: rule 4 shipped armed only by an unrelated comment
+    #     containing the words "the page:", and deleting that comment made an
+    #     unbounded `history_page` pass. Prose must not be load-bearing.
+    unbounded_page_sig = "\n    pub fn history_page(&self, subject: &str, page: LineagePage)"
+    unbounded_page_body = """{
+        let mut stmt = self.conn.prepare("SELECT * FROM world_events WHERE subject = ?1")?;
+        let mut claims = stmt.query_map(params![subject], claim_from_row)?.collect()?;
+        claims.truncate(page.limit());
+        Ok(claims)
+    }"""
+    if not page_bound_violation(unbounded_page_sig, unbounded_page_body):
+        print("SELF-TEST FAIL: a page-taking method with NO LIMIT was not caught "
+              "— rule 4 cannot see the mutation it exists for.")
+        failed = 1
+    else:
+        print("self-test: page-taking method, unbounded SQL → caught")
+
+    # (f) The bounded form must pass, or the rule forces nothing constructive.
+    bounded_page_body = """{
+        let mut stmt = self.conn.prepare(
+            "SELECT * FROM world_events WHERE subject = ?1 AND generation > ?2
+             ORDER BY generation ASC LIMIT ?3")?;
+        Ok(stmt.query_map(params![subject, after, probe], claim_from_row)?.collect()?)
+    }"""
+    if page_bound_violation(unbounded_page_sig, bounded_page_body):
+        print("SELF-TEST FAIL: a correctly bounded page query was flagged.")
+        failed = 1
+    else:
+        print("self-test: page-taking method, LIMIT in SQL → not flagged")
+
+    # (g) Prose must be inert in BOTH directions: a comment cannot arm the rule
+    #     (that is the bug this fixture set was written for), and a comment
+    #     mentioning LIMIT cannot disarm it.
+    if page_bound_violation("\n    pub fn whole_history(&self, subject: &str)",
+                            "{\n // narrowed to the page: see history_page\n"
+                            ' let s = self.conn.prepare("SELECT * FROM world_events")?;\n}'):
+        print("SELF-TEST FAIL: a COMMENT reading `the page:` armed rule 4 — the "
+              "check would depend on prose, which is how the hole was opened.")
+        failed = 1
+    elif not page_bound_violation(unbounded_page_sig,
+                                  "{\n // no LIMIT needed here\n"
+                                  ' let s = self.conn.prepare("SELECT * FROM world_events")?;\n}'):
+        print("SELF-TEST FAIL: a COMMENT mentioning LIMIT disarmed rule 4.")
+        failed = 1
+    else:
+        print("self-test: comments neither arm nor disarm rule 4")
+
+    # (h) An unclassified method must fail, since that is the generalisation.
     stripped = {k: v for k, v in baseline["world_store"].items() if k != "history"}
     if "history" in stripped:
         print("SELF-TEST FAIL: fixture construction error.")
