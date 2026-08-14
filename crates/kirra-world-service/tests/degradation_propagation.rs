@@ -67,7 +67,8 @@
 //! reveals that, which is precisely the loss 3g exists to make observable.
 
 use kirra_world_service::freshness::{FreshnessPolicy, FreshnessSource};
-use kirra_world_service::read_view::{WorldLookup, WorldView};
+use kirra_world_service::query::{AskAsOf, QueryEngine};
+use kirra_world_service::read_view::WorldLookup;
 use kirra_world_store::{ClaimStatus, EventId, NewEvent, ObservationId, WorldStore, WriterClass};
 
 const T0: i64 = 1_700_000_000_000;
@@ -166,10 +167,14 @@ fn objects(lookup: &WorldLookup) -> Vec<String> {
 #[test]
 fn evidence_outside_the_compacted_span_is_full_and_still_answers() {
     let (store, path) = store_with_a_hole("full");
-    let view = WorldView::new(&store, FreshnessSource::Caller(FreshnessPolicy::Timeless));
+    let view = QueryEngine::new(&store, FreshnessSource::Caller(FreshnessPolicy::Timeless));
 
     let out = view
-        .ask_as_of("package_17", T0 + 50, T0 + 50)
+        .execute(AskAsOf {
+            subject: "package_17".to_owned(),
+            valid_at_ms: T0 + 50,
+            as_known_at_ms: T0 + 50,
+        })
         .expect("ask_as_of");
 
     assert_eq!(
@@ -201,10 +206,14 @@ fn evidence_outside_the_compacted_span_is_full_and_still_answers() {
 #[test]
 fn evidence_inside_the_compacted_span_is_degraded_and_the_answer_looks_fine() {
     let (store, path) = store_with_a_hole("degraded");
-    let view = WorldView::new(&store, FreshnessSource::Caller(FreshnessPolicy::Timeless));
+    let view = QueryEngine::new(&store, FreshnessSource::Caller(FreshnessPolicy::Timeless));
 
     let out = view
-        .ask_as_of("package_17", T0 + 150, T0 + 9_000)
+        .execute(AskAsOf {
+            subject: "package_17".to_owned(),
+            valid_at_ms: T0 + 150,
+            as_known_at_ms: T0 + 9_000,
+        })
         .expect("ask_as_of");
 
     assert_eq!(
@@ -226,7 +235,11 @@ fn evidence_inside_the_compacted_span_is_degraded_and_the_answer_looks_fine() {
     // The two arms genuinely differ, so the pair is distinguishing completeness
     // rather than agreeing by accident.
     let full = view
-        .ask_as_of("package_17", T0 + 50, T0 + 50)
+        .execute(AskAsOf {
+            subject: "package_17".to_owned(),
+            valid_at_ms: T0 + 50,
+            as_known_at_ms: T0 + 50,
+        })
         .expect("ask_as_of");
     assert_ne!(full.is_degraded(), out.is_degraded());
     assert_eq!(
@@ -266,9 +279,13 @@ fn an_empty_answer_still_reports_that_evidence_was_lost() {
     store.fold().expect("fold");
     store.compact_range(1, 1, T0 + 9_000).expect("compact");
 
-    let view = WorldView::new(&store, FreshnessSource::Caller(FreshnessPolicy::Timeless));
+    let view = QueryEngine::new(&store, FreshnessSource::Caller(FreshnessPolicy::Timeless));
     let out = view
-        .ask_as_of("package_17", T0 + 150, T0 + 9_000)
+        .execute(AskAsOf {
+            subject: "package_17".to_owned(),
+            valid_at_ms: T0 + 150,
+            as_known_at_ms: T0 + 9_000,
+        })
         .expect("ask_as_of");
 
     assert!(
@@ -328,9 +345,13 @@ fn a_subject_the_compacted_window_never_held_is_full() {
     store.fold().expect("fold");
     store.compact_range(1, 1, T0 + 9_000).expect("compact");
 
-    let view = WorldView::new(&store, FreshnessSource::Caller(FreshnessPolicy::Timeless));
+    let view = QueryEngine::new(&store, FreshnessSource::Caller(FreshnessPolicy::Timeless));
     let out = view
-        .ask_as_of("pallet_9", T0 + 1_000, T0 + 9_000)
+        .execute(AskAsOf {
+            subject: "pallet_9".to_owned(),
+            valid_at_ms: T0 + 1_000,
+            as_known_at_ms: T0 + 9_000,
+        })
         .expect("ask_as_of");
 
     assert_eq!(objects(out.lookup()), vec!["bay_3".to_string()]);
@@ -353,14 +374,18 @@ fn a_subject_the_compacted_window_never_held_is_full() {
 #[test]
 fn the_boundary_verdict_equals_the_stores_verdict() {
     let (store, path) = store_with_a_hole("propagates");
-    let view = WorldView::new(&store, FreshnessSource::Caller(FreshnessPolicy::Timeless));
+    let view = QueryEngine::new(&store, FreshnessSource::Caller(FreshnessPolicy::Timeless));
 
     for (valid_at, known_at) in [(T0 + 50, T0 + 50), (T0 + 150, T0 + 9_000)] {
         let store_side = store
             .as_of("package_17", valid_at, known_at)
             .expect("store as_of");
         let boundary = view
-            .ask_as_of("package_17", valid_at, known_at)
+            .execute(AskAsOf {
+                subject: "package_17".to_owned(),
+                valid_at_ms: valid_at,
+                as_known_at_ms: known_at,
+            })
             .expect("ask_as_of");
         assert_eq!(
             &store_side.resolution,

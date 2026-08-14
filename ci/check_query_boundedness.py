@@ -1,11 +1,29 @@
 #!/usr/bin/env python3
-"""Tier 3 box 3d — an interactive query may not hide an unbounded store read.
+"""Tier 3 box 3d — bounded queries, and one sanctioned way to ask.
 
-THE RULE
---------
-    A Tier 3 boundary query that sits on a request path may call only store
-    methods whose result size is bounded by their arguments. Every public read
-    method on the store must be CLASSIFIED, and an unclassified one fails.
+THE RULES
+---------
+    1-4  A Tier 3 boundary query that sits on a request path may call only
+         store methods whose result size is bounded by their arguments. Every
+         public read method on the store must be CLASSIFIED, and an
+         unclassified one fails.
+
+    5    Every domain-query call outside the query-engine implementation must
+         route through the typed engine. Direct family, store or projection
+         reads are forbidden, except the store methods classified
+         `operational`.
+
+Rules 1-4 make a query bounded. Rule 5 makes a query the only way to ask, which
+boundedness does not imply: a consumer holding a `&WorldStore` could build its
+own view, call a family directly, and be perfectly bounded while bypassing
+semantics versions, freshness classification and the no-bare-values rule.
+
+Rule 5's PRIMARY enforcement is visibility rather than this file. `WorldView`
+and the `resolve` methods on `LineageRef`/`AnswerRef` are `pub(crate)`, so a
+consumer reaching past `QueryEngine::execute` gets a compile error at the point
+of the mistake. What is here covers the rest: a new `pub` family method nobody
+wrapped, a consumer reaching around the boundary into the store, and the
+visibility pins that make widening `pub(crate)` back to `pub` a red build.
 
 WHY A GATE, AND WHY THIS SHAPE
 ------------------------------
@@ -56,6 +74,42 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 BASELINE_PATH = REPO_ROOT / "ci" / "store_boundedness_baseline.json"
+
+# Rule 5. The crates that IMPLEMENT the boundary — everything else that touches
+# the world is a domain consumer and must go through the query engine.
+WORLD_CRATES = {"kirra-world", "kirra-world-store", "kirra-world-service"}
+
+# The boundary internals the engine exists to be the only route past. These are
+# `pub(crate)` in the source, so the compiler already refuses a consumer that
+# names them; rule 5 exists so the day someone widens the visibility is the day
+# CI says so, rather than the day a consumer quietly reaches past the engine.
+BOUNDARY_INTERNALS = {
+    "WorldView": "the boundary's internal view — the four non-lineage families",
+}
+
+# (file, exact source line that must still be present) — the visibility that
+# makes the engine load-bearing. Asserted rather than assumed, because a
+# one-word edit turns a compile error back into a convention.
+VISIBILITY_PINS = [
+    (
+        "crates/kirra-world-service/src/read_view.rs",
+        "pub(crate) struct WorldView<'a> {",
+        "WorldView must stay crate-internal, or a consumer can build its own "
+        "view and skip the engine entirely.",
+    ),
+    (
+        "crates/kirra-world-service/src/lineage.rs",
+        "pub(crate) fn resolve(&self, store: &WorldStore)",
+        "LineageRef::resolve must stay crate-internal — the `Lineage` request "
+        "is the sanctioned route to it.",
+    ),
+    (
+        "crates/kirra-world-service/src/answer_ref.rs",
+        "pub(crate) fn resolve(&self, store: &WorldStore)",
+        "AnswerRef::resolve must stay crate-internal — the `ReplayAnswer` "
+        "request is the sanctioned route to it.",
+    ),
+]
 
 STORE_LIB = REPO_ROOT / "crates" / "kirra-world-store" / "src" / "lib.rs"
 STORE_SNAPSHOT = REPO_ROOT / "crates" / "kirra-world-store" / "src" / "snapshot.rs"
@@ -183,6 +237,40 @@ def scan_interactive(text: str, forbidden: set[str]) -> list[tuple[int, str, str
     return hits
 
 
+def domain_consumer_crates() -> list[Path]:
+    """Crates that touch Kirra World but do not implement its boundary.
+
+    Membership is read from the manifests rather than listed here, so a NEW
+    consumer is covered the day it is added. Over-inclusion is the safe
+    direction: a crate that merely mentions the world in a comment gets scanned
+    and finds nothing.
+    """
+    out = []
+    for manifest in sorted((REPO_ROOT / "crates").glob("*/Cargo.toml")):
+        if manifest.parent.name in WORLD_CRATES:
+            continue
+        text = manifest.read_text()
+        if "kirra-world-service" in text or "kirra-world-store" in text:
+            out.append(manifest.parent)
+    return out
+
+
+def scan_consumer(text: str, forbidden: set[str]) -> list[tuple[int, str, str]]:
+    """Rule-5 violations in one consumer file: internals named, or reads called.
+
+    Comment-stripped for the same reason every other scan here is — a consumer's
+    docs should be able to say *"this used to call `WorldView::ask`"* without
+    the sentence becoming the violation it describes.
+    """
+    hits = list(scan_interactive(text, forbidden))
+    for n, line in enumerate(text.splitlines(), start=1):
+        code = line.split("//")[0]
+        for name in BOUNDARY_INTERNALS:
+            if re.search(r"\b" + name + r"\b", code):
+                hits.append((n, name, line.strip()))
+    return sorted(hits)
+
+
 def run(verbose: bool = False) -> list[str]:
     baseline = json.loads(BASELINE_PATH.read_text())
     failures: list[str] = []
@@ -295,6 +383,60 @@ def run(verbose: bool = False) -> list[str]:
                             f"— which is exactly how #1440 and #1441 reached main.\n"
                             f"    The bound has to reach the query."
                         )
+
+    # 5. A DOMAIN QUERY MUST GO THROUGH THE TYPED ENGINE.
+    #
+    # Rules 1-4 make a query bounded. They do not make the query the only way to
+    # ask: a consumer holding a `&WorldStore` could build its own view, call a
+    # family directly, and be perfectly bounded while bypassing semantics
+    # versions, freshness classification and the no-bare-values rule.
+    # `mission_context` did exactly that, and it was the sanctioned route at the
+    # time — which is why the negative fixture in the self-test is that real
+    # call and not an invented one.
+    #
+    # The PRIMARY enforcement is visibility, not this rule: `WorldView` and the
+    # two `resolve` methods are `pub(crate)`, so a consumer reaching past the
+    # engine gets a compile error at the point of the mistake. This rule is
+    # defence in depth for what visibility cannot reach — a new `pub` family
+    # method nobody wrapped, a consumer reaching into the store directly — plus
+    # the pins below, so widening the visibility is itself the red build.
+    #
+    # `operational` reads are the named carve-outs, and they are named by the
+    # SAME classification rules 1-4 already require: integrity verification,
+    # migration, folding, retention and measurement legitimately read the store
+    # outside a query. A new store method cannot slip through as a carve-out,
+    # because an unclassified one already reds rule 1.
+    domain_reads = {
+        name
+        for surface in ("world_store", "read_snapshot")
+        for name, spec in baseline[surface].items()
+        if not name.startswith("_") and spec["class"] in ("bounded", "unbounded")
+    }
+    for crate in domain_consumer_crates():
+        for path in sorted(crate.rglob("*.rs")):
+            rel = path.relative_to(REPO_ROOT)
+            for line_no, what, line in scan_consumer(path.read_text(), domain_reads):
+                detail = BOUNDARY_INTERNALS.get(what, f"the store read `{what}`")
+                failures.append(
+                    f"{rel}:{line_no} — a domain consumer reaches past the query "
+                    f"engine: {detail}.\n"
+                    f"      {line}\n"
+                    f"    Tier 3 box 3d: there is ONE sanctioned way for "
+                    f"application code to ask Kirra World a domain question.\n"
+                    f"    Use `QueryEngine::execute(..)` with the typed request "
+                    f"for the family you want."
+                )
+
+    for rel, needle, why in VISIBILITY_PINS:
+        text = (REPO_ROOT / rel).read_text()
+        if needle not in text:
+            failures.append(
+                f"{rel} — the visibility pin `{needle}` is gone.\n"
+                f"    {why}\n"
+                f"    A compile error at the point of the mistake is stronger "
+                f"than a gate finding after the fact; widening this trades the "
+                f"first for the second."
+            )
 
     if verbose:
         for surface, names in sorted(found.items()):
@@ -435,7 +577,83 @@ def self_test() -> int:
     else:
         print("self-test: comments neither arm nor disarm rule 4")
 
-    # (h) An unclassified method must fail, since that is the generalisation.
+    # (h) RULE 5, THE HISTORICAL ROUTE: `mission_context` as it actually shipped
+    #     before the query engine existed. Copied from the commit that this box
+    #     migrated, not invented — a synthetic spelling would only prove the
+    #     regex matches itself, whereas this proves the rule rejects the exact
+    #     code that WAS the sanctioned way to consume Kirra World.
+    domain_reads = {
+        name
+        for surface in ("world_store", "read_snapshot")
+        for name, spec in baseline[surface].items()
+        if not name.startswith("_") and spec["class"] in ("bounded", "unbounded")
+    }
+    pre_engine_mission_context = """
+    let view = WorldView::new(
+        store,
+        FreshnessSource::Caller(match staleness_budget_ms {
+            Some(max_age_ms) => FreshnessPolicy::Bounded { max_age_ms },
+            None => FreshnessPolicy::Timeless,
+        }),
+    );
+
+    let answers = match view.ask(subject.as_str(), now_ms)?.into_lookup() {
+        WorldLookup::Answered(answers) => answers,
+        WorldLookup::Unknown(reason) => return Ok(ProposalContext::silent(candidates, reason)),
+    };
+    """
+    if not scan_consumer(pre_engine_mission_context, domain_reads):
+        print("SELF-TEST FAIL: the pre-engine mission_context route was NOT "
+              "caught — rule 5 does not reject the real code it exists for.")
+        failed = 1
+    else:
+        print("self-test: pre-engine mission_context → WorldView::ask → caught")
+
+    # (i) The migrated form must pass, or the rule forbids the fix as well as
+    #     the defect and there is nowhere for a consumer to go.
+    engine_mission_context = """
+    let engine = QueryEngine::new(store, FreshnessSource::Caller(policy));
+    let answers = match engine.execute(Ask { subject, now_ms })?.into_lookup() {
+        WorldLookup::Answered(answers) => answers,
+        WorldLookup::Unknown(reason) => return Ok(ProposalContext::silent(candidates, reason)),
+    };
+    """
+    if scan_consumer(engine_mission_context, domain_reads):
+        print("SELF-TEST FAIL: the MIGRATED mission_context was flagged — the "
+              "rule would leave consumers with no sanctioned route.")
+        failed = 1
+    else:
+        print("self-test: migrated mission_context → QueryEngine::execute → "
+              "not flagged")
+
+    # (j) A consumer reaching around the boundary INTO the store must fail too.
+    #     Visibility cannot catch this one: `WorldStore` is legitimately public
+    #     for operational use, so only the classification distinguishes a
+    #     domain read from a rebuild.
+    around_the_side = """
+    let claims = store.current("package_17", now_ms)?;
+    """
+    if not scan_consumer(around_the_side, domain_reads):
+        print("SELF-TEST FAIL: a consumer calling a bounded STORE read directly "
+              "was not caught — the engine can be bypassed underneath.")
+        failed = 1
+    else:
+        print("self-test: consumer reading the store directly → caught")
+
+    # (k) …while an OPERATIONAL store call from a consumer must be allowed, or
+    #     the rule bans fixture seeding and rebuild tooling.
+    operational_use = """
+    store.fold().expect("fold");
+    store.verify_chain().expect("chain");
+    """
+    if scan_consumer(operational_use, domain_reads):
+        print("SELF-TEST FAIL: an operational store call was flagged — the "
+              "named carve-outs are not actually carved out.")
+        failed = 1
+    else:
+        print("self-test: operational store calls from a consumer → allowed")
+
+    # (l) An unclassified method must fail, since that is the generalisation.
     stripped = {k: v for k, v in baseline["world_store"].items() if k != "history"}
     if "history" in stripped:
         print("SELF-TEST FAIL: fixture construction error.")

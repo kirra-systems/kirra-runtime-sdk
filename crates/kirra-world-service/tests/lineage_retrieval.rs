@@ -47,7 +47,9 @@
 //! redundant would remove the only coverage there is.
 
 use kirra_world_service::answer_ref::QueryKind;
+use kirra_world_service::freshness::FreshnessSource;
 use kirra_world_service::lineage::{LineageRef, LineageResolution};
+use kirra_world_service::query::{Lineage, QueryEngine};
 use kirra_world_service::semantics::{RuleVersion, SemanticVersions};
 use kirra_world_store::lineage::LineagePage;
 use kirra_world_store::{ClaimStatus, EventId, NewEvent, ObservationId, WorldStore, WriterClass};
@@ -127,7 +129,15 @@ fn store_with(n: i64, name: &str) -> (WorldStore, std::path::PathBuf, i64) {
 }
 
 fn resolve(store: &WorldStore, r: &LineageRef) -> LineageResolution {
-    r.resolve(store).expect("lineage resolves")
+    // Through the sanctioned surface — box 3d. `LineageRef::resolve` is
+    // `pub(crate)` now, so this helper could not call it directly even if it
+    // wanted to: the engine is the only route, and that is enforced by the
+    // compiler rather than by this comment.
+    QueryEngine::new(store, FreshnessSource::Ruled)
+        .execute(Lineage {
+            reference: r.clone(),
+        })
+        .expect("lineage resolves")
 }
 
 fn generations(res: &LineageResolution) -> Vec<i64> {

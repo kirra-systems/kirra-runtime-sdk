@@ -1685,9 +1685,23 @@ jobs:
         # boundedness of a query is a STRUCTURAL property, not an observable one,
         # which is why it needs a gate rather than tests.
         #
+        # Rule 5 adds the other half: a domain query must go through the TYPED
+        # ENGINE. Boundedness does not imply that — a consumer holding a
+        # `&WorldStore` could build its own view, call a family directly, and be
+        # perfectly bounded while bypassing semantics versions, freshness
+        # classification and the no-bare-values rule. `mission_context` did
+        # exactly that, and it was the sanctioned route at the time.
+        #
+        # The primary enforcement for rule 5 is VISIBILITY, not this gate:
+        # `WorldView` and the two `resolve` methods are `pub(crate)`, so a
+        # consumer reaching past the engine gets a compile error at the point of
+        # the mistake. The gate covers what visibility cannot reach, and pins
+        # the visibility so widening it is itself a red build.
+        #
         # Self-test first: it proves the gate still rejects the historical defect
-        # shape (bounded public request -> unbounded store call -> post-fetch
-        # truncation) rather than merely passing on a clean tree.
+        # shapes rather than merely passing on a clean tree — the bounded public
+        # request over an unbounded store call, the page-taking method whose SQL
+        # carries no LIMIT, and the real pre-engine `mission_context` route.
         run: |
           python3 ci/check_query_boundedness.py --self-test
           python3 ci/check_query_boundedness.py

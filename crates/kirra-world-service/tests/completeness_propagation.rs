@@ -94,7 +94,8 @@
 //!   staleness and failed on its own premise.
 
 use kirra_world_service::freshness::FreshnessSource;
-use kirra_world_service::read_view::{AskError, WorldLookup, WorldView};
+use kirra_world_service::query::{Ask, History, QueryEngine, SubjectSummary};
+use kirra_world_service::read_view::{AskError, WorldLookup};
 use kirra_world_store::lineage::LineagePage;
 use kirra_world_store::{ClaimStatus, EventId, NewEvent, ObservationId, WorldStore, WriterClass};
 
@@ -146,8 +147,8 @@ fn claim(store: &mut WorldStore, tag: &str, object: &str, at_ms: i64) {
 
 /// The RULED table classifies `mission`/`last_seen_at` with a five-minute
 /// budget, so this view is fail-closed AND the fixture's claims are classified.
-fn view(store: &WorldStore) -> WorldView<'_> {
-    WorldView::new(store, FreshnessSource::Ruled)
+fn view(store: &WorldStore) -> QueryEngine<'_> {
+    QueryEngine::new(store, FreshnessSource::Ruled)
 }
 
 /// Three observations, all retained. No citations anywhere in the store.
@@ -220,7 +221,10 @@ fn answered(lookup: &WorldLookup) -> usize {
 fn a_compacted_history_reports_degraded() {
     let (store, _p) = holed_store("hist-degraded");
     let lookup = view(&store)
-        .history("package_17", LineagePage::first())
+        .execute(History {
+            subject: "package_17".to_owned(),
+            page: LineagePage::first(),
+        })
         .expect("history");
 
     assert!(
@@ -241,10 +245,16 @@ fn both_history_arms_return_a_plausible_non_empty_record() {
     let (intact, _p2) = intact_store("hist-nonempty-intact");
 
     let degraded = view(&holed)
-        .history("package_17", LineagePage::first())
+        .execute(History {
+            subject: "package_17".to_owned(),
+            page: LineagePage::first(),
+        })
         .expect("history");
     let full = view(&intact)
-        .history("package_17", LineagePage::first())
+        .execute(History {
+            subject: "package_17".to_owned(),
+            page: LineagePage::first(),
+        })
         .expect("history");
 
     assert_eq!(
@@ -272,7 +282,10 @@ fn both_history_arms_return_a_plausible_non_empty_record() {
 fn an_uncompacted_history_reports_full() {
     let (store, _p) = intact_store("hist-full");
     let lookup = view(&store)
-        .history("package_17", LineagePage::first())
+        .execute(History {
+            subject: "package_17".to_owned(),
+            page: LineagePage::first(),
+        })
         .expect("history");
 
     assert!(
@@ -334,7 +347,12 @@ fn history_keeps_a_claim_that_ask_refuses_to_serve() {
     let v = view(&store);
     let late = T0 + 3_600_000;
 
-    let served = v.ask("package_17", late).expect("ask");
+    let served = v
+        .execute(Ask {
+            subject: "package_17".to_owned(),
+            now_ms: late,
+        })
+        .expect("ask");
     assert_eq!(
         answered(served.lookup()),
         0,
@@ -343,7 +361,10 @@ fn history_keeps_a_claim_that_ask_refuses_to_serve() {
     );
 
     let record = v
-        .history("package_17", LineagePage::first())
+        .execute(History {
+            subject: "package_17".to_owned(),
+            page: LineagePage::first(),
+        })
         .expect("history");
     assert_eq!(
         answered(record.lookup()),
@@ -391,7 +412,10 @@ fn an_unruled_claim_refuses_the_whole_history() {
     store.fold().expect("fold");
 
     let err = view(&store)
-        .history("package_17", LineagePage::first())
+        .execute(History {
+            subject: "package_17".to_owned(),
+            page: LineagePage::first(),
+        })
         .expect_err("an unclassified claim must refuse the whole query");
     assert!(
         matches!(err, AskError::UnclassifiedFreshness { .. }),
@@ -409,7 +433,9 @@ fn an_unruled_claim_refuses_the_whole_history() {
 fn a_compacted_summary_reports_degraded() {
     let (store, _p) = holed_store("sum-degraded");
     let lookup = view(&store)
-        .subject_summary("package_17")
+        .execute(SubjectSummary {
+            subject: "package_17".to_owned(),
+        })
         .expect("subject summary");
 
     assert!(
@@ -428,7 +454,9 @@ fn a_compacted_summary_reports_degraded() {
 fn an_uncompacted_summary_reports_complete() {
     let (store, _p) = intact_store("sum-complete");
     let lookup = view(&store)
-        .subject_summary("package_17")
+        .execute(SubjectSummary {
+            subject: "package_17".to_owned(),
+        })
         .expect("subject summary");
 
     assert!(lookup.summary().is_some(), "the subject is summarised");
@@ -456,7 +484,9 @@ fn an_uncompacted_summary_reports_complete() {
 fn reconciliation_does_not_upgrade_completeness() {
     let (store, _p) = holed_store("sum-reconcile");
     let lookup = view(&store)
-        .subject_summary("package_17")
+        .execute(SubjectSummary {
+            subject: "package_17".to_owned(),
+        })
         .expect("subject summary");
     let summary = lookup.summary().expect("summarised");
 
@@ -491,7 +521,9 @@ fn reconciliation_does_not_upgrade_completeness() {
 fn an_unknown_subject_is_absent_rather_than_degraded() {
     let (store, _p) = intact_store("sum-absent");
     let lookup = view(&store)
-        .subject_summary("package_99")
+        .execute(SubjectSummary {
+            subject: "package_99".to_owned(),
+        })
         .expect("subject summary");
 
     assert!(lookup.summary().is_none(), "never observed");
@@ -512,7 +544,12 @@ fn an_unknown_subject_is_absent_rather_than_degraded() {
 fn a_history_page_returns_at_most_its_limit() {
     let (store, _p) = intact_store("hist-page-limit");
     let page = LineagePage::new(2, None).expect("valid page");
-    let lookup = view(&store).history("package_17", page).expect("history");
+    let lookup = view(&store)
+        .execute(History {
+            subject: "package_17".to_owned(),
+            page,
+        })
+        .expect("history");
 
     assert_eq!(
         answered(lookup.lookup()),
@@ -538,7 +575,12 @@ fn paginating_a_history_walks_the_record_without_gaps_or_repeats() {
     let mut cursor = None;
     for _ in 0..10 {
         let page = LineagePage::new(1, cursor).expect("valid page");
-        let lookup = v.history("package_17", page).expect("history");
+        let lookup = v
+            .execute(History {
+                subject: "package_17".to_owned(),
+                page,
+            })
+            .expect("history");
         if let WorldLookup::Answered(answers) = lookup.lookup() {
             for a in answers {
                 seen.push(a.event_id().to_string());
@@ -576,7 +618,12 @@ fn paginating_a_history_walks_the_record_without_gaps_or_repeats() {
 fn a_history_page_that_exactly_fills_is_complete() {
     let (store, _p) = intact_store("hist-page-exact");
     let page = LineagePage::new(3, None).expect("valid page");
-    let lookup = view(&store).history("package_17", page).expect("history");
+    let lookup = view(&store)
+        .execute(History {
+            subject: "package_17".to_owned(),
+            page,
+        })
+        .expect("history");
 
     assert_eq!(answered(lookup.lookup()), 3, "the whole record");
     assert!(
@@ -595,7 +642,12 @@ fn a_history_page_that_exactly_fills_is_complete() {
 fn a_truncated_page_over_a_degraded_record_reports_both() {
     let (store, _p) = holed_store("hist-page-degraded");
     let page = LineagePage::new(1, None).expect("valid page");
-    let lookup = view(&store).history("package_17", page).expect("history");
+    let lookup = view(&store)
+        .execute(History {
+            subject: "package_17".to_owned(),
+            page,
+        })
+        .expect("history");
 
     assert!(
         lookup.boundary().is_truncated(),

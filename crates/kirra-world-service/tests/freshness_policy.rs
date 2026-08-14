@@ -31,7 +31,8 @@
 //! about the table.
 
 use kirra_world_service::freshness::{FreshnessPolicy, FreshnessSource};
-use kirra_world_service::read_view::{AskError, WorldLookup, WorldView};
+use kirra_world_service::query::{Ask, AskAsOf, QueryEngine};
+use kirra_world_service::read_view::{AskError, WorldLookup};
 use kirra_world_store::{
     ClaimStatus, EventId, NewEvent, ObservationId, Validity, WorldStore, WriterClass,
 };
@@ -101,13 +102,18 @@ fn store_with_both_dispositions(name: &str) -> (WorldStore, std::path::PathBuf) 
 }
 
 /// A view under the RULED source — the configuration every refusal test needs.
-fn store_view(store: &WorldStore) -> WorldView<'_> {
-    WorldView::new(store, FreshnessSource::Ruled)
+fn store_view(store: &WorldStore) -> QueryEngine<'_> {
+    QueryEngine::new(store, FreshnessSource::Ruled)
 }
 
 fn validity_of(store: &WorldStore, predicate: &str) -> Validity {
     let view = store_view(store);
-    let composed = view.ask("package_17", MUCH_LATER).expect("ask");
+    let composed = view
+        .execute(Ask {
+            subject: "package_17".to_owned(),
+            now_ms: MUCH_LATER,
+        })
+        .expect("ask");
     let WorldLookup::Answered(answers) = composed.lookup() else {
         panic!("the fixture must answer, got {:?}", composed.lookup());
     };
@@ -181,8 +187,11 @@ fn an_unclassified_claim_refuses_rather_than_defaulting_to_timeless() {
     claim(&mut store, "unruled", "mission", "invented_predicate");
     store.fold().expect("fold");
 
-    let view = WorldView::new(&store, FreshnessSource::Ruled);
-    match view.ask("package_17", MUCH_LATER) {
+    let view = QueryEngine::new(&store, FreshnessSource::Ruled);
+    match view.execute(Ask {
+        subject: "package_17".to_owned(),
+        now_ms: MUCH_LATER,
+    }) {
         Err(AskError::UnclassifiedFreshness { kind, predicate }) => {
             assert_eq!(kind, "mission");
             assert_eq!(predicate.as_deref(), Some("invented_predicate"));
@@ -210,9 +219,13 @@ fn the_refusal_is_an_error_not_an_unknown_answer() {
     claim(&mut store, "unruled", "mission", "invented_predicate");
     store.fold().expect("fold");
 
-    let view = WorldView::new(&store, FreshnessSource::Ruled);
+    let view = QueryEngine::new(&store, FreshnessSource::Ruled);
     assert!(
-        view.ask("package_17", MUCH_LATER).is_err(),
+        view.execute(Ask {
+            subject: "package_17".to_owned(),
+            now_ms: MUCH_LATER
+        })
+        .is_err(),
         "a missing policy is a policy-resolution failure, not a freshness state \
          and not an absence of knowledge"
     );
@@ -234,9 +247,13 @@ fn one_unruled_claim_refuses_the_whole_query_rather_than_narrowing_it() {
     claim(&mut store, "unruled", "mission", "invented_predicate"); // not
     store.fold().expect("fold");
 
-    let view = WorldView::new(&store, FreshnessSource::Ruled);
+    let view = QueryEngine::new(&store, FreshnessSource::Ruled);
     assert!(
-        view.ask("package_17", MUCH_LATER).is_err(),
+        view.execute(Ask {
+            subject: "package_17".to_owned(),
+            now_ms: MUCH_LATER
+        })
+        .is_err(),
         "a partially-ruled subject must refuse, not serve the ruled half and \
          quietly omit the rest"
     );
@@ -263,7 +280,11 @@ fn the_bitemporal_family_refuses_an_unclassified_claim_as_well() {
     claim(&mut store, "unruled", "mission", "invented_predicate");
     store.fold().expect("fold");
 
-    match store_view(&store).ask_as_of("package_17", MUCH_LATER, MUCH_LATER) {
+    match store_view(&store).execute(AskAsOf {
+        subject: "package_17".to_owned(),
+        valid_at_ms: MUCH_LATER,
+        as_known_at_ms: MUCH_LATER,
+    }) {
         Err(AskError::UnclassifiedFreshness { kind, predicate }) => {
             assert_eq!(kind, "mission");
             assert_eq!(predicate.as_deref(), Some("invented_predicate"));
@@ -291,7 +312,11 @@ fn the_bitemporal_family_refuses_rather_than_narrowing() {
 
     assert!(
         store_view(&store)
-            .ask_as_of("package_17", MUCH_LATER, MUCH_LATER)
+            .execute(AskAsOf {
+                subject: "package_17".to_owned(),
+                valid_at_ms: MUCH_LATER,
+                as_known_at_ms: MUCH_LATER
+            })
             .is_err(),
         "a partially-ruled subject must refuse on the historical axis too, not \
          serve the ruled half and quietly omit the rest"
@@ -307,7 +332,11 @@ fn the_bitemporal_family_refuses_rather_than_narrowing() {
 fn the_bitemporal_family_answers_when_every_claim_is_ruled() {
     let (store, path) = store_with_both_dispositions("asof-ok");
     let lookup = store_view(&store)
-        .ask_as_of("package_17", MUCH_LATER, MUCH_LATER)
+        .execute(AskAsOf {
+            subject: "package_17".to_owned(),
+            valid_at_ms: MUCH_LATER,
+            as_known_at_ms: MUCH_LATER,
+        })
         .expect("a fully-ruled subject must answer");
     let WorldLookup::Answered(answers) = lookup.lookup() else {
         panic!("the fixture must answer, got {:?}", lookup.lookup());
@@ -334,12 +363,15 @@ fn the_caller_source_can_classify_what_the_table_has_not_ruled() {
     claim(&mut store, "unruled", "mission", "invented_predicate");
     store.fold().expect("fold");
 
-    let view = WorldView::new(
+    let view = QueryEngine::new(
         &store,
         FreshnessSource::Caller(FreshnessPolicy::Bounded { max_age_ms: 1_000 }),
     );
     let composed = view
-        .ask("package_17", MUCH_LATER)
+        .execute(Ask {
+            subject: "package_17".to_owned(),
+            now_ms: MUCH_LATER,
+        })
         .expect("caller classified it");
     let WorldLookup::Answered(answers) = composed.lookup() else {
         panic!("must answer");
@@ -365,8 +397,13 @@ fn timeless_is_always_traceable_to_a_grant() {
 
     // From an explicit caller grant, on a class the table rules BOUNDED — so
     // the value cannot have leaked from the table.
-    let view = WorldView::new(&store, FreshnessSource::Caller(FreshnessPolicy::Timeless));
-    let composed = view.ask("package_17", MUCH_LATER).expect("ask");
+    let view = QueryEngine::new(&store, FreshnessSource::Caller(FreshnessPolicy::Timeless));
+    let composed = view
+        .execute(Ask {
+            subject: "package_17".to_owned(),
+            now_ms: MUCH_LATER,
+        })
+        .expect("ask");
     let WorldLookup::Answered(answers) = composed.lookup() else {
         panic!("must answer");
     };

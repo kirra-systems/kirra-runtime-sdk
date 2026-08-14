@@ -167,7 +167,7 @@ fn history_across_a_compacted_window_is_degraded_and_carries_the_summary() {
     let mut s = seeded(&p);
     let out = s.compact_range(1, 6, T0 + 9_000).expect("compact");
 
-    let h = s.history("cup-0").unwrap();
+    let h = s.history_whole("cup-0").unwrap();
     assert!(h.is_empty(), "every cup-0 observation was in the window");
     assert!(
         h.is_degraded(),
@@ -215,7 +215,7 @@ fn a_subject_the_window_never_held_is_not_degraded() {
     let mut s = seeded(&p);
     s.compact_range(1, 6, T0 + 9_000).expect("compact");
 
-    let h = s.history("cup-1").unwrap();
+    let h = s.history_whole("cup-1").unwrap();
     assert_eq!(h.len(), 6, "cup-1 was not in the window");
     assert_eq!(
         h.resolution,
@@ -302,7 +302,7 @@ fn a_store_compacted_before_summaries_existed_reports_degraded_with_nothing_to_s
     // Even a subject the window never held is degraded here — with the
     // summaries gone there is no longer any evidence of what it did hold.
     for subject in ["cup-0", "cup-1"] {
-        let h = s.history(subject).unwrap();
+        let h = s.history_whole(subject).unwrap();
         assert!(
             h.is_degraded(),
             "{subject}: a citation with no summary must still degrade the answer"
@@ -334,11 +334,11 @@ fn a_summary_whose_citation_is_missing_fails_closed() {
     let p = tmp("orphan-summary");
     let mut s = seeded(&p);
     s.compact_range(1, 6, T0 + 9_000).expect("compact");
-    s.history("cup-0").expect("healthy before");
+    s.history_whole("cup-0").expect("healthy before");
 
     s.delete_citation_for_test(1).unwrap();
 
-    match s.history("cup-0") {
+    match s.history_whole("cup-0") {
         Err(StoreError::CitationBroken { lo_generation, .. }) => assert_eq!(lo_generation, 1),
         other => panic!("expected a fail-closed citation error, got {other:?}"),
     }
@@ -532,7 +532,7 @@ fn successive_compactions_each_retain_their_own_summary() {
     s.compact_range(5, 8, T0 + 20_100).expect("second");
     s.verify_chain().expect("chain still verifies across both");
 
-    let h = s.history("cup-0").unwrap();
+    let h = s.history_whole("cup-0").unwrap();
     assert!(h.is_empty() && h.is_degraded());
     let sums = h.resolution.summaries();
     assert_eq!(sums.len(), 2, "one per span");
@@ -587,7 +587,7 @@ fn a_refused_compaction_retains_no_summary() {
     assert!(s.summaries().unwrap().is_empty());
     assert_eq!(s.count().unwrap(), 3, "nothing was removed");
     assert_eq!(
-        s.history("cup-0").unwrap().resolution,
+        s.history_whole("cup-0").unwrap().resolution,
         Resolution::Full,
         "a refusal must not make later answers read as degraded"
     );
@@ -630,7 +630,7 @@ fn current_state_survives_compaction() {
         "current state is untouched by compaction, by construction"
     );
     // And the trajectory that led there is gone, and says so.
-    let h = s.history("cup-0").unwrap();
+    let h = s.history_whole("cup-0").unwrap();
     assert_eq!(h.len(), 1, "only the head survives");
     assert!(h.is_degraded());
     assert_eq!(h.resolution.summaries()[0].event_count, 5);

@@ -248,7 +248,7 @@ impl AnswerRef {
     /// Only on a storage fault, or `StoreError::InvalidGeneration` for a ref
     /// carrying a negative generation. Irreproducibility is an OUTCOME, not an
     /// error: *"we deleted the evidence"* is a fact about the data.
-    pub fn resolve(&self, store: &WorldStore) -> Result<RefResolution, AskError> {
+    pub(crate) fn resolve(&self, store: &WorldStore) -> Result<RefResolution, AskError> {
         let differences = self
             .semantics
             .differences(&SemanticVersions::for_query(self.kind));

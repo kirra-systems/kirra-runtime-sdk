@@ -3173,7 +3173,7 @@ impl WorldStore {
     /// # Errors
     ///
     /// [`StoreError::Sqlite`] on any read failure.
-    pub fn history(&self, subject: &str) -> Result<TemporalAnswer, StoreError> {
+    pub fn history_whole(&self, subject: &str) -> Result<TemporalAnswer, StoreError> {
         let mut stmt = self.conn.prepare(&format!(
             "SELECT {CLAIM_COLUMNS} FROM world_events
              WHERE subject = ?1 AND claim_status = 'confirmed'
