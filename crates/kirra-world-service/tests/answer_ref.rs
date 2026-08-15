@@ -22,9 +22,35 @@
 //! bound wholesale, so it is re-asserted here at the level a caller sees.
 
 use kirra_world_service::answer_ref::{current_semantics, AnswerRef, QueryKind, RefResolution};
+use kirra_world_service::freshness::FreshnessSource;
+use kirra_world_service::query::{QueryEngine, ReplayAnswer};
+use kirra_world_service::read_view::AskError;
 use kirra_world_service::semantics::{RuleVersion, SemanticVersions};
 use kirra_world_store::snapshot::Irreproducible;
 use kirra_world_store::{ClaimStatus, EventId, NewEvent, ObservationId, WorldStore, WriterClass};
+
+/// Replay a recorded answer through the sanctioned surface — box 3d.
+///
+/// `AnswerRef::resolve` became `pub(crate)` when the query engine landed, so
+/// this file cannot reach it any more than a consumer crate can. The shim keeps
+/// the call shape these tests were written in while routing every one of them
+/// through `QueryEngine::execute`, which is the point: the assertions below are
+/// unchanged, and they now pin the ENGINE's behaviour rather than a path only
+/// this crate could take.
+trait ReplayThroughEngine {
+    fn replay(&self, store: &WorldStore) -> Result<RefResolution, AskError>;
+}
+
+impl ReplayThroughEngine for AnswerRef {
+    fn replay(&self, store: &WorldStore) -> Result<RefResolution, AskError> {
+        // The engine's freshness source is inert for this family on purpose: a
+        // recorded reference carries its own staleness budget, which is the
+        // contract that was in force when the answer was taken.
+        QueryEngine::new(store, FreshnessSource::Ruled).execute(ReplayAnswer {
+            reference: self.clone(),
+        })
+    }
+}
 
 const T0: i64 = 1_700_000_000_000;
 const LATER: i64 = T0 + 1_000;
@@ -111,8 +137,8 @@ fn the_same_ref_resolves_identically_and_to_the_pinned_answer() {
     let (store, path) = store_that_changed_its_mind("stable");
     let r = AnswerRef::current_subject("package_17", LATER, None, 1);
 
-    let first = r.resolve(&store).expect("resolve");
-    let second = r.resolve(&store).expect("resolve again");
+    let first = r.replay(&store).expect("resolve");
+    let second = r.replay(&store).expect("resolve again");
 
     assert_eq!(objects(&first), vec!["dock_old".to_string()]);
     assert_eq!(
@@ -125,7 +151,7 @@ fn the_same_ref_resolves_identically_and_to_the_pinned_answer() {
     // "resolved correctly" is distinguishing something.
     let live = AnswerRef::current_subject("package_17", LATER, None, 2);
     assert_eq!(
-        objects(&live.resolve(&store).expect("resolve")),
+        objects(&live.replay(&store).expect("resolve")),
         vec!["dock_a"]
     );
 
@@ -236,7 +262,7 @@ fn a_future_generation_refuses() {
     let (store, path) = store_that_changed_its_mind("future");
     let r = AnswerRef::current_subject("package_17", LATER, None, 9_999);
 
-    match r.resolve(&store).expect("resolve") {
+    match r.replay(&store).expect("resolve") {
         RefResolution::Irreproducible(Irreproducible::NotYetReached { .. }) => {}
         other => panic!("a future coordinate must refuse, got {other:?}"),
     }
@@ -257,13 +283,13 @@ fn compaction_below_the_pin_makes_the_ref_irreproducible() {
     let r = AnswerRef::current_subject("package_17", LATER, None, 1);
 
     assert_eq!(
-        objects(&r.resolve(&store).expect("resolve")),
+        objects(&r.replay(&store).expect("resolve")),
         vec!["dock_old"]
     );
 
     store.compact_range(1, 1, T0 + 5_000).expect("compact");
 
-    match r.resolve(&store).expect("resolve") {
+    match r.replay(&store).expect("resolve") {
         RefResolution::Irreproducible(Irreproducible::Compacted { spans }) => {
             assert!(!spans.is_empty(), "the refusal must name what was removed");
         }
@@ -297,7 +323,7 @@ fn compaction_above_the_pin_leaves_the_ref_resolvable() {
     store.compact_range(2, 2, T0 + 5_000).expect("compact");
 
     assert_eq!(
-        objects(&r.resolve(&store).expect("resolve")),
+        objects(&r.replay(&store).expect("resolve")),
         vec!["dock_old"],
         "a span removed above the pin took none of the events the ref folds"
     );
@@ -323,7 +349,7 @@ fn a_version_mismatch_refuses_rather_than_replaying() {
     let current = AnswerRef::current_subject("package_17", LATER, None, 1);
     assert!(
         current
-            .resolve(&store)
+            .replay(&store)
             .expect("resolve")
             .resolved()
             .is_some(),
@@ -335,7 +361,7 @@ fn a_version_mismatch_refuses_rather_than_replaying() {
     // said only "the rules changed" would leave an operator holding a reference
     // they cannot act on.
     let stale = current.clone().recorded_with("world_current_fold", 0);
-    match stale.resolve(&store).expect("resolve") {
+    match stale.replay(&store).expect("resolve") {
         RefResolution::VersionMismatch { differences } => {
             assert_eq!(differences.len(), 1, "only one rule moved: {differences:?}");
             assert_eq!(differences[0].rule, "world_current_fold");
@@ -353,7 +379,7 @@ fn a_version_mismatch_refuses_rather_than_replaying() {
     match current
         .clone()
         .recorded_with("answer_admissibility", 99)
-        .resolve(&store)
+        .replay(&store)
         .expect("resolve")
     {
         RefResolution::VersionMismatch { differences } => {
@@ -368,7 +394,7 @@ fn a_version_mismatch_refuses_rather_than_replaying() {
     match current
         .clone()
         .recorded_with("world_current_fold", u32::MAX)
-        .resolve(&store)
+        .replay(&store)
         .expect("resolve")
     {
         RefResolution::VersionMismatch { .. } => {}
@@ -381,7 +407,7 @@ fn a_version_mismatch_refuses_rather_than_replaying() {
     match current
         .clone()
         .recorded_with("subject_summary_fold", 1)
-        .resolve(&store)
+        .replay(&store)
         .expect("resolve")
     {
         RefResolution::VersionMismatch { differences } => {
@@ -400,7 +426,7 @@ fn a_version_mismatch_refuses_rather_than_replaying() {
     match current
         .clone()
         .recorded_with("entity_fold", 99)
-        .resolve(&store)
+        .replay(&store)
         .expect("resolve")
     {
         RefResolution::VersionMismatch { differences } => {
@@ -418,7 +444,7 @@ fn a_version_mismatch_refuses_rather_than_replaying() {
     // at an irreproducible coordinate reports the version, not the compaction.
     match AnswerRef::current_subject("package_17", LATER, None, 99_999)
         .recorded_with("world_current_fold", 0)
-        .resolve(&store)
+        .replay(&store)
         .expect("resolve")
     {
         RefResolution::VersionMismatch { .. } => {}
@@ -545,7 +571,7 @@ fn a_refs_recorded_versions_are_pinned_to_what_it_resolves_to() {
         .world_current()
         .generation();
     let resolved = AnswerRef::current_subject("package_17", T0 + 100, None, head)
-        .resolve(&store)
+        .replay(&store)
         .expect("resolve");
 
     let rendered: Vec<String> = resolved

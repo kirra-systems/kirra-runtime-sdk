@@ -505,7 +505,7 @@ impl ComposedLookup {
 /// Read-only is structural, not a convention: this type holds a `&WorldStore`
 /// and offers no mutation. Kirra World is evidence; an answer boundary serves it
 /// and never adjudicates it.
-pub struct WorldView<'a> {
+pub(crate) struct WorldView<'a> {
     store: &'a WorldStore,
     freshness: FreshnessSource,
 }

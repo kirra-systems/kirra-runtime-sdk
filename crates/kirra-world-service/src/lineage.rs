@@ -195,7 +195,7 @@ impl LineageRef {
     /// is not a digest — see [`AskError::CorruptProvenance`], which this family
     /// raises for the same reason the answer family does: an entry that cannot
     /// be cited is not lineage.
-    pub fn resolve(&self, store: &WorldStore) -> Result<LineageResolution, AskError> {
+    pub(crate) fn resolve(&self, store: &WorldStore) -> Result<LineageResolution, AskError> {
         let differences = self
             .semantics
             .differences(&SemanticVersions::for_query(QueryKind::SubjectLineage));

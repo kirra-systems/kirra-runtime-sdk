@@ -544,10 +544,10 @@ fn successive_compactions_chain_correctly() {
 fn surviving_events_are_unchanged() {
     let p = tmp("survivors");
     let mut s = seeded(&p);
-    let before = s.history("cup-0").unwrap().claims;
+    let before = s.history_whole("cup-0").unwrap().claims;
 
     s.compact_range(1, 6, T0 + 9_000).expect("compact");
-    let after = s.history("cup-0").unwrap();
+    let after = s.history_whole("cup-0").unwrap();
     assert!(
         after.is_degraded(),
         "compaction removed events about this subject; the answer must say so"

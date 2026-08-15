@@ -503,7 +503,7 @@ fn history_is_every_confirmed_event_oldest_first() {
         ))
         .expect("append");
     }
-    let h = s.history("cup-1").unwrap().claims;
+    let h = s.history_whole("cup-1").unwrap().claims;
     assert_eq!(h.len(), 4);
     assert!(
         h.windows(2).all(|w| w[0].generation < w[1].generation),

@@ -47,7 +47,8 @@ use kirra_world::observation::{ClockDomain, DomainInstant};
 use kirra_world::reference::{EntityId, EventId, ObservationId};
 use kirra_world_service::answer_ref::{AnswerRef, RefResolution};
 use kirra_world_service::freshness::{FreshnessPolicy, FreshnessSource};
-use kirra_world_service::read_view::{ObjectIdentity, WorldLookup, WorldView};
+use kirra_world_service::query::{Ask, QueryEngine, ReplayAnswer};
+use kirra_world_service::read_view::{AskError, ObjectIdentity, WorldLookup};
 use kirra_world_store::adjudication_record::AdjudicationRow;
 use kirra_world_store::snapshot::PinnedComposedRead;
 use kirra_world_store::{ClaimStatus, NewEvent, WorldStore, WriterClass};
@@ -185,6 +186,16 @@ fn store_where_the_graph_moved_after_the_pin(name: &str) -> (WorldStore, std::pa
     (store, path, pin)
 }
 
+/// Replay a recorded answer through the sanctioned surface — box 3d.
+///
+/// `AnswerRef::resolve` is `pub(crate)`, so a test cannot reach it directly any
+/// more than a consumer can. The engine's freshness source is inert here on
+/// purpose: a recorded reference carries its OWN staleness budget, which is the
+/// contract that was in force when the answer was taken.
+fn replay(store: &WorldStore, reference: AnswerRef) -> Result<RefResolution, AskError> {
+    QueryEngine::new(store, FreshnessSource::Ruled).execute(ReplayAnswer { reference })
+}
+
 fn sole_identity(res: &RefResolution) -> ObjectIdentity {
     let answers = res.resolved().expect("the ref must resolve");
     assert_eq!(answers.len(), 1, "fixture holds one claim for the subject");
@@ -203,9 +214,14 @@ fn sole_identity(res: &RefResolution) -> ObjectIdentity {
 #[test]
 fn the_live_read_resolves_the_object_through_the_merge() {
     let (store, path, _pin) = store_where_the_graph_moved_after_the_pin("live");
-    let view = WorldView::new(&store, FreshnessSource::Caller(FreshnessPolicy::Timeless));
+    let view = QueryEngine::new(&store, FreshnessSource::Caller(FreshnessPolicy::Timeless));
 
-    let composed = view.ask("package_17", LATER).expect("ask");
+    let composed = view
+        .execute(Ask {
+            subject: "package_17".to_owned(),
+            now_ms: LATER,
+        })
+        .expect("ask");
     let WorldLookup::Answered(answers) = composed.lookup() else {
         panic!("the fixture must answer, got {:?}", composed.lookup());
     };
@@ -233,9 +249,11 @@ fn the_live_read_resolves_the_object_through_the_merge() {
 fn a_ref_pinned_before_the_merge_resolves_identity_as_it_stood_then() {
     let (store, path, pin) = store_where_the_graph_moved_after_the_pin("pinned");
 
-    let resolved = AnswerRef::current_subject("package_17", LATER, None, pin)
-        .resolve(&store)
-        .expect("resolve");
+    let resolved = replay(
+        &store,
+        AnswerRef::current_subject("package_17", LATER, None, pin),
+    )
+    .expect("resolve");
 
     assert_eq!(
         sole_identity(&resolved),
@@ -263,13 +281,20 @@ fn the_historical_and_live_identities_genuinely_differ() {
     let (store, path, pin) = store_where_the_graph_moved_after_the_pin("differ");
 
     let historical = sole_identity(
-        &AnswerRef::current_subject("package_17", LATER, None, pin)
-            .resolve(&store)
-            .expect("resolve"),
+        &replay(
+            &store,
+            AnswerRef::current_subject("package_17", LATER, None, pin),
+        )
+        .expect("resolve"),
     );
 
-    let view = WorldView::new(&store, FreshnessSource::Caller(FreshnessPolicy::Timeless));
-    let composed = view.ask("package_17", LATER).expect("ask");
+    let view = QueryEngine::new(&store, FreshnessSource::Caller(FreshnessPolicy::Timeless));
+    let composed = view
+        .execute(Ask {
+            subject: "package_17".to_owned(),
+            now_ms: LATER,
+        })
+        .expect("ask");
     let WorldLookup::Answered(live) = composed.lookup() else {
         panic!("the fixture must answer");
     };
@@ -300,9 +325,11 @@ fn a_ref_pinned_after_the_merge_does_follow_it() {
         .world_current()
         .generation();
 
-    let resolved = AnswerRef::current_subject("package_17", LATER, None, head)
-        .resolve(&store)
-        .expect("resolve");
+    let resolved = replay(
+        &store,
+        AnswerRef::current_subject("package_17", LATER, None, head),
+    )
+    .expect("resolve");
 
     assert_eq!(
         sole_identity(&resolved),

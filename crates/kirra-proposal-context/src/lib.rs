@@ -59,9 +59,8 @@
 use kirra_world::resolution::RefusalReason;
 use kirra_world::trust::{TrustGrade, Validity};
 use kirra_world_service::freshness::{FreshnessPolicy, FreshnessSource};
-use kirra_world_service::read_view::{
-    AskError, ObjectIdentity, UnknownReason, WorldLookup, WorldView,
-};
+use kirra_world_service::query::{Ask, QueryEngine};
+use kirra_world_service::read_view::{AskError, ObjectIdentity, UnknownReason, WorldLookup};
 use kirra_world_store::WorldStore;
 
 /// An opaque symbolic identity — a destination, a task, a package, a relation.
@@ -416,9 +415,9 @@ fn mirror_resolution(identity: &ObjectIdentity) -> ObjectResolution {
 ///
 /// # What this reads, and what it does not
 ///
-/// It goes through the sanctioned answer boundary — `WorldView::ask` — so every
-/// value it sees arrives with validity, trust axes, grade and provenance
-/// attached. It does NOT touch `ProjectedClaim`'s public fields, which was the
+/// It goes through the sanctioned answer boundary — one
+/// `QueryEngine::execute(Ask { .. })` — so every value it sees arrives with
+/// validity, trust axes, grade and provenance attached. It does NOT touch `ProjectedClaim`'s public fields, which was the
 /// 3a defect this migration closes.
 ///
 /// It also does not resolve the object through the identity graph, even though
@@ -438,7 +437,7 @@ pub fn mission_context(
     // is what this signature already meant ("I have considered this and this
     // fact is genuinely timeless"), now said in a type where the alternative
     // reading is unrepresentable.
-    let view = WorldView::new(
+    let engine = QueryEngine::new(
         store,
         FreshnessSource::Caller(match staleness_budget_ms {
             Some(max_age_ms) => FreshnessPolicy::Bounded { max_age_ms },
@@ -446,7 +445,17 @@ pub fn mission_context(
         }),
     );
 
-    let answers = match view.ask(subject.as_str(), now_ms)?.into_lookup() {
+    // Box 3d: through the ONE sanctioned surface. This read `WorldView::ask`
+    // directly until the query engine landed — which was the blessed route at
+    // the time, and is the exact call rule 5's negative fixture is built from.
+    // It is not a style change: `WorldView` is `pub(crate)` now, so the old
+    // spelling does not compile from here, and the migration was forced by the
+    // compiler rather than remembered.
+    let ask = Ask {
+        subject: subject.as_str().to_owned(),
+        now_ms,
+    };
+    let answers = match engine.execute(ask)?.into_lookup() {
         WorldLookup::Answered(answers) => answers,
         WorldLookup::Unknown(reason) => {
             let silence = match reason {
@@ -503,7 +512,7 @@ pub fn mission_context(
     // Both mappings below FAIL CLOSED on the one state that has no honest
     // symbol, rather than reaching for the nearest one.
     //
-    // Neither arm can be reached today: `WorldView::is_admissible` refuses
+    // Neither arm can be reached today: the boundary's `is_admissible` refuses
     // `Expired` and `Inadmissible` before an answer is ever built, and the
     // filters that guarantee it are pinned by
     // `kirra-world-store/tests/inadmissible_never_read.rs`. They are here

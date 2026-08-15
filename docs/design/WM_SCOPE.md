@@ -2019,12 +2019,15 @@ pressure that produced every stale claim this box already documents.
       `as_known_at` over a multi-projection answer is otherwise approximately a
       lie. `IdentityView` already records the single-snapshot argument for one
       walk; this is that argument across projections.
-- [~] **3d — Typed query engine.** The RATCHET half is ✅ **DONE 2026-08-10**;
-      the BOUNDEDNESS half ✅ **DONE 2026-08-12** (`ci/check_query_boundedness.py`
-      + the affected-entity reverse index; see *"3d: boundedness is structural,
-      not observable"*). The typed request/dispatch surface itself is still open
-      (`ci/check_world_answer_boundary.py`); the typed engine itself is still
-      open — see *"3d's ratchet closed ahead of its engine"* below. The only
+- [x] **3d — Typed query engine.** ✅ **DONE 2026-08-13**, in three slices: the
+      RATCHET half 2026-08-10 (`ci/check_world_answer_boundary.py`), the
+      BOUNDEDNESS half 2026-08-12 (`ci/check_query_boundedness.py` + the
+      affected-entity reverse index; see *"3d: boundedness is structural, not
+      observable"*), and the DISPATCH surface 2026-08-13 —
+      `kirra_world_service::query`: `QueryEngine::execute` over five sealed
+      typed requests, made load-bearing by VISIBILITY (`WorldView` and the two
+      `resolve` methods are `pub(crate)`) with gate rule 5 behind it. See
+      *"3d closed: one way to ask"*. The only
       supported path for **domain questions**. Operational reads are explicitly carved out — `verify_chain`,
       `schema_version`, backup/export, the retention driver, the compaction
       planner and the WM-2 measurement harness all legitimately read below it,
@@ -3536,7 +3539,91 @@ index.
 The boundedness invariant is closed with **zero exceptions**: every interactive
 boundary query is bounded, and the gate is wired into CI with a self-test that
 still rejects the historical defect shape. The typed request/dispatch surface
-over the five families remains open.
+over the five families remains open — closed the following day, below.
+
+### 3d closed: one way to ask — 2026-08-13
+
+The boundedness half made it impossible for a query to hide an unbounded store
+read. It did **not** make a query the only way to ask, and those are different
+properties. A consumer holding a `&WorldStore` could build its own `WorldView`,
+call a family directly, and be perfectly bounded while bypassing semantics
+versions, freshness classification and the no-bare-values rule.
+
+That was not hypothetical. `mission_context` did exactly that, and it was the
+*sanctioned* route at the time — which is why the negative fixture for the new
+rule is that real call rather than an invented spelling.
+
+#### Five typed requests, not one enum
+
+The five families have genuinely different result shapes: different payload
+outcomes, completeness types, pagination state, historical coordinates and
+refusal semantics. A single `WorldQuery` enum returning a single `WorldAnswer`
+would flatten all five axes back together and force every caller to `match` over
+families it did not ask about — undoing the work that kept those axes honest.
+
+So the surface is one entry point with compile-time output types: an associated
+`Output` on a **sealed** `WorldQuery` trait. `Ask` yields a `ComposedLookup`,
+`History` a `HistoryLookup`, checked by the compiler, with no runtime arm a
+caller could get wrong.
+
+Sealing is not API hygiene here. Without it the engine would be a suggestion: a
+consumer could implement `WorldQuery` itself, close over a `&WorldStore` or an
+arbitrary predicate, and route it through `execute` — arriving at exactly the
+ad-hoc queries the box exists to prevent, while looking like sanctioned use. It
+also preserves the `AnswerRef` ruling that a public domain query stays a
+serializable named value rather than a closure.
+
+#### Visibility first, gate second
+
+> A compile error at the point of the mistake is stronger than a gate finding
+> after the fact.
+
+`WorldView`, `LineageRef::resolve` and `AnswerRef::resolve` are `pub(crate)`.
+The migration of `mission_context` was therefore **forced by the compiler**, not
+remembered: the old spelling stopped building, in the consumer, naming the item
+it could no longer see.
+
+Gate rule 5 sits behind that for what visibility cannot reach — a new `pub`
+family method nobody wrapped, or a consumer reaching around the boundary into
+the store — plus three visibility PINS, so the day someone widens `pub(crate)`
+back to `pub` is the day CI says so rather than the day a consumer slips past.
+
+Rule 5's carve-outs are not a hand-written list: a consumer may call store
+methods classified `operational` and no others. Integrity verification,
+migration, folding, retention and measurement legitimately read the store
+outside a query, and they are already classified that way for rules 1–4. A new
+store method cannot arrive as an unnoticed carve-out, because an unclassified
+one already reds rule 1.
+
+#### The engine adds no query logic, and the tests are what prove it
+
+Every request dispatches into the already-proven family implementation. Nothing
+in the engine re-derives a bound, re-implements a fold or re-decides freshness —
+that would be a second query engine hiding inside the query engine, and the
+proofs behind the first would stop covering what callers actually run.
+
+The control is that **112 family assertions now drive through
+`QueryEngine::execute` and pass unchanged**. "Wrapped without changing
+semantics" has to mean something falsifiable, and that is the falsifier.
+
+#### A name collision the gate found
+
+Wiring the dispatch reded rule 2: `WorldView::history` is the BOUNDED family and
+`WorldStore::history` was the UNBOUNDED whole-record read, so the engine's
+dispatch *into the bounded family* read as a call to the unbounded one.
+
+Renamed `history_whole` — the same correction `resolve_at` →
+`resolve_at_whole_graph` already took in this box. A read that returns
+everything should say so in its name; that is how it gets called by mistake.
+
+#### One deviation from the five
+
+`AnswerRef::resolve` is wrapped too, as `ReplayAnswer`. It is not a sixth
+family — it is `ask`'s replay form, pinned to a generation instead of asked at
+now, sharing the same bounded composed primitive. It is wrapped because it is
+unambiguously a domain read, and leaving it out would have meant exempting a
+domain read from a rule that is supposed to have no exceptions on domain reads.
+An exemption is the shape all five earlier defects took.
 
 ### 3g follow-up closed: two families, two mechanisms — 2026-08-12
 
