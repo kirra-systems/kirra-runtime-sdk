@@ -421,3 +421,57 @@ fn a_refused_cursor_yields_no_answer_at_all() {
     );
     cleanup(&path);
 }
+
+// ---------------------------------------------------------------------------
+// A broken store is not a stale cursor
+// ---------------------------------------------------------------------------
+
+/// **An unreadable anchor reports a STORE fault, not a cursor refusal.**
+///
+/// Review caught this as a contradiction rather than a crash: `resolve_cursor`
+/// mapped every `cursor_anchor` failure to `Unreproducible`, while
+/// `AskError::Cursor`'s own documentation said a cursor refusal means the store
+/// is healthy and the cursor is what does not apply. Both statements shipped in
+/// the same PR.
+///
+/// The operational consequence is the reason it matters. `Unreproducible` tells
+/// an operator *"this continuation is stale, restart the query"* — which is
+/// exactly the wrong instruction when the database is the thing that is broken,
+/// and restarting produces the same failure with the same misleading label.
+///
+/// Fail-closed either way: no page is served on either path. This pins WHICH
+/// true thing is said.
+#[test]
+fn an_unreadable_anchor_is_a_store_fault_not_a_stale_cursor() {
+    let (store, path, _g) = store_with_four("anchor-unreadable");
+    let cursor = history_cursor(&store);
+
+    // The same cursor must work first, or this proves nothing about the fault.
+    engine(&store)
+        .execute(History {
+            subject: SUBJECT.to_owned(),
+            limit: 2,
+            after: Some(cursor.clone()),
+        })
+        .expect("control: the cursor is valid before the store is broken");
+
+    // Break the read the anchor depends on.
+    store
+        .raw_execute_for_test("DROP TABLE world_events")
+        .expect("plant the fault");
+
+    let err = engine(&store)
+        .execute(History {
+            subject: SUBJECT.to_owned(),
+            limit: 2,
+            after: Some(cursor),
+        })
+        .expect_err("an unreadable store must not serve a page");
+
+    assert!(
+        matches!(err, AskError::Store(_)),
+        "a store fault must travel the store channel, not be reported as a \
+         stale cursor telling the operator to restart the query; got {err:?}"
+    );
+    cleanup(&path);
+}

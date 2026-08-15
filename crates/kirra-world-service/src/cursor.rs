@@ -62,6 +62,7 @@
 use kirra_world_store::WorldStore;
 
 use crate::answer_ref::QueryKind;
+use crate::read_view::AskError;
 use crate::semantics::{SemanticVersions, VersionDifference};
 
 /// Which query family a cursor continues.
@@ -284,49 +285,62 @@ impl std::error::Error for CursorError {}
 /// structural refusals should not be reachable only when a read happens to
 /// succeed.
 ///
+/// # Why this returns [`AskError`] rather than [`CursorError`]
+///
+/// A failure to READ the anchor is not a stale cursor. The first draft mapped
+/// any store error to [`CursorError::Unreproducible`], which contradicted this
+/// crate's own documentation — [`AskError::Cursor`] states that a cursor refusal
+/// means the store is healthy and the cursor is what does not apply — and it
+/// misled in the operationally worst direction: an unhealthy database would tell
+/// an operator to restart the query.
+///
+/// So a store fault travels [`AskError::Store`], every cursor refusal travels
+/// [`AskError::Cursor`], and [`CursorError`] keeps meaning exactly what its name
+/// says: reasons a cursor cannot be continued **against a store that is working**.
+/// Both are still fail-closed; they simply say different true things.
+///
 /// # Errors
 ///
-/// [`CursorError`] — every variant, and never a fallback page.
+/// [`AskError::Cursor`] for every [`CursorError`] variant, [`AskError::Store`]
+/// when the anchor cannot be read. Never a fallback page.
 pub(crate) fn resolve_cursor(
     store: &WorldStore,
     cursor: &PageCursor,
     expected: CursorFamily,
-) -> Result<i64, CursorError> {
+) -> Result<i64, AskError> {
     if cursor.family != expected {
         return Err(CursorError::WrongFamily {
             presented: cursor.family,
             expected,
-        });
+        }
+        .into());
     }
 
     let live = SemanticVersions::for_query(expected.query_kind());
     let differences = cursor.semantics.differences(&live);
     if !differences.is_empty() {
-        return Err(CursorError::SemanticsChanged { differences });
+        return Err(CursorError::SemanticsChanged { differences }.into());
     }
 
     let generation = cursor.generation;
     if generation < 1 {
-        return Err(CursorError::ImpossibleGeneration { generation });
+        return Err(CursorError::ImpossibleGeneration { generation }.into());
     }
 
-    // The store read is LAST, and its failure is treated as unreproducible
-    // rather than propagated: a cursor whose anchor cannot be read is a cursor
-    // that cannot be shown to name a real position, which is the same refusal
-    // by a different route. Serving the page instead would be the fall-forward
-    // this module exists to forbid.
-    let anchor = store
-        .cursor_anchor(generation)
-        .map_err(|_| CursorError::Unreproducible { generation })?;
+    // The store read is LAST, and its failure PROPAGATES as a store fault. It
+    // is still fail-closed — no page is served either way — but it reports the
+    // fault that actually happened rather than blaming the caller's cursor.
+    let anchor = store.cursor_anchor(generation)?;
 
     if generation > anchor.head {
         return Err(CursorError::BeyondHead {
             generation,
             head: anchor.head,
-        });
+        }
+        .into());
     }
     if !anchor.retained {
-        return Err(CursorError::Unreproducible { generation });
+        return Err(CursorError::Unreproducible { generation }.into());
     }
     Ok(generation)
 }

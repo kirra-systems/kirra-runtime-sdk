@@ -1225,10 +1225,17 @@ impl WorldStore {
     /// **Whether `generation` still names a live event, and where the log ends.**
     ///
     /// The anchor a continuation cursor is validated against — see
-    /// `kirra_world_service::cursor`. Both facts come back together because they
-    /// answer one question (*"can this coordinate still be continued from?"*)
-    /// and reading them separately would let a concurrent append land between
-    /// them, making a cursor look past the head that was not.
+    /// `kirra_world_service::cursor`. Both facts answer one question (*"can this
+    /// coordinate still be continued from?"*), and they come back from ONE
+    /// statement so they describe one state of the log.
+    ///
+    /// The single statement is load-bearing, not tidiness. Two `query_row` calls
+    /// on the same connection outside a transaction can observe different
+    /// snapshots: another connection appending or compacting between them would
+    /// pair `retained` from before with `head` from after, and a cursor could be
+    /// judged past a head that had not yet moved when its row was checked. This
+    /// shipped as two statements under a doc comment claiming otherwise, and
+    /// review caught the claim rather than the code.
     ///
     /// `retained` is false for a generation compaction has removed AND for one
     /// that never existed. The distinction is not available here — a deleted row
@@ -1237,26 +1244,17 @@ impl WorldStore {
     ///
     /// # Errors
     ///
-    /// [`StoreError::Sqlite`] on any read failure.
+    /// [`StoreError::Sqlite`] on any read failure. A read failure is NOT a stale
+    /// cursor, and the caller must not report it as one — see
+    /// `kirra_world_service::cursor::resolve_cursor`.
     pub fn cursor_anchor(&self, generation: i64) -> Result<CursorAnchor, StoreError> {
-        let head: i64 = self
-            .conn
-            .query_row(
-                "SELECT generation FROM world_events ORDER BY generation DESC LIMIT 1",
-                [],
-                |r| r.get(0),
-            )
-            .optional()?
-            .unwrap_or(0);
-        let retained: bool = self
-            .conn
-            .query_row(
-                "SELECT 1 FROM world_events WHERE generation = ?1",
-                params![generation],
-                |_| Ok(true),
-            )
-            .optional()?
-            .unwrap_or(false);
+        let (head, retained) = self.conn.query_row(
+            "SELECT
+                 (SELECT COALESCE(MAX(generation), 0) FROM world_events),
+                 EXISTS(SELECT 1 FROM world_events WHERE generation = ?1)",
+            params![generation],
+            |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)? != 0)),
+        )?;
         Ok(CursorAnchor { retained, head })
     }
 
