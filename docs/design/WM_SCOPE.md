@@ -2066,18 +2066,37 @@ pressure that produced every stale claim this box already documents.
 
 **Cross-cutting, applying to every box above:**
 
-- [ ] Every interactive query bounded (existing rule 2; D-9, ADR-0041 D-12)
-- [ ] Pagination and truncation explicit, and **cursors stable across releases**
-      — an unversioned sort re-executes the answer identically while page 2
-      differs
-- [ ] No dependency path from the query engine to checker or actuation, on the
-      `ci/check_mick_actuation_fence.py` fence pattern — this is what makes
-      ADR-0042 Decision 5's *non-authoritative* mechanical rather than declared
-- [ ] `ChangedSince` takes an **opaque domain cursor**, never the SQLite
-      `generation`. The adapter may encode a generation inside it; a caller that
-      knows this makes the API un-implementable over another backend, against
-      ADR-0040's domain-core/swappable-adapter shape. Same opaque-newtype
-      discipline as `reference.rs`.
+- [x] **Every interactive query bounded** (existing rule 2; D-9, ADR-0041 D-12).
+      ✅ **DONE 2026-08-12**, `ci/check_query_boundedness.py` rules 1–4, and the
+      coverage extends to the typed engine rather than stopping at the
+      pre-engine surface: rule 2 scans the whole boundary crate by glob, so
+      `query.rs` was in scope the moment it existed. Verified by mutation — an
+      unbounded call placed inside the `History` dispatch reds the gate naming
+      `query.rs`.
+- [x] **Pagination and truncation explicit, and cursors stable across releases.**
+      ✅ **DONE 2026-08-15**. Truncation was already explicit (`Continuation`,
+      an enum rather than a bool beside an `Option`). Stability was not: the
+      cursor was a bare `i64` generation. See *"cursors name a contract, not a
+      row"* below.
+- [x] **No dependency path from the query engine to checker or actuation**, on
+      the `ci/check_mick_actuation_fence.py` fence pattern — what makes ADR-0042
+      Decision 5's *non-authoritative* mechanical rather than declared.
+      ✅ Covered since the fence landed, and covered **by construction**: Fence A
+      check 2 walks the dependency closure of every `kirra-world*` package,
+      which includes `kirra-world-service`. Adding the engine needed no fence
+      change, and a new module cannot fall outside it.
+- [x] **Raw store coordinates are not exposed by the typed domain-query API.**
+      ✅ **DONE 2026-08-15**. This item read *"`ChangedSince` takes an opaque
+      domain cursor, never the SQLite `generation`"*, and that named the wrong
+      symbol: `WorldStore::changed_since` takes a transaction-time
+      **millisecond**, not a generation, and there is no `ChangedSince` domain
+      query at the boundary at all. The generation leak was real and it was in
+      the **page cursors** — see below. `changed_since` remains an internal
+      store primitive, classified `unbounded`, which rule 5 bars domain
+      consumers from calling. Any future public *"what changed since"* query is
+      a new bounded family through `QueryEngine` with an opaque cursor from day
+      one; it does not promote the store primitive into the architecture because
+      its name sounds convenient.
 
 **Closing condition.** Tier 3 closes on the contracts plus a representative
 proving set — not on every conceivable query. The minimum set:
@@ -3615,6 +3634,60 @@ dispatch *into the bounded family* read as a call to the unbounded one.
 Renamed `history_whole` — the same correction `resolve_at` →
 `resolve_at_whole_graph` already took in this box. A read that returns
 everything should say so in its name; that is how it gets called by mistake.
+
+### Cursors name a contract, not a row — 2026-08-15
+
+The rule:
+
+> A cursor names a continuation of ONE query contract under ONE semantic-version
+> set, not merely a position in SQLite.
+
+Pagination shipped with the cursor as a bare `i64` generation, handed out by
+`PageBoundary::More { next_after_generation }` and taken back by
+`LineagePage::after_generation`. Every page of every family passed a raw log
+position across the domain boundary.
+
+#### Wrapping the integer would have fixed nothing
+
+The hazard was never that a caller could READ the coordinate. It is that a
+cursor carried no evidence of *what it continued* — so a cursor from another
+family, another rule version, or another store returned a page rather than an
+error. Right shape, right subject, plausible contents, wrong question. The same
+defect class boxes 3d spent two PRs on, one level up.
+
+So `PageCursor` binds three things and validates all three before a page is
+served, each with its own refusal: the query **family**, the **semantic
+versions** in force when it was minted, and a generation this store still
+**retains** — plus `BeyondHead` and `ImpossibleGeneration` for a coordinate that
+cannot have come from this log. The generation is private to the cursor module,
+so the only code that can read it is the code that validates it.
+
+#### The control that took a mutation to get right
+
+The obvious test — mint from each family, swap them — **passes for the wrong
+reason**. `SubjectHistory` and `SubjectLineage` declare different rule sets
+today, so a naive swap is caught by the version check and the family binding is
+never exercised. Deleting the family check entirely still refused the swap, with
+`SemanticsChanged` instead of `WrongFamily`.
+
+The real control re-stamps the cursor with the target family's live semantics
+first: coordinate identical, versions identical and current, family the only
+difference. Each of the three bindings is then independently load-bearing —
+dropping any one reds exactly one test and no others.
+
+> That the two families' version sets differ today is not a defence. It is a
+> coincidence of which rules each depends on, and a future family sharing a rule
+> set would collapse it.
+
+#### Every failure is a refusal
+
+Never a reset to page 1, never a jump to the next surviving generation. Both are
+available, both look like recovery, and both silently answer a different
+question — re-serving rows already seen, or skipping the ones that vanished. A
+caller told *"this cursor no longer names a continuation"* can restart
+deliberately; a caller silently handed page 1 cannot tell it happened. One test
+asserts the absence of a served page specifically, because asserting only on the
+error would let an `Ok(page_one)` fallback through.
 
 #### One deviation from the five
 

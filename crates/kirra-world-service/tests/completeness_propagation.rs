@@ -96,7 +96,7 @@
 use kirra_world_service::freshness::FreshnessSource;
 use kirra_world_service::query::{Ask, History, QueryEngine, SubjectSummary};
 use kirra_world_service::read_view::{AskError, WorldLookup};
-use kirra_world_store::lineage::LineagePage;
+use kirra_world_store::lineage::MAX_LINEAGE_PAGE;
 use kirra_world_store::{ClaimStatus, EventId, NewEvent, ObservationId, WorldStore, WriterClass};
 
 const T0: i64 = 1_700_000_000_000;
@@ -223,7 +223,8 @@ fn a_compacted_history_reports_degraded() {
     let lookup = view(&store)
         .execute(History {
             subject: "package_17".to_owned(),
-            page: LineagePage::first(),
+            limit: MAX_LINEAGE_PAGE,
+            after: None,
         })
         .expect("history");
 
@@ -247,13 +248,15 @@ fn both_history_arms_return_a_plausible_non_empty_record() {
     let degraded = view(&holed)
         .execute(History {
             subject: "package_17".to_owned(),
-            page: LineagePage::first(),
+            limit: MAX_LINEAGE_PAGE,
+            after: None,
         })
         .expect("history");
     let full = view(&intact)
         .execute(History {
             subject: "package_17".to_owned(),
-            page: LineagePage::first(),
+            limit: MAX_LINEAGE_PAGE,
+            after: None,
         })
         .expect("history");
 
@@ -284,7 +287,8 @@ fn an_uncompacted_history_reports_full() {
     let lookup = view(&store)
         .execute(History {
             subject: "package_17".to_owned(),
-            page: LineagePage::first(),
+            limit: MAX_LINEAGE_PAGE,
+            after: None,
         })
         .expect("history");
 
@@ -363,7 +367,8 @@ fn history_keeps_a_claim_that_ask_refuses_to_serve() {
     let record = v
         .execute(History {
             subject: "package_17".to_owned(),
-            page: LineagePage::first(),
+            limit: MAX_LINEAGE_PAGE,
+            after: None,
         })
         .expect("history");
     assert_eq!(
@@ -414,7 +419,8 @@ fn an_unruled_claim_refuses_the_whole_history() {
     let err = view(&store)
         .execute(History {
             subject: "package_17".to_owned(),
-            page: LineagePage::first(),
+            limit: MAX_LINEAGE_PAGE,
+            after: None,
         })
         .expect_err("an unclassified claim must refuse the whole query");
     assert!(
@@ -543,11 +549,11 @@ fn an_unknown_subject_is_absent_rather_than_degraded() {
 #[test]
 fn a_history_page_returns_at_most_its_limit() {
     let (store, _p) = intact_store("hist-page-limit");
-    let page = LineagePage::new(2, None).expect("valid page");
     let lookup = view(&store)
         .execute(History {
             subject: "package_17".to_owned(),
-            page,
+            limit: 2,
+            after: None,
         })
         .expect("history");
 
@@ -557,7 +563,7 @@ fn a_history_page_returns_at_most_its_limit() {
         "three claims exist; a limit of 2 must return 2"
     );
     assert!(
-        lookup.boundary().is_truncated(),
+        lookup.continuation().is_truncated(),
         "a third claim follows, so the page must say so"
     );
 }
@@ -572,13 +578,13 @@ fn paginating_a_history_walks_the_record_without_gaps_or_repeats() {
     let v = view(&store);
 
     let mut seen: Vec<String> = Vec::new();
-    let mut cursor = None;
+    let mut cursor: Option<kirra_world_service::cursor::PageCursor> = None;
     for _ in 0..10 {
-        let page = LineagePage::new(1, cursor).expect("valid page");
         let lookup = v
             .execute(History {
                 subject: "package_17".to_owned(),
-                page,
+                limit: 1,
+                after: cursor.clone(),
             })
             .expect("history");
         if let WorldLookup::Answered(answers) = lookup.lookup() {
@@ -586,11 +592,9 @@ fn paginating_a_history_walks_the_record_without_gaps_or_repeats() {
                 seen.push(a.event_id().to_string());
             }
         }
-        match lookup.boundary() {
-            kirra_world_store::lineage::PageBoundary::More {
-                next_after_generation,
-            } => cursor = Some(*next_after_generation),
-            kirra_world_store::lineage::PageBoundary::Complete => break,
+        match lookup.continuation().cursor() {
+            Some(next) => cursor = Some(next.clone()),
+            None => break,
         }
     }
 
@@ -617,17 +621,17 @@ fn paginating_a_history_walks_the_record_without_gaps_or_repeats() {
 #[test]
 fn a_history_page_that_exactly_fills_is_complete() {
     let (store, _p) = intact_store("hist-page-exact");
-    let page = LineagePage::new(3, None).expect("valid page");
     let lookup = view(&store)
         .execute(History {
             subject: "package_17".to_owned(),
-            page,
+            limit: 3,
+            after: None,
         })
         .expect("history");
 
     assert_eq!(answered(lookup.lookup()), 3, "the whole record");
     assert!(
-        !lookup.boundary().is_truncated(),
+        !lookup.continuation().is_truncated(),
         "the page holds the entire record, so nothing follows it"
     );
 }
@@ -641,16 +645,16 @@ fn a_history_page_that_exactly_fills_is_complete() {
 #[test]
 fn a_truncated_page_over_a_degraded_record_reports_both() {
     let (store, _p) = holed_store("hist-page-degraded");
-    let page = LineagePage::new(1, None).expect("valid page");
     let lookup = view(&store)
         .execute(History {
             subject: "package_17".to_owned(),
-            page,
+            limit: 1,
+            after: None,
         })
         .expect("history");
 
     assert!(
-        lookup.boundary().is_truncated(),
+        lookup.continuation().is_truncated(),
         "two claims survive and the limit is 1, so more follows"
     );
     assert!(

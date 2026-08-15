@@ -51,7 +51,7 @@ use kirra_world_service::freshness::FreshnessSource;
 use kirra_world_service::lineage::{LineageRef, LineageResolution};
 use kirra_world_service::query::{Lineage, QueryEngine};
 use kirra_world_service::semantics::{RuleVersion, SemanticVersions};
-use kirra_world_store::lineage::LineagePage;
+use kirra_world_store::lineage::{LineagePage, MAX_LINEAGE_PAGE};
 use kirra_world_store::{ClaimStatus, EventId, NewEvent, ObservationId, WorldStore, WriterClass};
 
 const T0: i64 = 1_700_000_000_000;
@@ -162,7 +162,7 @@ fn generations(res: &LineageResolution) -> Vec<i64> {
 #[test]
 fn an_event_appended_after_the_pin_is_not_in_the_lineage() {
     let (mut store, path, generation) = store_with(3, "historical");
-    let reference = LineageRef::subject_lineage(SUBJECT, generation, LineagePage::first());
+    let reference = LineageRef::subject_lineage(SUBJECT, generation, MAX_LINEAGE_PAGE);
 
     let before = generations(&resolve(&store, &reference));
     assert_eq!(before.len(), 3, "the fixture must have three events");
@@ -185,7 +185,7 @@ fn an_event_appended_after_the_pin_is_not_in_the_lineage() {
 
     // The positive control: the SAME query at the NEW coordinate does see it.
     // Without this, a resolver that returned nothing at all would pass above.
-    let now = LineageRef::subject_lineage(SUBJECT, later_generation, LineagePage::first());
+    let now = LineageRef::subject_lineage(SUBJECT, later_generation, MAX_LINEAGE_PAGE);
     assert_eq!(
         generations(&resolve(&store, &now)).len(),
         4,
@@ -202,7 +202,7 @@ fn an_event_appended_after_the_pin_is_not_in_the_lineage() {
 #[test]
 fn a_coordinate_beyond_the_log_refuses() {
     let (store, path, generation) = store_with(2, "unreached");
-    let reference = LineageRef::subject_lineage(SUBJECT, generation + 1_000, LineagePage::first());
+    let reference = LineageRef::subject_lineage(SUBJECT, generation + 1_000, MAX_LINEAGE_PAGE);
     assert!(
         matches!(
             resolve(&store, &reference),
@@ -223,11 +223,7 @@ fn a_coordinate_beyond_the_log_refuses() {
 #[test]
 fn a_truncated_page_is_visibly_truncated() {
     let (store, path, generation) = store_with(5, "truncated");
-    let reference = LineageRef::subject_lineage(
-        SUBJECT,
-        generation,
-        LineagePage::new(2, None).expect("valid page"),
-    );
+    let reference = LineageRef::subject_lineage(SUBJECT, generation, 2);
     let res = resolve(&store, &reference);
     let page = res.resolved().expect("resolved");
     assert_eq!(page.entries().len(), 2);
@@ -236,7 +232,7 @@ fn a_truncated_page_is_visibly_truncated() {
         "a page that stopped short must say so — a lineage response that \
          silently stops is worse than one that says it stopped"
     );
-    assert!(page.boundary().next_after_generation().is_some());
+    assert!(page.continuation().is_truncated());
     drop(store);
     cleanup(&path);
 }
@@ -249,11 +245,7 @@ fn a_truncated_page_is_visibly_truncated() {
 #[test]
 fn paginating_through_references_visits_every_event_exactly_once() {
     let (store, path, generation) = store_with(7, "paginate");
-    let mut reference = LineageRef::subject_lineage(
-        SUBJECT,
-        generation,
-        LineagePage::new(3, None).expect("valid page"),
-    );
+    let mut reference = LineageRef::subject_lineage(SUBJECT, generation, 3);
 
     let mut seen: Vec<i64> = Vec::new();
     let mut pages = 0;
@@ -286,7 +278,7 @@ fn paginating_through_references_visits_every_event_exactly_once() {
 ///
 /// # The bound is EXACTLY the event count, deliberately
 ///
-/// A first draft asked for `LineagePage::first()` (limit 256) over two events,
+/// A first draft asked for `MAX_LINEAGE_PAGE` (limit 256) over two events,
 /// which is a page that could not have been full — so it passed against a rule
 /// that reported `More` on every merely-full page. Measured: the eager-`More`
 /// mutation survived this test and was caught only at the store level.
@@ -297,11 +289,7 @@ fn paginating_through_references_visits_every_event_exactly_once() {
 #[test]
 fn the_final_page_yields_no_next_reference() {
     let (store, path, generation) = store_with(2, "final");
-    let reference = LineageRef::subject_lineage(
-        SUBJECT,
-        generation,
-        LineagePage::new(2, None).expect("valid page"),
-    );
+    let reference = LineageRef::subject_lineage(SUBJECT, generation, 2);
     let res = resolve(&store, &reference);
     let page = res.resolved().expect("resolved");
     assert_eq!(page.entries().len(), 2, "the page must be exactly full");
@@ -324,7 +312,7 @@ fn the_final_page_yields_no_next_reference() {
 #[test]
 fn an_oversized_page_bound_is_refused_rather_than_clamped() {
     assert!(
-        LineagePage::new(kirra_world_store::lineage::MAX_LINEAGE_PAGE + 1, None).is_err(),
+        LineagePage::new(MAX_LINEAGE_PAGE + 1, None).is_err(),
         "a clamp would answer a smaller question and report it as the one asked"
     );
 }
@@ -345,7 +333,7 @@ fn an_unconfirmed_candidate_is_lineage_though_it_is_never_an_answer() {
     append(&mut store, "c2", SUBJECT, ClaimStatus::Candidate, 2);
     let generation = store.fold().expect("fold");
 
-    let reference = LineageRef::subject_lineage(SUBJECT, generation, LineagePage::first());
+    let reference = LineageRef::subject_lineage(SUBJECT, generation, MAX_LINEAGE_PAGE);
     let res = resolve(&store, &reference);
     let page = res.resolved().expect("resolved");
     assert_eq!(page.entries().len(), 2);
@@ -370,7 +358,7 @@ fn another_subjects_evidence_is_not_in_this_lineage() {
     append(&mut store, "theirs", "pallet_9", ClaimStatus::Confirmed, 2);
     let generation = store.fold().expect("fold");
 
-    let reference = LineageRef::subject_lineage(SUBJECT, generation, LineagePage::first());
+    let reference = LineageRef::subject_lineage(SUBJECT, generation, MAX_LINEAGE_PAGE);
     let res = resolve(&store, &reference);
     let page = res.resolved().expect("resolved");
     assert_eq!(page.entries().len(), 1);
@@ -384,7 +372,7 @@ fn another_subjects_evidence_is_not_in_this_lineage() {
 #[test]
 fn every_entry_is_citable() {
     let (store, path, generation) = store_with(3, "citable");
-    let reference = LineageRef::subject_lineage(SUBJECT, generation, LineagePage::first());
+    let reference = LineageRef::subject_lineage(SUBJECT, generation, MAX_LINEAGE_PAGE);
     let res = resolve(&store, &reference);
     for entry in res.resolved().expect("resolved").entries() {
         assert_eq!(
@@ -412,7 +400,7 @@ fn every_entry_is_citable() {
 #[test]
 fn a_reference_recorded_under_another_selection_version_refuses() {
     let (store, path, generation) = store_with(3, "version");
-    let reference = LineageRef::subject_lineage(SUBJECT, generation, LineagePage::first())
+    let reference = LineageRef::subject_lineage(SUBJECT, generation, MAX_LINEAGE_PAGE)
         .recorded_under(SemanticVersions::new([RuleVersion {
             rule: "lineage_selection".to_string(),
             version: 99,
@@ -440,7 +428,7 @@ fn a_reference_recorded_under_another_selection_version_refuses() {
 #[test]
 fn the_version_check_precedes_the_coordinate_check() {
     let (store, path, generation) = store_with(1, "order");
-    let reference = LineageRef::subject_lineage(SUBJECT, generation + 1_000, LineagePage::first())
+    let reference = LineageRef::subject_lineage(SUBJECT, generation + 1_000, MAX_LINEAGE_PAGE)
         .recorded_under(SemanticVersions::new([RuleVersion {
             rule: "lineage_selection".to_string(),
             version: 99,
@@ -462,7 +450,7 @@ fn the_version_check_precedes_the_coordinate_check() {
 /// A reference declares the family it belongs to, and stamps live versions.
 #[test]
 fn a_fresh_reference_carries_this_builds_semantics() {
-    let reference = LineageRef::subject_lineage(SUBJECT, 1, LineagePage::first());
+    let reference = LineageRef::subject_lineage(SUBJECT, 1, MAX_LINEAGE_PAGE);
     assert_eq!(reference.kind(), QueryKind::SubjectLineage);
     assert_eq!(
         reference.semantics(),
@@ -478,16 +466,25 @@ fn a_fresh_reference_carries_this_builds_semantics() {
 /// one lineage must not compare equal.
 #[test]
 fn the_page_bound_is_part_of_a_references_identity() {
-    let a = LineageRef::subject_lineage(SUBJECT, 7, LineagePage::new(10, None).expect("valid"));
-    let b = LineageRef::subject_lineage(SUBJECT, 7, LineagePage::new(10, None).expect("valid"));
-    let second_page =
-        LineageRef::subject_lineage(SUBJECT, 7, LineagePage::new(10, Some(3)).expect("valid"));
-    let smaller =
-        LineageRef::subject_lineage(SUBJECT, 7, LineagePage::new(5, None).expect("valid"));
+    let (store, path, generation) = store_with(4, "ref-identity");
+
+    let a = LineageRef::subject_lineage(SUBJECT, generation, 2);
+    let b = LineageRef::subject_lineage(SUBJECT, generation, 2);
+    let smaller = LineageRef::subject_lineage(SUBJECT, generation, 1);
+
+    // The continuing reference is built from a REAL resolution rather than
+    // assembled from a coordinate, because a cursor can no longer be assembled:
+    // minting is crate-internal, which is the property under test as much as the
+    // inequality below.
+    let resolved = resolve(&store, &a);
+    let second_page = a
+        .next_page(resolved.resolved().expect("a resolved page"))
+        .expect("four events over a limit of two must continue");
 
     assert_eq!(a, b, "the same query must produce the same reference");
     assert_ne!(a, second_page, "a different page is a different reference");
     assert_ne!(a, smaller, "a different bound is a different reference");
+    cleanup(&path);
 }
 
 // ---------------------------------------------------------------------------
@@ -503,11 +500,7 @@ fn the_page_bound_is_part_of_a_references_identity() {
 #[test]
 fn a_truncated_page_of_intact_evidence_is_not_degraded() {
     let (store, path, generation) = store_with(5, "notdegraded");
-    let reference = LineageRef::subject_lineage(
-        SUBJECT,
-        generation,
-        LineagePage::new(2, None).expect("valid page"),
-    );
+    let reference = LineageRef::subject_lineage(SUBJECT, generation, 2);
     let res = resolve(&store, &reference);
     let page = res.resolved().expect("resolved");
     assert!(page.is_truncated(), "the fixture must truncate");
@@ -542,7 +535,7 @@ fn a_compacted_span_degrades_the_page_instead_of_refusing_it() {
     assert_eq!(outcome.removed, 1, "the fixture must remove evidence");
     let generation = store.fold().expect("fold");
 
-    let reference = LineageRef::subject_lineage(SUBJECT, generation, LineagePage::first());
+    let reference = LineageRef::subject_lineage(SUBJECT, generation, MAX_LINEAGE_PAGE);
     let res = resolve(&store, &reference);
     let page = res
         .resolved()
@@ -573,7 +566,7 @@ fn a_compacted_span_degrades_the_page_instead_of_refusing_it() {
 #[test]
 fn a_resolved_page_carries_its_semantics() {
     let (store, path, generation) = store_with(1, "semantics");
-    let reference = LineageRef::subject_lineage(SUBJECT, generation, LineagePage::first());
+    let reference = LineageRef::subject_lineage(SUBJECT, generation, MAX_LINEAGE_PAGE);
     let res = resolve(&store, &reference);
     assert_eq!(
         res.resolved().expect("resolved").semantics(),

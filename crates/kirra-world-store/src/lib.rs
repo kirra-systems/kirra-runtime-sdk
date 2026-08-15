@@ -1222,6 +1222,44 @@ impl WorldStore {
         Ok(out)
     }
 
+    /// **Whether `generation` still names a live event, and where the log ends.**
+    ///
+    /// The anchor a continuation cursor is validated against — see
+    /// `kirra_world_service::cursor`. Both facts come back together because they
+    /// answer one question (*"can this coordinate still be continued from?"*)
+    /// and reading them separately would let a concurrent append land between
+    /// them, making a cursor look past the head that was not.
+    ///
+    /// `retained` is false for a generation compaction has removed AND for one
+    /// that never existed. The distinction is not available here — a deleted row
+    /// and an absent row are the same absence — and it is not needed: both mean
+    /// the cursor cannot be shown to name a real position, and both refuse.
+    ///
+    /// # Errors
+    ///
+    /// [`StoreError::Sqlite`] on any read failure.
+    pub fn cursor_anchor(&self, generation: i64) -> Result<CursorAnchor, StoreError> {
+        let head: i64 = self
+            .conn
+            .query_row(
+                "SELECT generation FROM world_events ORDER BY generation DESC LIMIT 1",
+                [],
+                |r| r.get(0),
+            )
+            .optional()?
+            .unwrap_or(0);
+        let retained: bool = self
+            .conn
+            .query_row(
+                "SELECT 1 FROM world_events WHERE generation = ?1",
+                params![generation],
+                |_| Ok(true),
+            )
+            .optional()?
+            .unwrap_or(false);
+        Ok(CursorAnchor { retained, head })
+    }
+
     /// The chain digest of the newest event, or [`GENESIS`].
     pub fn head_chain(&self) -> Result<String, StoreError> {
         let head: Option<String> = self
@@ -4479,6 +4517,16 @@ fn rand_component() -> u128 {
     // The top 48 bits are the ULID's timestamp; mask them off so only the
     // 80-bit random field is populated.
     u128::from_be_bytes(buf) & ((1u128 << 80) - 1)
+}
+
+/// **What a continuation cursor's coordinate anchors to** — see
+/// [`WorldStore::cursor_anchor`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CursorAnchor {
+    /// Whether the log still holds an event at that generation.
+    pub retained: bool,
+    /// The highest generation the log holds, or `0` for an empty log.
+    pub head: i64,
 }
 
 /// **One page of a subject's claim history, and how complete the record is.**

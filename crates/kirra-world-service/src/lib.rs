@@ -31,6 +31,7 @@
 #![warn(missing_docs)]
 
 pub mod answer_ref;
+pub mod cursor;
 pub mod freshness;
 pub mod lineage;
 pub mod query;
