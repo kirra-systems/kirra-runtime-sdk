@@ -36,10 +36,19 @@
 //! plus [`CursorError::BeyondHead`] and [`CursorError::ImpossibleGeneration`]
 //! for a coordinate that cannot have come from this log at all.
 //!
-//! The family binding is the one that proves "opaque" means capability: a
-//! `History` cursor and a `Lineage` cursor can hold byte-identical generation
-//! and version data, and presenting one where the other belongs is still
-//! refused. A test does exactly that substitution.
+//! The family binding is the one that proves "opaque" means capability, and its
+//! test had to be built carefully to show it. `SubjectHistory` and
+//! `SubjectLineage` declare DIFFERENT rule sets today, so simply swapping two
+//! minted cursors is refused by the VERSION check and never exercises the family
+//! at all — deleting the family check entirely still refuses the swap. The real
+//! control re-stamps the cursor with the target family's live semantics first,
+//! so the coordinate and the versions match and the family is the only
+//! difference. All three bindings are then independently necessary: dropping any
+//! one reds exactly one test.
+//!
+//! That the two families' version sets differ today is not a defence. It is a
+//! coincidence of which rules each depends on, and a future family sharing a
+//! rule set would collapse it.
 //!
 //! # Every failure is a REFUSAL
 //!

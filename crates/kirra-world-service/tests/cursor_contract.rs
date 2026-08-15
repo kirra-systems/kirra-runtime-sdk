@@ -18,13 +18,18 @@
 //! rather than an error — right shape, right subject, plausible contents, wrong
 //! question.
 //!
-//! # The decisive control
+//! # The decisive control, and how it was nearly vacuous
 //!
-//! `a_history_cursor_is_refused_by_lineage` takes a cursor minted by one family
-//! and presents it to the other. Both carry the same kind of coordinate, and on
-//! this fixture the same VALUE. If "opaque" meant only "an integer in a struct",
-//! it would be accepted. It is refused, which is what makes the opacity a
-//! capability rather than a spelling.
+//! `a_history_cursor_is_refused_by_lineage` presents a cursor minted by one
+//! family to the other. The first version of it passed for the WRONG REASON: the
+//! two families declare different rule sets today, so the swap was refused by
+//! the version check and the family binding was never reached. Deleting the
+//! family check entirely still refused it.
+//!
+//! The test now re-stamps the cursor with the target family's live semantics
+//! first, leaving the family as the only difference. Each binding is verified
+//! independently necessary by mutation — dropping family, semantics or the
+//! retention anchor reds exactly one test each, and no two mask one another.
 //!
 //! # Every failure is a refusal
 //!
