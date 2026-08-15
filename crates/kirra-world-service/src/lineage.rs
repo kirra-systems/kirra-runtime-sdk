@@ -40,7 +40,10 @@
 
 use kirra_world::evidence::{DigestError, EvidenceDigest};
 use kirra_world_store::compaction::Resolution;
-use kirra_world_store::lineage::{LineageEvent, LineagePage, PageBoundary};
+use kirra_world_store::lineage::{LineageEvent, LineagePage};
+
+use crate::cursor::{resolve_cursor, Continuation, CursorFamily, PageCursor};
+use crate::read_view::to_continuation;
 use kirra_world_store::snapshot::{Irreproducible, PinnedLineage};
 use kirra_world_store::{ClaimStatus, WorldStore, WriterClass};
 
@@ -89,7 +92,14 @@ pub fn lineage_semantics() -> SemanticVersions {
 pub struct LineageRef {
     subject: String,
     generation: i64,
-    page: LineagePage,
+    limit: usize,
+    /// Where to continue from — an OPAQUE cursor, never a log position.
+    ///
+    /// The reference used to carry a `LineagePage`, whose `after_generation` was
+    /// the raw SQLite coordinate. That made a recorded reference a value a
+    /// holder could do arithmetic on, and made a reference from a different
+    /// family or a superseded rule set indistinguishable from a valid one.
+    after: Option<PageCursor>,
     semantics: SemanticVersions,
 }
 
@@ -103,11 +113,12 @@ impl LineageRef {
     ///
     /// [`AnswerRef`]: crate::answer_ref::AnswerRef
     #[must_use]
-    pub fn subject_lineage(subject: impl Into<String>, generation: i64, page: LineagePage) -> Self {
+    pub fn subject_lineage(subject: impl Into<String>, generation: i64, limit: usize) -> Self {
         Self {
             subject: subject.into(),
             generation,
-            page,
+            limit,
+            after: None,
             semantics: SemanticVersions::for_query(QueryKind::SubjectLineage),
         }
     }
@@ -130,10 +141,16 @@ impl LineageRef {
         self.generation
     }
 
-    /// The page bound this reference names.
+    /// How many entries this reference's page may hold.
     #[must_use]
-    pub fn page(&self) -> LineagePage {
-        self.page
+    pub fn limit(&self) -> usize {
+        self.limit
+    }
+
+    /// Where this reference continues from, if it is not the first page.
+    #[must_use]
+    pub fn after(&self) -> Option<&PageCursor> {
+        self.after.as_ref()
     }
 
     /// The semantics this reference's answer was produced under.
@@ -154,6 +171,23 @@ impl LineageRef {
         self
     }
 
+    /// **Rebuild a continuing reference from a cursor held across a restart.**
+    ///
+    /// [`Self::next_page`] covers the in-flight case, where the previous
+    /// resolution is still to hand. This covers the other one: a caller that
+    /// persisted a cursor, came back later, and wants the page after it.
+    ///
+    /// Accepting a cursor is not a hole in the opacity. The cursor still cannot
+    /// be constructed or edited by a caller, and it is still validated on
+    /// presentation — family, semantics and reproducibility — so a reference
+    /// built here from the wrong cursor refuses at resolution rather than
+    /// serving someone else's page.
+    #[must_use]
+    pub fn continuing_from(mut self, cursor: PageCursor) -> Self {
+        self.after = Some(cursor);
+        self
+    }
+
     /// **The reference for the page that follows this one**, if any follows.
     ///
     /// Minted from a *resolution* rather than from a page number, and that is
@@ -168,13 +202,14 @@ impl LineageRef {
     /// paginate past the end.
     #[must_use]
     pub fn next_page(&self, resolved: &LineagePageAnswer) -> Option<Self> {
-        let next = resolved.boundary().next_after_generation()?;
-        Some(Self::subject_lineage(
-            self.subject.clone(),
-            self.generation,
-            LineagePage::new(self.page.limit(), Some(next))
-                .expect("a validated limit stays valid when only the cursor moves"),
-        ))
+        let cursor = resolved.continuation().cursor()?.clone();
+        Some(Self {
+            subject: self.subject.clone(),
+            generation: self.generation,
+            limit: self.limit,
+            after: Some(cursor),
+            semantics: SemanticVersions::for_query(QueryKind::SubjectLineage),
+        })
     }
 
     /// **Re-execute this exact lineage query against the same coordinate.**
@@ -203,8 +238,17 @@ impl LineageRef {
             return Ok(LineageResolution::VersionMismatch { differences });
         }
 
+        // The cursor is validated BEFORE the store page is built, and after the
+        // version check above — a reference that cannot be continued says so
+        // without a read, and says WHY in the caller's own terms.
+        let after = match &self.after {
+            None => None,
+            Some(cursor) => Some(resolve_cursor(store, cursor, CursorFamily::Lineage)?),
+        };
+        let page = LineagePage::new(self.limit, after)?;
+
         let (selection, completeness) =
-            match store.lineage_at_generation(&self.subject, self.generation, self.page)? {
+            match store.lineage_at_generation(&self.subject, self.generation, page)? {
                 PinnedLineage::Reproduced {
                     selection,
                     completeness,
@@ -220,7 +264,7 @@ impl LineageRef {
         }
         Ok(LineageResolution::Resolved(LineagePageAnswer {
             entries,
-            boundary: selection.boundary,
+            continuation: to_continuation(&selection.boundary, CursorFamily::Lineage),
             completeness,
             semantics: SemanticVersions::for_query(QueryKind::SubjectLineage),
         }))
@@ -366,7 +410,7 @@ impl LineageEntry {
 #[derive(Debug, Clone)]
 pub struct LineagePageAnswer {
     entries: Vec<LineageEntry>,
-    boundary: PageBoundary,
+    continuation: Continuation,
     completeness: Resolution,
     semantics: SemanticVersions,
 }
@@ -384,14 +428,14 @@ impl LineagePageAnswer {
     /// learn where the next page starts — so a caller that paginates cannot do
     /// it without seeing that the last page said `Complete`.
     #[must_use]
-    pub fn boundary(&self) -> &PageBoundary {
-        &self.boundary
+    pub fn continuation(&self) -> &Continuation {
+        &self.continuation
     }
 
     /// Whether this page stopped short of the whole lineage.
     #[must_use]
     pub fn is_truncated(&self) -> bool {
-        self.boundary.is_truncated()
+        self.continuation.is_truncated()
     }
 
     /// **Whether compaction removed evidence at or below this coordinate.**

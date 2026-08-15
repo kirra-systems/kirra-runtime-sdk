@@ -1222,6 +1222,42 @@ impl WorldStore {
         Ok(out)
     }
 
+    /// **Whether `generation` still names a live event, and where the log ends.**
+    ///
+    /// The anchor a continuation cursor is validated against — see
+    /// `kirra_world_service::cursor`. Both facts answer one question (*"can this
+    /// coordinate still be continued from?"*), and they come back from ONE
+    /// statement so they describe one state of the log.
+    ///
+    /// The single statement is load-bearing, not tidiness. Two `query_row` calls
+    /// on the same connection outside a transaction can observe different
+    /// snapshots: another connection appending or compacting between them would
+    /// pair `retained` from before with `head` from after, and a cursor could be
+    /// judged past a head that had not yet moved when its row was checked. This
+    /// shipped as two statements under a doc comment claiming otherwise, and
+    /// review caught the claim rather than the code.
+    ///
+    /// `retained` is false for a generation compaction has removed AND for one
+    /// that never existed. The distinction is not available here — a deleted row
+    /// and an absent row are the same absence — and it is not needed: both mean
+    /// the cursor cannot be shown to name a real position, and both refuse.
+    ///
+    /// # Errors
+    ///
+    /// [`StoreError::Sqlite`] on any read failure. A read failure is NOT a stale
+    /// cursor, and the caller must not report it as one — see
+    /// `kirra_world_service::cursor::resolve_cursor`.
+    pub fn cursor_anchor(&self, generation: i64) -> Result<CursorAnchor, StoreError> {
+        let (head, retained) = self.conn.query_row(
+            "SELECT
+                 (SELECT COALESCE(MAX(generation), 0) FROM world_events),
+                 EXISTS(SELECT 1 FROM world_events WHERE generation = ?1)",
+            params![generation],
+            |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)? != 0)),
+        )?;
+        Ok(CursorAnchor { retained, head })
+    }
+
     /// The chain digest of the newest event, or [`GENESIS`].
     pub fn head_chain(&self) -> Result<String, StoreError> {
         let head: Option<String> = self
@@ -4479,6 +4515,16 @@ fn rand_component() -> u128 {
     // The top 48 bits are the ULID's timestamp; mask them off so only the
     // 80-bit random field is populated.
     u128::from_be_bytes(buf) & ((1u128 << 80) - 1)
+}
+
+/// **What a continuation cursor's coordinate anchors to** — see
+/// [`WorldStore::cursor_anchor`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CursorAnchor {
+    /// Whether the log still holds an event at that generation.
+    pub retained: bool,
+    /// The highest generation the log holds, or `0` for an empty log.
+    pub head: i64,
 }
 
 /// **One page of a subject's claim history, and how complete the record is.**

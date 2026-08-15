@@ -72,6 +72,7 @@ use kirra_world_store::lineage::LineagePage;
 use kirra_world_store::WorldStore;
 
 use crate::answer_ref::{AnswerRef, RefResolution};
+use crate::cursor::{resolve_cursor, CursorFamily, PageCursor};
 use crate::freshness::FreshnessSource;
 use crate::lineage::{LineageRef, LineageResolution};
 use crate::read_view::{
@@ -222,16 +223,22 @@ impl WorldQuery for AskAsOf {
 
 /// **One page of a subject's recorded history.**
 ///
-/// The page is a FIELD of the request rather than an argument threaded past it,
-/// which is the structural half of clause 2: a history question that carries no
-/// bound is not constructible. `LineagePage` validates its own limit, so an
-/// unbounded page is unrepresentable rather than merely discouraged.
+/// The bound is a FIELD of the request rather than an argument threaded past
+/// it, which is the structural half of clause 2: a history question that
+/// carries no bound is not constructible.
+///
+/// `after` is an OPAQUE [`PageCursor`], never a log position. A caller cannot
+/// compute one, cannot hand a [`Lineage`] cursor to it, and cannot continue
+/// across a semantics change or a compaction that removed the coordinate — each
+/// of those is a refusal rather than a plausible page. See [`crate::cursor`].
 #[derive(Debug, Clone)]
 pub struct History {
     /// The subject whose history to read.
     pub subject: String,
-    /// The page bound and cursor.
-    pub page: LineagePage,
+    /// How many claims this page may hold.
+    pub limit: usize,
+    /// Where to continue from, or `None` for the first page.
+    pub after: Option<PageCursor>,
 }
 
 impl sealed::Sealed for History {}
@@ -240,7 +247,20 @@ impl WorldQuery for History {
     type Output = HistoryLookup;
 
     fn execute(self, engine: &QueryEngine<'_>) -> Result<Self::Output, AskError> {
-        engine.view().history(&self.subject, self.page)
+        // Cursor FIRST, page second. A refused continuation must not depend on
+        // the limit also being valid — the caller's mistake is the cursor, and
+        // reporting a limit error for a stale cursor sends them to the wrong
+        // fix.
+        let after = match &self.after {
+            None => None,
+            Some(cursor) => Some(resolve_cursor(
+                engine.store(),
+                cursor,
+                CursorFamily::History,
+            )?),
+        };
+        let page = LineagePage::new(self.limit, after)?;
+        engine.view().history(&self.subject, page)
     }
 }
 

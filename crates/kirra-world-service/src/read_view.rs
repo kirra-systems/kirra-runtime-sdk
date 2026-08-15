@@ -102,6 +102,7 @@ use kirra_world_store::subject_projection::SubjectSummaryAnswer;
 use kirra_world_store::{ProjectedClaim, StoreError, TrustAxes, TrustGrade, Validity, WorldStore};
 
 use crate::answer_ref::QueryKind;
+use crate::cursor::{Continuation, CursorError, CursorFamily, PageCursor};
 use crate::freshness::{resolve_policy, FreshnessPolicy, FreshnessSource};
 use crate::semantics::SemanticVersions;
 
@@ -113,6 +114,20 @@ use crate::semantics::SemanticVersions;
 pub enum AskError {
     /// The store could not be read.
     Store(StoreError),
+    /// The requested page bound is not a valid one.
+    ///
+    /// A zero limit, or one over `MAX_LINEAGE_PAGE`. A caller-side fault like
+    /// [`Self::Cursor`], and separate from it because the fixes differ: a bad
+    /// limit is corrected in the request, a stale cursor by restarting the
+    /// query.
+    PageSpec(kirra_world_store::lineage::PageSpecError),
+    /// A presented continuation cursor cannot be continued.
+    ///
+    /// Its own channel rather than folded into [`Self::Store`], because it is
+    /// not a storage fault: the store is healthy and the cursor is the thing
+    /// that does not apply. Collapsing the two would make *"your cursor is from
+    /// a previous rule version"* read as *"the database is broken"*.
+    Cursor(CursorError),
     /// A stored chain digest is not a digest.
     ///
     /// **Refused rather than served**, and the reasoning is this module's own:
@@ -168,6 +183,8 @@ impl fmt::Display for AskError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Store(e) => write!(f, "store: {e:?}"),
+            Self::PageSpec(e) => write!(f, "invalid page bound: {e:?}"),
+            Self::Cursor(e) => write!(f, "continuation refused: {e}"),
             Self::CorruptProvenance {
                 subject,
                 predicate,
@@ -193,6 +210,18 @@ impl fmt::Display for AskError {
 }
 
 impl std::error::Error for AskError {}
+
+impl From<kirra_world_store::lineage::PageSpecError> for AskError {
+    fn from(e: kirra_world_store::lineage::PageSpecError) -> Self {
+        Self::PageSpec(e)
+    }
+}
+
+impl From<CursorError> for AskError {
+    fn from(e: CursorError) -> Self {
+        Self::Cursor(e)
+    }
+}
 
 impl From<StoreError> for AskError {
     fn from(e: StoreError) -> Self {
@@ -793,7 +822,10 @@ impl<'a> WorldView<'a> {
         Ok(HistoryLookup {
             lookup,
             completeness,
-            boundary: paged.boundary,
+            // The store's raw `PageBoundary` is turned into an OPAQUE cursor
+            // here and never escapes: a caller receives a continuation it can
+            // present back, not a log position it can compute on.
+            continuation: to_continuation(&paged.boundary, CursorFamily::History),
             semantics: SemanticVersions::for_query(QueryKind::SubjectHistory),
         })
     }
@@ -1028,7 +1060,7 @@ fn assemble(
 pub struct HistoryLookup {
     lookup: WorldLookup,
     completeness: Resolution,
-    boundary: kirra_world_store::lineage::PageBoundary,
+    continuation: Continuation,
     semantics: SemanticVersions,
 }
 
@@ -1051,16 +1083,36 @@ impl HistoryLookup {
         self.completeness.is_degraded()
     }
 
-    /// Whether more claims follow this PAGE.
+    /// Whether more claims follow this PAGE, and how to continue.
+    ///
+    /// A [`Continuation`] rather than the store's `PageBoundary`: the caller
+    /// receives an opaque cursor bound to this family and these semantics, not
+    /// the raw generation the store paginates on.
     #[must_use]
-    pub fn boundary(&self) -> &kirra_world_store::lineage::PageBoundary {
-        &self.boundary
+    pub fn continuation(&self) -> &Continuation {
+        &self.continuation
     }
 
     /// The rules this answer was produced under.
     #[must_use]
     pub fn semantics(&self) -> &SemanticVersions {
         &self.semantics
+    }
+}
+
+/// **Turn a store page boundary into an opaque continuation** — the one place
+/// a raw generation becomes a cursor.
+///
+/// Shared by both paginated families so the minting rule cannot drift between
+/// them, and so there is a single site to look at when asking whether a raw
+/// coordinate can reach a caller.
+pub(crate) fn to_continuation(
+    boundary: &kirra_world_store::lineage::PageBoundary,
+    family: CursorFamily,
+) -> Continuation {
+    match boundary.next_after_generation() {
+        None => Continuation::Complete,
+        Some(generation) => Continuation::More(PageCursor::mint(family, generation)),
     }
 }
 

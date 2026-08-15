@@ -96,6 +96,10 @@
       "class": "unbounded",
       "why": "The whole claims projection. Grows with the number of subjects."
     },
+    "cursor_anchor": {
+      "class": "bounded",
+      "why": "Two point reads: one row by primary key, and the log head via ORDER BY generation DESC LIMIT 1. Structurally bounded \u2014 the result is two scalars regardless of log size. It exists so a continuation cursor can be REFUSED rather than silently continued from a coordinate the log no longer holds."
+    },
     "entity_projection_generation": {
       "class": "operational",
       "why": "Checkpoint metadata."
