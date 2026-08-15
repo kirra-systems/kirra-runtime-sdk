@@ -237,6 +237,43 @@ def scan_interactive(text: str, forbidden: set[str]) -> list[tuple[int, str, str
     return hits
 
 
+def classification_failures(found: dict[str, set[str]], baseline: dict) -> list[str]:
+    """Rule 1: the discovered read surface and the baseline must agree, exactly.
+
+    A FUNCTION rather than inline in `run`, so the self-test can drive the real
+    rule against a doctored baseline. It was inline, and the fixture that was
+    supposed to prove it worked never called it — it removed a key from a dict
+    and then asserted the key was absent, which is true by construction.
+    """
+    failures: list[str] = []
+    for surface, names in found.items():
+        declared = {k for k in baseline[surface] if not k.startswith("_")}
+        for name in sorted(names - declared):
+            failures.append(
+                f"{surface}::{name} is public but has no boundedness classification.\n"
+                f"    Add it to ci/store_boundedness_baseline.json as bounded / "
+                f"unbounded / operational, with the reasoning.\n"
+                f"    An unclassified method is how all three of the defects this "
+                f"gate exists for reached main."
+            )
+        for name in sorted(declared - names):
+            failures.append(
+                f"{surface}::{name} is classified but no longer exists — "
+                f"remove the stale entry."
+            )
+        for name, spec in baseline[surface].items():
+            if name.startswith("_"):
+                continue
+            if spec.get("class") not in VALID_CLASSES:
+                failures.append(
+                    f"{surface}::{name} has class {spec.get('class')!r}; "
+                    f"expected one of {sorted(VALID_CLASSES)}."
+                )
+            if not spec.get("why", "").strip():
+                failures.append(f"{surface}::{name} has no reason recorded.")
+    return failures
+
+
 def domain_consumer_crates() -> list[Path]:
     """Crates that touch Kirra World but do not implement its boundary.
 
@@ -277,31 +314,7 @@ def run(verbose: bool = False) -> list[str]:
     found = discover()
 
     # 1. Every public read method must be classified. FAIL-CLOSED.
-    for surface, names in found.items():
-        declared = {k for k in baseline[surface] if not k.startswith("_")}
-        for name in sorted(names - declared):
-            failures.append(
-                f"{surface}::{name} is public but has no boundedness classification.\n"
-                f"    Add it to ci/store_boundedness_baseline.json as bounded / "
-                f"unbounded / operational, with the reasoning.\n"
-                f"    An unclassified method is how all three of the defects this "
-                f"gate exists for reached main."
-            )
-        for name in sorted(declared - names):
-            failures.append(
-                f"{surface}::{name} is classified but no longer exists — "
-                f"remove the stale entry."
-            )
-        for name, spec in baseline[surface].items():
-            if name.startswith("_"):
-                continue
-            if spec.get("class") not in VALID_CLASSES:
-                failures.append(
-                    f"{surface}::{name} has class {spec.get('class')!r}; "
-                    f"expected one of {sorted(VALID_CLASSES)}."
-                )
-            if not spec.get("why", "").strip():
-                failures.append(f"{surface}::{name} has no reason recorded.")
+    failures.extend(classification_failures(found, baseline))
 
     # 2. NOTHING in the boundary crate may call an unbounded method.
     #
@@ -653,14 +666,41 @@ def self_test() -> int:
     else:
         print("self-test: operational store calls from a consumer → allowed")
 
-    # (l) An unclassified method must fail, since that is the generalisation.
-    stripped = {k: v for k, v in baseline["world_store"].items() if k != "history"}
-    if "history" in stripped:
-        print("SELF-TEST FAIL: fixture construction error.")
+    # (l) RULE 1, THE GENERALISATION: an unclassified method must fail.
+    #
+    #     This fixture was broken twice over, and review caught it. It used to
+    #     build `{k: v for k, v in baseline if k != "history"}` and then assert
+    #     `"history" not in` the result — true by construction, so it never ran
+    #     rule 1 at all. Then this box renamed `history` to `history_whole` and
+    #     it stopped even removing anything, which is what made the emptiness
+    #     visible.
+    #
+    #     So it now (a) runs the REAL rule via `classification_failures`, and
+    #     (b) DERIVES the method to strip instead of naming one. A hardcoded
+    #     name rots the moment that method is renamed — this box renamed two —
+    #     and a rotted fixture reports success. The empty-pool guard is the
+    #     other half: a fixture with nothing to strip must fail, not pass.
+    found = discover()
+    strippable = sorted(found["world_store"] & set(baseline["world_store"]))
+    if not strippable:
+        print("SELF-TEST FAIL: no classified method was discoverable to strip — "
+              "the fixture has nothing to remove and would pass vacuously.")
         failed = 1
     else:
-        print("self-test: removing a classification leaves it undiscoverable → "
-              "the discover/declare diff is what reports it")
+        probe = strippable[0]
+        doctored = {
+            **baseline,
+            "world_store": {
+                k: v for k, v in baseline["world_store"].items() if k != probe
+            },
+        }
+        if not classification_failures(found, doctored):
+            print(f"SELF-TEST FAIL: dropping the classification for `{probe}` was "
+                  f"NOT reported — rule 1 is not fail-closed.")
+            failed = 1
+        else:
+            print(f"self-test: dropping a classification ({probe}) → rule 1 "
+                  f"reports it")
 
     return failed
 
