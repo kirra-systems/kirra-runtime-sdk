@@ -1664,6 +1664,35 @@ caller's own goal.
 
 ## 6. Tier 3 — The query engine
 
+> ## ✅ TIER 3 IS CLOSED — 2026-08-15
+>
+> All three closure obligations are met, and the section states it rather than
+> leaving a reader to infer it from eight ticked boxes plus scattered tests:
+>
+> | Obligation | Status |
+> |---|---|
+> | **boxes 3a–3h** | all `[x]` |
+> | **cross-cutting items** (§6, four of them) | all `[x]` — two closed as stale on evidence, one was a real leak in the page cursors, one named the wrong symbol and was rewritten |
+> | **closing condition** (the eight-case proving set) | met, each case citing its proving assertion |
+>
+> What Tier 3 now guarantees, mechanically rather than by convention:
+>
+> - every interactive query is bounded end-to-end, from request type through the
+>   store call, and CI refuses a regression (`ci/check_query_boundedness.py`,
+>   five rules, zero allowlists);
+> - there is ONE sanctioned way for application code to ask a domain question,
+>   enforced by visibility — reaching past `QueryEngine::execute` is a compile
+>   error, not a review comment;
+> - continuation cursors name a query contract under a semantic-version set, not
+>   a row in SQLite, and fail closed when they cannot be reproduced;
+> - the answer law's outcomes — error, `Unknown`, refused identity, ambiguous
+>   identity, resolved — are pairwise distinguishable at the public surface.
+>
+> Tier 4 (`Explain`, derivation edges) builds on a closed query layer. The
+> cursor work landed BEFORE it deliberately: `Explain` and lineage retain
+> references across time, so a cursor identity still tied to a SQLite generation
+> would have been inherited rather than fixed.
+
 Eight verbs in §14.2; about five exist in partial form.
 
 - [ ] `Resolve` · [ ] `Related` (bounded graph) · [ ] `WhatIsAt` ·
@@ -2098,22 +2127,70 @@ pressure that produced every stale claim this box already documents.
       one; it does not promote the store primitive into the architecture because
       its name sounds convenient.
 
-**Closing condition.** Tier 3 closes on the contracts plus a representative
-proving set — not on every conceivable query. The minimum set:
+**Closing condition.** ✅ **MET 2026-08-15.** Tier 3 closes on the contracts plus
+a representative proving set — not on every conceivable query. Each case below
+cites the assertion that proves it, because "covered" inferred from a test NAME
+is what the audit found to be worthless.
 
-1. current entity query;
-2. historical entity query;
-3. relationship / history query;
-4. degraded / compacted query;
-5. lineage-retrieval query;
-6. bounded temporal query;
-7. **contradicted identity → `Refused` with its reason preserved through the
-   envelope** — the case Tier 2 spent three slices establishing, and the one an
-   envelope most easily flattens into an empty answer;
-8. **discrimination: `Unknown` ≠ `Refused` ≠ empty-but-`Full`** — three distinct
-   facts that are one keystroke from collapsing into each other.
+| # | Case | Proving assertion |
+|---|---|---|
+| 1 | current entity query | `read_view::an_answer_carries_validity_trust_and_provenance` |
+| 2 | historical entity query | `historical_composition::a_ref_pinned_before_the_merge_resolves_identity_as_it_stood_then`; `as_of_composition::a_merge_recorded_after_the_cut_does_not_rewrite_the_earlier_answer` |
+| 3 | relationship / history query | `completeness_propagation::an_uncompacted_history_reports_full` |
+| 4 | degraded / compacted query | `degradation_propagation::the_boundary_verdict_equals_the_stores_verdict` |
+| 5 | lineage-retrieval query | `lineage_retrieval::an_event_appended_after_the_pin_is_not_in_the_lineage`; `::every_entry_is_citable` |
+| 6 | **page-bounded `History`**, enforced end-to-end | `completeness_propagation::a_history_page_returns_at_most_its_limit`; `::paginating_a_history_walks_the_record_without_gaps_or_repeats` |
+| 7 | contradicted identity → `Refused` with its reason | `answer_discrimination::a_contradicted_identity_is_refused_with_its_reason_preserved` |
+| 8 | the outcomes stay pairwise distinct | `answer_discrimination::every_outcome_is_distinguishable_from_every_other` |
 
 New domain queries can then be added without changing the Tier 3 trust model.
+
+#### Case 6 is `History`, not `ask_as_of`
+
+Recorded explicitly because both readings were available and they are not
+equivalent. `ask_as_of` is bounded by its point-in-time coordinates, but it does
+not exercise the 3d rule that motivated the criterion — it is bounded whether or
+not anyone thought about it. `History` is the interactive temporal query whose
+cost explodes unless the request carries explicit page/limit bounds *all the way
+to the store*, which is exactly what box 3d had to fix. Reading case 6 as
+`ask_as_of` would also make it redundant with case 2.
+
+> **Case 6 = `History` with explicit page/limit bounds enforced end-to-end.**
+
+#### Cases 7 and 8: two refusal channels, not one
+
+The audit found `ObjectIdentity::Refused` in **no test in the boundary crate**.
+Its sibling was covered end-to-end — `a_split_before_the_cut_reports_ambiguous_
+with_its_successors` drives a real split through the engine — so the machinery
+for identity outcomes reaching the boundary was proven and the contradiction
+path specifically was not.
+
+It was reachable, and `kirra_world::resolution` said how: `MergeEntities` refuses
+a merge into its own source, so no single event builds a cycle, but *a→b* then
+*b→a* are two individually valid events and neither can see the other. The
+contradiction exists only in the accumulated graph.
+
+The ruling that shaped case 8:
+
+> `AskError` and `ObjectIdentity::Refused` mean fundamentally different things.
+> One is *"the query could not be evaluated"*; the other is *"the query
+> evaluated and deterministically refused the identity result."* Collapsing
+> either into `Unknown` violates the Tier 3 answer law.
+
+So the discrimination is over FIVE observations, not three: query error, `Unknown`,
+refused identity, ambiguous identity, and a resolved answer — the last so the
+classifier is not vacuous, since a test over failure modes alone would pass
+against an API that could never succeed. Two further tests fix the DIRECTION,
+which pairwise distinctness alone does not: an identity refusal must not be
+reported as a query error (the whole answer stays intact and citable; one object
+is unresolvable), and a query error must not be served as an answer or as
+absence of knowledge.
+
+**Mutations run.** Collapsing `Refused` into another identity outcome reds two
+tests; keeping the variant while discarding the *reason* reds one. The reason is
+asserted in full rather than by variant, because `RedirectCycle { at }` names the
+entity an operator must repair, and a variant-only assertion would pass against
+an implementation reporting every contradiction at a fixed id.
 
 ### `KIRRA-WM-CLAIM-SHAPES-001` — RULED 2026-08-10
 
