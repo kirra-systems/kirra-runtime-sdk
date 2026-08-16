@@ -362,11 +362,28 @@ fn observe(outcome: Result<ComposedLookup, AskError>) -> Observed {
     };
     match composed.lookup() {
         WorldLookup::Unknown(_) => Observed::Unknown,
-        WorldLookup::Answered(answers) => match answers[0].object_identity() {
-            ObjectIdentity::Refused(_) => Observed::RefusedIdentity,
-            ObjectIdentity::Ambiguous { .. } => Observed::AmbiguousIdentity,
-            _ => Observed::ResolvedIdentity,
-        },
+        WorldLookup::Answered(answers) => {
+            // `Answered` means one or MORE. Every fixture here records exactly
+            // one claim, and the assertion pins that rather than assuming it:
+            // classifying by `answers[0]` over a multi-answer result would read
+            // the first identity and silently ignore the rest, so a fixture
+            // that grew a second claim — or a family that started returning
+            // one row per predicate — would be mis-classified rather than
+            // caught. The whole discrimination rests on this function
+            // reporting what a caller actually sees.
+            assert_eq!(
+                answers.len(),
+                1,
+                "discrimination fixtures record exactly one claim; \
+                 classifying a multi-answer result by its first identity would \
+                 hide the others"
+            );
+            match answers[0].object_identity() {
+                ObjectIdentity::Refused(_) => Observed::RefusedIdentity,
+                ObjectIdentity::Ambiguous { .. } => Observed::AmbiguousIdentity,
+                _ => Observed::ResolvedIdentity,
+            }
+        }
     }
 }
 
