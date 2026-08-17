@@ -226,7 +226,7 @@ pub const SEMANTICS: &[RuleSpec] = &[
         rule: RuleId::CitationResolution,
         version: 1,
         corpus_digest: "d74f62272fc120646d699e587bfd181e55aa00b00e57b7e23542245fb6f65b4a",
-        source_pin: "a9aeb96dc1ac443f927df7ad96ca6d8c24d37c02838297196d38aa9bf355ae64",
+        source_pin: "ee863d52f132a5f8671ee60ab01cc9c84d9062296ccd65641ed70934de460428",
         source_file: "crates/kirra-world-store/src/provenance_graph.rs",
         span: "citation_resolution",
     },

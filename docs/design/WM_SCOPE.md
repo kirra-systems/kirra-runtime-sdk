@@ -2785,6 +2785,52 @@ across 251 modules is not a change to make in passing at the end of a tier.
 Which is the lesson once more, now about a control we did not write: **a gate
 that passes has told you nothing until you know which reference made it pass.**
 
+#### A fifth, found by the reviewer rather than by any gate
+
+An automated review of 4b raised three things. All three were real, and the first
+was a defect no control in this repository was positioned to catch.
+
+**The walk attached later branches to the wrong parent.** `continue_into` took the
+parent as `self.nodes.len() - 1` — "the node most recently appended" — which is
+the citing node only until some branch descends. After that, the tail is somewhere
+inside the previous branch's subtree, and every later sibling was hung off it. The
+probe that established it is worth stating exactly, because the corruption is
+visible without any semantic argument: a node at **depth 1** whose parent sat at
+**depth 2**. A tree whose own depths contradict its own edges.
+
+This is the tier's subject matter turned on the tier itself. 4b exists so an
+explanation cannot attribute a claim to evidence that did not support it; a
+mis-parented node does precisely that, and the renderer downstream would have
+narrated it in confident prose. The fix threads the expanding node's real index
+down instead of guessing it. Two tests now hold it: the specific sibling case, and
+the generic invariant — **every child is exactly one level below its parent** —
+which is the form that catches a misattachment in any shape, including ones no one
+thought to write a case for.
+
+The corpus digest did not move, because the corpus encodes citation *resolution*
+and never encoded *topology*. That is the honest reading of why this passed: the
+rule was pinned against a behaviour the rule did not specify. Re-pinned per the
+gate's own convention (source moved, corpus did not), with the under-specification
+noted here rather than smoothed over.
+
+The other two: `set_provenance_edges_floor_for_test` was the only `_for_test` hook
+in the crate not behind `#[cfg(any(test, feature = "test-support"))]`, so a
+coverage-floor mutator was compiled into production builds — gated. And
+`provenance_tree`'s boundedness rationale claimed **no** dimension grows with store
+size, which is false: `compacted_spans()` scans `compaction_citations` unlimited,
+once per call. The rationale is corrected rather than the code, deliberately —
+the bounded form is a `LIMIT n+1` with a truncation flag (safe, since it can only
+truncate an already non-empty list and so can never flip `PossiblyCompacted` back
+to `NeverVisible`), but it touches the pinned region and the `CitationLookup`
+seam, and folding that into the round that found it is how a small fix becomes an
+unreviewed one.
+
+**The lesson this one adds:** the other four were controls that did not measure
+what they claimed. This was a property **no control claimed at all** — the suite
+asserted what the tree *said* and never that the tree *held together*. Structural
+invariants are cheap and catch what case-by-case assertions cannot, because they
+do not depend on anyone having imagined the failing shape.
+
 The original sketch:
 
 Only once 4b's type exists. Mick receives typed lineage and turns it into

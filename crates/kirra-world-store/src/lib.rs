@@ -1619,6 +1619,7 @@ impl WorldStore {
     /// # Errors
     ///
     /// [`StoreError::Sqlite`] if the meta row cannot be written.
+    #[cfg(any(test, feature = "test-support"))]
     pub fn set_provenance_edges_floor_for_test(&self, floor: i64) -> Result<(), StoreError> {
         self.conn.execute(
             "INSERT INTO world_store_meta (key, value) VALUES (?1, ?2)

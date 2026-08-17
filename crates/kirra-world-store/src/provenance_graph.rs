@@ -674,15 +674,20 @@ impl<S: CitationLookup> Walk<'_, S> {
             citations: NodeCitations::BelowCoverageFloor,
         });
 
-        let citations = self.citations_of(generation, depth)?;
+        let citations = self.citations_of(generation, depth, index)?;
         self.nodes[index].citations = citations;
         Ok(index)
     }
 
+    /// `index` is the node being expanded — the parent of everything this call
+    /// descends into. It is threaded in rather than recovered from the node
+    /// vector's tail: after a branch walks deeper, the last node is somewhere
+    /// in that branch's subtree, not the node doing the citing.
     fn citations_of(
         &mut self,
         generation: i64,
         depth: usize,
+        index: usize,
     ) -> Result<NodeCitations, WalkError<S::Error>> {
         // Order matters: a compacted event has no edges BECAUSE it is gone, and
         // reporting that as a coverage gap would send an operator to a backfill
@@ -724,7 +729,7 @@ impl<S: CitationLookup> Walk<'_, S> {
             ) {
                 self.outcome.degraded = true;
             }
-            let continuation = self.continue_into(&resolution, depth, edge.ordinal)?;
+            let continuation = self.continue_into(&resolution, depth, edge.ordinal, index)?;
             branches.push(Branch {
                 ordinal: edge.ordinal,
                 cited_observation_id: edge.cited_observation_id,
@@ -745,6 +750,7 @@ impl<S: CitationLookup> Walk<'_, S> {
         resolution: &CitationResolution,
         depth: usize,
         ordinal: i64,
+        parent: usize,
     ) -> Result<BranchContinuation, WalkError<S::Error>> {
         let target = match resolution {
             CitationResolution::Resolved { target_generation } => *target_generation,
@@ -774,7 +780,6 @@ impl<S: CitationLookup> Walk<'_, S> {
             self.outcome.truncated = true;
             return Ok(BranchContinuation::NotWalked(NotWalkedReason::NodeLimit));
         }
-        let parent = self.nodes.len().saturating_sub(1);
         let node = self.expand(target, depth + 1, Some(parent), Some(ordinal))?;
         Ok(BranchContinuation::Walked { node })
     }
@@ -903,6 +908,90 @@ mod tests {
                 &branches[0]
             }
             other => panic!("no indexed citations: {other:?}"),
+        }
+    }
+
+    /// Every node's parent must be the node that actually cited it, including
+    /// the second and later branches of a node whose first branch walked
+    /// deeper.
+    ///
+    /// The walk used to take the parent as "the last node appended", which is
+    /// the citing node only while no branch has descended. Once one has, the
+    /// tail is somewhere inside that branch's subtree, and every later sibling
+    /// was attached to it — producing a tree whose shape disagrees with the
+    /// evidence it was built from. A renderer reading that tree attributes a
+    /// claim to whatever the previous branch happened to end on.
+    #[test]
+    fn a_later_branch_hangs_from_its_citing_node_not_the_previous_subtree() {
+        // gen 10 cites obs-a and obs-b. obs-a's carrier (gen 8) cites obs-c,
+        // so the FIRST branch is two nodes deep before the second is walked.
+        let store = InMemoryCitations::new()
+            .with_event(10, "obs-root", &["obs-a", "obs-b"])
+            .with_event(8, "obs-a", &["obs-c"])
+            .with_event(7, "obs-b", &[])
+            .with_event(6, "obs-c", &[]);
+        let tree = walk(&store, 10, 10);
+
+        let node_of = |gen: i64| {
+            tree.nodes
+                .iter()
+                .position(|n| n.generation == gen)
+                .unwrap_or_else(|| panic!("generation {gen} was not walked"))
+        };
+        let (root, a, c, b) = (node_of(10), node_of(8), node_of(6), node_of(7));
+
+        assert_eq!(tree.nodes[root].parent, None, "the root has no parent");
+        assert_eq!(
+            tree.nodes[a].parent,
+            Some(root),
+            "gen 8 was cited by gen 10"
+        );
+        assert_eq!(tree.nodes[c].parent, Some(a), "gen 6 was cited by gen 8");
+        assert_eq!(
+            tree.nodes[b].parent,
+            Some(root),
+            "gen 7 was cited by gen 10, NOT by the tail of the first branch"
+        );
+        // The ordinal is the citing node's edge order, so the second branch of
+        // the root is ordinal 1 even though a whole subtree was walked between.
+        assert_eq!(tree.nodes[b].via_ordinal, Some(1));
+    }
+
+    /// The structural invariant the case above is one instance of: a child is
+    /// always exactly one level below its parent.
+    ///
+    /// Stated separately because it is the generic form — it catches a
+    /// misattached node anywhere in any tree this suite builds, including
+    /// shapes no one thought to write a case for. The specific bug it was
+    /// written for produced a depth-1 node whose parent sat at depth 2.
+    #[test]
+    fn every_child_is_exactly_one_level_below_its_parent() {
+        let store = InMemoryCitations::new()
+            .with_event(20, "obs-root", &["obs-a", "obs-b", "obs-d"])
+            .with_event(18, "obs-a", &["obs-c"])
+            .with_event(16, "obs-c", &["obs-e"])
+            .with_event(14, "obs-e", &[])
+            .with_event(12, "obs-b", &[])
+            .with_event(11, "obs-d", &[])
+            .with_event(10, "obs-unrelated", &[]);
+        let tree = walk(&store, 20, 20);
+        assert!(tree.nodes.len() >= 6, "the fixture must actually branch");
+        for (i, node) in tree.nodes.iter().enumerate() {
+            match node.parent {
+                None => assert_eq!(node.depth, 0, "node {i} is a root, so depth 0"),
+                Some(p) => {
+                    assert!(p < i, "node {i}'s parent {p} must precede it");
+                    assert_eq!(
+                        node.depth,
+                        tree.nodes[p].depth + 1,
+                        "node {i} (gen {}) sits at depth {} under parent {p} (gen {}) at depth {}",
+                        node.generation,
+                        node.depth,
+                        tree.nodes[p].generation,
+                        tree.nodes[p].depth
+                    );
+                }
+            }
         }
     }
 
