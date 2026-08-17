@@ -385,8 +385,13 @@ impl std::fmt::Display for StoreError {
                 "identity closure reachable from {from} exceeds {limit} entities; \
                  refused rather than truncated"
             ),
+            // Generic, because the variant long outgrew its name: it also
+            // carries corrupt adjudication tokens and, since 4a, undecodable
+            // provenance JSON. A message naming `entities_projection` sends
+            // triage to the wrong table. The variant's own rename is a
+            // pre-existing cleanup, deliberately not smuggled into this PR.
             Self::CorruptEntityProjectionRow { detail } => {
-                write!(f, "corrupt entities_projection row: {detail}")
+                write!(f, "corrupt stored row: {detail}")
             }
             Self::CitationPageSpec(e) => write!(f, "citation page: {e}"),
             Self::LlmCannotConfirm => write!(
@@ -1211,13 +1216,17 @@ impl WorldStore {
         // than a per-append write.
         if from < 7 {
             tx.execute_batch(schema::SCHEMA_V7_MIGRATION)?;
-            let head: i64 = tx
-                .query_row(
-                    "SELECT COALESCE(MAX(generation), 0) FROM world_events",
-                    [],
-                    |r| r.get(0),
-                )
-                .unwrap_or(0);
+            // `?`, never `unwrap_or(0)`. `COALESCE(MAX(...), 0)` already returns
+            // a row for an empty table, so a swallowed error here could only be
+            // a real one — and it would stamp the floor `0`, which reads as
+            // FULLY COVERED. A store that could not read its own head would
+            // claim to have indexed every citation in it. That is precisely the
+            // fail-open this floor exists to deny, so the migration fails.
+            let head: i64 = tx.query_row(
+                "SELECT COALESCE(MAX(generation), 0) FROM world_events",
+                [],
+                |r| r.get(0),
+            )?;
             tx.execute(
                 "INSERT INTO world_store_meta (key, value) VALUES (?1, ?2)
                  ON CONFLICT(key) DO UPDATE SET value = excluded.value",
@@ -1420,8 +1429,22 @@ impl WorldStore {
             sequence_of(generation)?,
         );
 
-        self.conn.execute(
-            "INSERT INTO world_events (
+        // The event row and its citation edges must become durable TOGETHER, so
+        // the savepoint opens here — before the event insert — not inside the
+        // edge write.
+        //
+        // It previously opened inside `write_citation_edges`, which made the
+        // invariant this comment asserts false in the ordinary case: outside an
+        // enclosing transaction SQLite autocommits the event row immediately, so
+        // a crash before the edge write left a durable event with no edges, in a
+        // v7-born store whose floor says `0` — fully covered. Missing edges read
+        // as "cited nothing", so the store would have made a confident, wrong,
+        // positive claim about that event's provenance. Found in review.
+        self.conn.execute_batch("SAVEPOINT kirra_append_event")?;
+        let written = self
+            .conn
+            .execute(
+                "INSERT INTO world_events (
                 generation, event_id, observation_id, txn_time_ms, valid_from_ms,
                 valid_to_ms, source, source_version, writer_class, claim_status,
                 provenance, frame_id, map_id, kind, subject, predicate, object,
@@ -1463,8 +1486,22 @@ impl WorldStore {
                 // recorded and the one property this design exists to deny.
                 e.subject_ref.map(SubjectRef::as_str),
             ],
-        )?;
-        self.write_citation_edges(generation, e.provenance)?;
+            )
+            .map_err(StoreError::from)
+            .and_then(|_| self.write_citation_edges(generation, e.provenance));
+        if let Err(err) = written {
+            let _ = self.conn.execute_batch("ROLLBACK TO kirra_append_event");
+            let _ = self.conn.execute_batch("RELEASE kirra_append_event");
+            return Err(err);
+        }
+        // A failing RELEASE leaves the savepoint on the stack, poisoning every
+        // later write on this connection with a fault naming the wrong
+        // operation. Unwind it explicitly, as `append_adjudication` does.
+        if let Err(err) = self.conn.execute_batch("RELEASE kirra_append_event") {
+            let _ = self.conn.execute_batch("ROLLBACK TO kirra_append_event");
+            let _ = self.conn.execute_batch("RELEASE kirra_append_event");
+            return Err(err.into());
+        }
         Ok(generation)
     }
 
@@ -1477,23 +1514,24 @@ impl WorldStore {
     /// authoritative statement and it is right here, so a decode step would only
     /// add a way for the index to disagree with the evidence.
     ///
-    /// # A SAVEPOINT, not a transaction
+    /// # Atomicity belongs to the caller
     ///
-    /// The event row and its edges must commit together — an index that could
-    /// lag the log by one crash would under-report the newest event's
-    /// provenance, and silently, since missing edges read as "cited nothing".
+    /// This opens no savepoint of its own. [`Self::append`] wraps the event
+    /// insert and this call in ONE savepoint, which is the only placement that
+    /// makes the row and its edges commit together — a savepoint opened here
+    /// would begin after the event row had already autocommitted.
     ///
-    /// It cannot be `BEGIN IMMEDIATE`, because [`Self::append_adjudication`]
-    /// already holds an open transaction across its call to `append`, and SQLite
-    /// refuses a nested `BEGIN` with "cannot start a transaction within a
-    /// transaction". A savepoint composes in both cases: standalone it opens and
-    /// commits its own transaction, and inside one it nests.
+    /// That enclosing scope is a SAVEPOINT rather than `BEGIN IMMEDIATE`
+    /// because [`Self::append_adjudication`] already holds an open transaction
+    /// across its call to `append`, and SQLite refuses a nested `BEGIN` with
+    /// "cannot start a transaction within a transaction". A savepoint composes
+    /// in both cases: standalone it opens and commits its own transaction, and
+    /// inside one it nests.
     fn write_citation_edges(&self, generation: i64, cited: &[&str]) -> Result<(), StoreError> {
         let edges = provenance_edges::citation_edges(cited);
         if edges.is_empty() {
             return Ok(());
         }
-        self.conn.execute_batch("SAVEPOINT kirra_prov_edges")?;
         for edge in &edges {
             // Plain INSERT, not INSERT OR IGNORE. The primary key is
             // (generation, ordinal) and both are freshly minted here, so a
@@ -1506,19 +1544,10 @@ impl WorldStore {
                  VALUES (?1, ?2, ?3)",
                 params![generation, edge.ordinal, edge.cited_observation_id],
             ) {
-                let _ = self.conn.execute_batch("ROLLBACK TO kirra_prov_edges");
-                let _ = self.conn.execute_batch("RELEASE kirra_prov_edges");
+                // The caller's savepoint unwinds this; returning the error is
+                // enough to trigger it.
                 return Err(err.into());
             }
-        }
-        // A failing RELEASE leaves the savepoint on the stack. Same hazard as
-        // the failed-COMMIT case in `append_adjudication`: returning without
-        // unwinding poisons every later write on this connection with a fault
-        // that names the wrong operation.
-        if let Err(err) = self.conn.execute_batch("RELEASE kirra_prov_edges") {
-            let _ = self.conn.execute_batch("ROLLBACK TO kirra_prov_edges");
-            let _ = self.conn.execute_batch("RELEASE kirra_prov_edges");
-            return Err(err.into());
         }
         Ok(())
     }

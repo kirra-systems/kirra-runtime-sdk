@@ -651,3 +651,87 @@ fn a_compacted_source_leaves_no_edge_claiming_to_be_backed() {
     drop(s);
     clean(&path);
 }
+
+// ---------------------------------------------------------------------------
+// 5. The event row and its edges commit together
+// ---------------------------------------------------------------------------
+
+/// **A failed edge write must take the event row with it.**
+///
+/// Found in review, and the failure it describes is the one this whole box is
+/// built to prevent. `write_citation_edges` used to open its own savepoint —
+/// *after* `append` had inserted the event row. Outside an enclosing
+/// transaction SQLite autocommits that insert immediately, so the two writes
+/// were never atomic: a failure (or a crash) between them left a durable event
+/// with no edges, in a store whose floor reads `0` — fully covered.
+///
+/// That is not a missing optimization. Missing edges read as **"cited
+/// nothing"**, so the store would answer a provenance question confidently and
+/// wrongly, which is exactly what `provenance_edges_floor` exists to make
+/// impossible. The savepoint now opens before the event insert.
+///
+/// Forcing the failure rather than simulating a crash: an edge row is planted
+/// at the `(generation, ordinal)` the next append will claim, so its first edge
+/// insert hits the primary key. Same window, deterministically.
+#[test]
+fn a_failed_edge_write_rolls_back_the_event_row() {
+    let path = tmp("atomic");
+    let mut s = WorldStore::open(&path).expect("open");
+
+    append_citing(&mut s, "first", "package_17", T0, &["obs-a"]);
+
+    let next = s
+        .query_scalar_for_test("SELECT COALESCE(MAX(generation), 0) FROM world_events")
+        .expect("head")
+        + 1;
+    s.raw_execute_for_test(&format!(
+        "INSERT INTO provenance_edges (source_generation, ordinal, cited_observation_id)
+         VALUES ({next}, 0, 'squatter')"
+    ))
+    .expect("plant");
+
+    let event_id = EventId::new("ev-doomed").expect("event id");
+    let observation_id = ObservationId::new("obs-doomed").expect("obs id");
+    let err = s.append(&NewEvent {
+        event_id: &event_id,
+        observation_id: &observation_id,
+        txn_time_ms: T0 + 1,
+        valid_from_ms: T0 + 1,
+        valid_to_ms: None,
+        source: "warehouse-scanner",
+        source_version: "1.0.0",
+        writer_class: WriterClass::Sensor,
+        claim_status: ClaimStatus::Confirmed,
+        provenance: &["obs-a"],
+        frame_id: None,
+        map_id: None,
+        kind: "mission",
+        subject: "package_17",
+        subject_ref: None,
+        predicate: Some("last_seen_at"),
+        object: Some("dock_c"),
+        payload: "{}",
+        payload_schema: 1,
+        retention_class: "raw",
+        trust: None,
+    });
+    assert!(
+        err.is_err(),
+        "the conflicting edge insert must fail the append"
+    );
+
+    let survived = s
+        .query_scalar_for_test(&format!(
+            "SELECT COUNT(*) FROM world_events WHERE generation = {next}"
+        ))
+        .expect("count");
+    assert_eq!(
+        survived, 0,
+        "the event row must not outlive its failed edge write — a durable event \
+         with no edges reads as 'cited nothing', which is a positive claim about \
+         its provenance that nothing in the store would contradict"
+    );
+
+    drop(s);
+    clean(&path);
+}
