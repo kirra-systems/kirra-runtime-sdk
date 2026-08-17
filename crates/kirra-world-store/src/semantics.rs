@@ -109,6 +109,17 @@ pub enum RuleId {
     /// different ordering describes a different set of evidence while looking
     /// identical.
     LineageSelection,
+    /// [`crate::provenance_graph::resolve_citation`] /
+    /// [`crate::provenance_graph::walk_provenance`] — how a citation resolves at
+    /// a pin, and which branches a walk descends into.
+    ///
+    /// Included by the same membership test as `LineageSelection`, and it passes
+    /// even harder: this rule decides whether a claim is reported as resting on
+    /// one event, on several, or on nothing that can be found. A recorded
+    /// explanation replayed under a changed rule would describe different
+    /// evidence while looking identical — and unlike a page cursor, the
+    /// difference is a statement about where a fact came from.
+    CitationResolution,
 }
 
 impl RuleId {
@@ -124,6 +135,7 @@ impl RuleId {
             Self::EntityFold => "entity_fold",
             Self::SubjectSummaryFold => "subject_summary_fold",
             Self::LineageSelection => "lineage_selection",
+            Self::CitationResolution => "citation_resolution",
         }
     }
 
@@ -138,6 +150,7 @@ impl RuleId {
             RuleId::EntityFold,
             RuleId::SubjectSummaryFold,
             RuleId::LineageSelection,
+            RuleId::CitationResolution,
         ]
     }
 }
@@ -208,6 +221,14 @@ pub const SEMANTICS: &[RuleSpec] = &[
         source_pin: "e25f2863158f146facab6c2a135c0e6b6efb0fdaa50ee139329bf4b340baa964",
         source_file: "crates/kirra-world-store/src/lineage.rs",
         span: "lineage_selection",
+    },
+    RuleSpec {
+        rule: RuleId::CitationResolution,
+        version: 1,
+        corpus_digest: "d74f62272fc120646d699e587bfd181e55aa00b00e57b7e23542245fb6f65b4a",
+        source_pin: "ee863d52f132a5f8671ee60ab01cc9c84d9062296ccd65641ed70934de460428",
+        source_file: "crates/kirra-world-store/src/provenance_graph.rs",
+        span: "citation_resolution",
     },
 ];
 
@@ -580,6 +601,160 @@ pub fn render_lineage(selection: &crate::lineage::SelectedLineage) -> String {
     out
 }
 
+/// The citation-resolution rule's corpus store.
+///
+/// One log, built so that every outcome the rule can produce is reachable from
+/// it, because a corpus that exercises only resolution pins only resolution:
+///
+/// * `1` carries `obs-base` and cites nothing — a genuinely empty citation set;
+/// * `2` and `3` both carry `obs-twin` — the **plural** cardinality, which is
+///   only expressible because observation ids are not unique;
+/// * `4` cites `obs-base` and `obs-twin` and `obs-never` — one resolved, one
+///   plural, one dangling, in one node, so branch ORDER is covered too;
+/// * `5` cites `obs-base` twice — **duplicates preserved**;
+/// * `6` and `7` cite each other — a **cycle**;
+/// * `8` cites `obs-gone`, which nothing carries, under a compacted span — the
+///   **dangling qualification**;
+/// * `9` is not retained, with edges recorded — **deleted evidence**, and it is
+///   the span `(9, 9)` that removed it, so the two halves of compaction are the
+///   same event rather than two unrelated fixtures;
+/// * the floor at `1` puts the base node **below coverage**, reachable from `4`.
+///
+/// The floor is what makes this corpus awkward to build and worth building: it
+/// is the one input where the honest answer is *"I don't know what this cited"*,
+/// and a corpus without it would let that arm be deleted silently.
+#[must_use]
+pub fn citation_corpus() -> crate::provenance_graph::InMemoryCitations {
+    crate::provenance_graph::InMemoryCitations::new()
+        .with_event(1, "obs-base", &[])
+        .with_event(2, "obs-twin", &[])
+        .with_event(3, "obs-twin", &[])
+        .with_event(4, "obs-four", &["obs-base", "obs-twin", "obs-never"])
+        .with_event(5, "obs-five", &["obs-base", "obs-base"])
+        .with_event(6, "obs-six", &["obs-seven"])
+        .with_event(7, "obs-seven", &["obs-six"])
+        .with_event(8, "obs-eight", &["obs-gone"])
+        .with_unretained_edges(9, &["obs-base"])
+        // Two spans, and the second is not decoration: every corpus walk pins
+        // at 9, so `(9, 9)` qualifies a dangle and `(10, 12)` must NOT. A rule
+        // that dropped the `lo <= pin` filter would name both and render
+        // differently — the axis has no switch in the variant harness, so the
+        // corpus is where it is covered.
+        .with_compacted_span(9, 9)
+        .with_compacted_span(10, 12)
+        .with_floor(1)
+}
+
+/// The walks the citation corpus is rendered through.
+///
+/// `(label, root, pin, max_depth, max_nodes)`. The pins are the load-bearing
+/// part: `resolved_at_4` and `plural_later` are the SAME root and the same
+/// citation at two coordinates, so a rule that resolved against the present
+/// rather than the pin renders differently at exactly one row.
+#[must_use]
+pub fn citation_walks() -> Vec<(&'static str, i64, i64, usize, usize)> {
+    vec![
+        ("refused_root", 1, 9, 8, 32),
+        ("below_floor_child", 4, 9, 8, 32),
+        ("resolved_at_4", 4, 2, 8, 32),
+        ("plural_later", 4, 9, 8, 32),
+        ("duplicates", 5, 9, 8, 32),
+        ("cycle", 6, 9, 8, 32),
+        ("compacted_dangle", 8, 9, 8, 32),
+        ("deleted_source", 9, 9, 8, 32),
+        ("depth_bound", 6, 9, 1, 32),
+        ("node_bound", 4, 9, 8, 2),
+    ]
+}
+
+/// Render a provenance tree's verdict.
+///
+/// Renders what the RULE decides — each node's generation, depth and citation
+/// status, each branch's ordinal, resolution and continuation, and the outcome
+/// flags — and nothing an event happens to carry. Same reason
+/// [`render_lineage`] renders generations rather than whole events: a digest
+/// that moves when an unrelated column changes trains the reflexive re-pinning
+/// these digests exist to prevent.
+#[must_use]
+pub fn render_provenance(tree: &crate::provenance_graph::ProvenanceTree) -> String {
+    use crate::provenance_graph::{
+        BranchContinuation, CitationResolution, DanglingReason, NodeCitations, NotWalkedReason,
+    };
+    let mut out = String::new();
+    for node in &tree.nodes {
+        out.push_str(&format!("n{}@{}", node.generation, node.depth));
+        out.push(FIELD);
+        match &node.citations {
+            NodeCitations::BelowCoverageFloor => out.push_str("below_floor"),
+            NodeCitations::EvidenceCompacted => out.push_str("compacted"),
+            NodeCitations::Indexed {
+                branches,
+                truncated,
+            } => {
+                out.push_str(if *truncated { "indexed*" } else { "indexed" });
+                for b in branches {
+                    out.push(FIELD);
+                    out.push_str(&b.ordinal.to_string());
+                    out.push(':');
+                    out.push_str(&b.cited_observation_id);
+                    out.push('=');
+                    match &b.resolution {
+                        CitationResolution::Resolved { target_generation } => {
+                            out.push_str(&format!("one({target_generation})"));
+                        }
+                        CitationResolution::Plural {
+                            target_generations,
+                            truncated,
+                        } => {
+                            let ids: Vec<String> =
+                                target_generations.iter().map(i64::to_string).collect();
+                            out.push_str(&format!(
+                                "many({}{})",
+                                ids.join("+"),
+                                if *truncated { "+more" } else { "" }
+                            ));
+                        }
+                        CitationResolution::Dangling { reason } => match reason {
+                            DanglingReason::NeverVisible => out.push_str("dangling(never)"),
+                            DanglingReason::PossiblyCompacted { spans } => {
+                                let ids: Vec<String> = spans.iter().map(i64::to_string).collect();
+                                out.push_str(&format!("dangling(compacted:{})", ids.join("+")));
+                            }
+                        },
+                    }
+                    out.push('/');
+                    match &b.continuation {
+                        BranchContinuation::Walked { node } => {
+                            out.push_str(&format!("walked({node})"));
+                        }
+                        BranchContinuation::NotWalked(reason) => match reason {
+                            NotWalkedReason::Nothing => out.push_str("stop(nothing)"),
+                            NotWalkedReason::Plural => out.push_str("stop(plural)"),
+                            NotWalkedReason::DepthLimit => out.push_str("stop(depth)"),
+                            NotWalkedReason::NodeLimit => out.push_str("stop(nodes)"),
+                            // The generation is rendered, not just the reason: a
+                            // rule that closed the loop at a different node would
+                            // otherwise render identically.
+                            NotWalkedReason::CycleDetected { back_to_generation } => {
+                                out.push_str(&format!("stop(cycle:{back_to_generation})"));
+                            }
+                        },
+                    }
+                }
+            }
+        }
+        out.push(ROW);
+    }
+    out.push_str(&format!(
+        "outcome{FIELD}truncated={}{FIELD}cycle={}{FIELD}degraded={}{FIELD}coverage={}",
+        tree.outcome.truncated,
+        tree.outcome.cycle_detected,
+        tree.outcome.degraded,
+        tree.outcome.coverage_limited,
+    ));
+    out
+}
+
 /// **Run one rule's corpus through the real reducer and render the result.**
 ///
 /// This is the value the declared [`RuleSpec::corpus_digest`] is a digest of. It
@@ -615,6 +790,36 @@ pub fn corpus_rendering(rule: RuleId) -> String {
                     at_generation,
                     page,
                 )));
+                out.push(ROW);
+            }
+            out
+        }
+        RuleId::CitationResolution => {
+            let store = citation_corpus();
+            let mut out = String::new();
+            for (label, root, at, depth, nodes) in citation_walks() {
+                out.push_str(label);
+                out.push(FIELD);
+                let spec = crate::provenance_graph::GraphSpec::new(depth, nodes)
+                    .expect("the corpus walks must be valid, or they pin an error");
+                // A refusal is a verdict of the rule and is rendered as one:
+                // `below_floor_child`'s root is above the floor, but a walk
+                // whose ROOT fell below it must render differently from one
+                // that answered, or the refusal could be deleted silently.
+                match crate::provenance_graph::walk_provenance(
+                    &store,
+                    root,
+                    at,
+                    spec,
+                    version_of(RuleId::CitationResolution),
+                ) {
+                    Ok(tree) => out.push_str(&render_provenance(&tree)),
+                    Err(crate::provenance_graph::WalkError::IndexIncomplete {
+                        requested,
+                        floor,
+                    }) => out.push_str(&format!("refused:index_incomplete:{requested}:{floor}")),
+                    Err(crate::provenance_graph::WalkError::Lookup(e)) => match e {},
+                }
                 out.push(ROW);
             }
             out

@@ -1624,6 +1624,31 @@ jobs:
         run: |
           python3 ci/test_proposal_context_symbolic.py
           python3 ci/check_proposal_context_symbolic.py
+      - name: Explanation-seam neutrality gate (Tier 4 box 4c)
+        # THE RULE: the explanation artifact is presentation-only. It may carry
+        # rendered text, opaque digests, categorical state, counts and
+        # positions; it may not carry a Kirra World COORDINATE.
+        #
+        # This is the clause that makes KIRRA-WM-EXPLAIN-PLACEMENT-001 real
+        # rather than nominal. A spotless Cargo graph is necessary and not
+        # sufficient: `provenance_tree(root, at, spec)` takes exactly two
+        # generations, so an artifact carrying one hands the renderer the
+        # argument it needs to reconstruct the fenced dependency over IPC, at
+        # runtime, with nothing in the dependency graph to show for it.
+        #
+        # It also asserts DIRECTLY that the crate has no kirra-world*
+        # dependency. Fence B would catch that too, but only transitively via
+        # kirra-sidecars' CorridorSource impl and the closure walk — a chain of
+        # other facts holding, rather than the invariant itself.
+        #
+        # Self-test first, same reason as above, and with the same result: the
+        # negative cases caught a single-line enum variant this gate's own field
+        # regex missed, and then caught the narrow-integer exemption its first
+        # draft admitted (`anchor: u32` — a usable query handle under a name no
+        # coordinate list would flag).
+        run: |
+          python3 ci/check_explain_artifact_neutral.py --self-test
+          python3 ci/check_explain_artifact_neutral.py
       - name: Answer-boundary gate (Tier 3 box 3d)
         # THE RULE: a crate that asks the world DOMAIN questions goes through
         # kirra_world_service::WorldView, not the projection-read API on

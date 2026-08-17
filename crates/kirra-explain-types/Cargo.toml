@@ -1,0 +1,29 @@
+# crates/kirra-explain-types/Cargo.toml
+#
+# Tier 4 box 4c (KIRRA-WM-EXPLAIN-PLACEMENT-001): the neutral type contract
+# across the explanation process boundary.
+#
+# THE EMPTY DEPENDENCY LIST IS THE POINT, and it is stated as a rule rather than
+# left to inspection: this crate has NO dependencies at all, and in particular no
+# `kirra-world*` package. That is what lets both sides depend on it —
+# `kirra-world-service` projects INTO these types, `kirra-mick` renders FROM
+# them — while there is no Cargo arrow between Mick and Kirra World.
+#
+# The precedent is `kirra-proposal-context` (KIRRA-WM-CONSUMER-PLACEMENT-001) and
+# so is the technique: a seam is made safe by having nowhere to put the dangerous
+# thing, not by everyone remembering not to put it there. There the dangerous
+# thing is a checker bound and the ban is on numeric magnitudes. Here it is a
+# QUERY HANDLE, and the ban is on World coordinates — see `ci/check_explain_artifact_neutral.py`.
+[package]
+name = "kirra-explain-types"
+version = "0.1.0"
+edition = "2021"
+rust-version.workspace = true
+description = "Neutral, presentation-only explanation artifact shared across the Kirra World / Mick process boundary. No World dependency, no query handles."
+repository = "https://github.com/kirra-systems/kirra-runtime-sdk"
+license-file = "../../COPYRIGHT"
+publish = false  # proprietary (see COPYRIGHT) — not for crates.io
+
+# Deliberately empty. A dependency added here is a dependency Mick inherits, and
+# the first `kirra-world*` one reconstructs the path Fence B exists to refuse.
+[dependencies]

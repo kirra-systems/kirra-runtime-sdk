@@ -12,6 +12,12 @@ publish = false
 kirra-world = { path = "../kirra-world" }
 kirra-world-store = { path = "../kirra-world-store" }
 
+# The neutral explanation contract (KIRRA-WM-EXPLAIN-PLACEMENT-001). It has NO
+# dependencies of its own, so this adds nothing to the closure Fence A walks —
+# which is the property that lets `kirra-mick` depend on the same crate from the
+# other side of the process boundary without acquiring a route to Kirra World.
+kirra-explain-types = { path = "../kirra-explain-types" }
+
 # `test-support` unlocks the store's raw-SQL escape hatch, which is the only
 # way to plant a corrupt chain digest -- the write path refuses to produce one,
 # which is why the refusal below has to be provoked rather than seeded.

@@ -1,352 +1,356 @@
 {
-  "_comment": [
-    "Tier 3 box 3d \u2014 the boundedness classification of the store's read surface.",
-    "",
-    "KIRRA-WM-ANSWER-IDENTITY-001 clause 2 is 'queries are bounded'. Three defects",
-    "in three consecutive PRs showed that per-query vigilance does not enforce it:",
-    "",
-    "  #1440  lineage      per-page query over a whole-history fetch   (review)",
-    "  #1441  subject_summary  per-subject query over a store scan     (review)",
-    "  #1441  history      no bound at all, in the same PR that wrote up the first two",
-    "",
-    "Each looked bounded at the API and called an unbounded store method underneath.",
-    "So boundedness is an ENGINE-level invariant, not per-query hygiene, and this",
-    "file is what makes it mechanical.",
-    "",
-    "WHY A CLASSIFICATION AND NOT A DENYLIST OF UNBOUNDED METHODS",
-    "",
-    "A denylist fails the way the three defects failed: a new store method simply",
-    "is not on it, and nothing notices. This is FAIL-CLOSED instead, on 3e's",
-    "pattern -- every public read method must appear here, and an unclassified one",
-    "REDS THE GATE. Adding a store method without deciding its boundedness becomes",
-    "a red build naming the rule.",
-    "",
-    "THE CATEGORIES",
-    "",
-    "  bounded      Result size is bounded by the ARGUMENTS. An interactive query",
-    "               may call this.",
-    "  unbounded    Result grows with store size or with a subject's accumulated",
-    "               history. An interactive query may NOT call this. Legitimate for",
-    "               operators, rebuilds and analysis -- none of which sit on a",
-    "               request path.",
-    "  operational  Not a domain read: mutations, folds, schema, diagnostics,",
-    "               counts. WM_SCOPE names these as legitimate readers below the",
-    "               engine, and a rule forbidding them 'would be false on the day",
-    "               it was written'.",
-    "",
-    "'Bounded' means bounded by the arguments, not small. `current` returns one row",
-    "per predicate for one subject -- bounded by the PRIMARY KEY, which is a",
-    "STRUCTURAL bound rather than a page. That counts, and is asserted rather than",
-    "assumed (see the structural-bound tests).",
-    "",
-    "Methods ending `_for_test` are classified automatically and are not listed:",
-    "they are compiled out of the production path, and listing them would be a",
-    "second thing to maintain for no coverage."
-  ],
-  "world_store": {
-    "append": {
-      "class": "operational",
-      "why": "Write path."
-    },
-    "append_adjudication": {
-      "class": "operational",
-      "why": "Write path."
-    },
-    "as_of": {
-      "class": "bounded",
-      "why": "One subject at one bitemporal point. Same PRIMARY KEY bound as `current`."
-    },
-    "as_of_composed": {
-      "class": "unbounded",
-      "why": "Composes `as_of` (bounded) with `identity_view_at` (the whole graph). The claims half is bounded and the identity half is not, so the composition is not \u2014 a bounded half does not bound a composition."
-    },
-    "as_of_composed_bounded": {
-      "class": "bounded",
-      "why": "Box 3d. Both halves bounded inside ONE transaction: `as_of` was already subject-keyed, and the identity half now folds only the adjudications bearing on the objects those claims name, discovered through the affected-entity reverse index. Deliberately one primitive rather than two bounded calls \u2014 two would satisfy boundedness while reintroducing the cross-read incoherence box 3h closed."
-    },
-    "backfill_adjudication_affects": {
-      "class": "operational",
-      "why": "The one-time scan that fills the v6 reverse index on a migrated store. Deliberately a full scan and deliberately NOT on any request path \u2014 an explicit operational call rather than work hidden in `open`, so the cost lands where an operator can see it. This is exactly the trade box 3d is for: one operational scan buys bounded interactive reads."
-    },
-    "backfill_provenance_edges": {
-      "class": "operational",
-      "why": "Tier 4 box 4a. The one-time scan that fills the v7 citation index on a migrated store, and drops the coverage floor to 0. A full log scan by design, and deliberately NOT on any request path -- an explicit operational call rather than work hidden in `open`, exactly as `backfill_adjudication_affects`."
-    },
-    "candidates": {
-      "class": "unbounded",
-      "why": "Every candidate claim ever proposed about a subject, no page. The same shape as `history` and unbounded for the same reason -- an LLM proposing repeatedly grows this without limit."
-    },
-    "changed_since": {
-      "class": "unbounded",
-      "why": "Every change after a timestamp. The result grows with how long ago the caller asks about."
-    },
-    "citations": {
-      "class": "unbounded",
-      "why": "Every compaction citation in the store. Accumulates for the store's life."
-    },
-    "citations_of": {
-      "class": "bounded",
-      "why": "Tier 4 box 4a. Bounded by the ARGUMENT: `limit`, refused above MAX_CITATIONS_PAGE and at 0, applied as SQL LIMIT with one extra probe row so truncation is reported rather than inferred. It is bounded BECAUSE it was made so -- nothing else bounds it. No schema constraint, no domain rule and no other argument limits how many observations one event may cite, so the whole-array read this replaced was structurally unbounded while looking fine at the API: the exact shape of the three defects in the header. Classifying it `unbounded` and leaving 4b to bound it would have been the 'move the unbounded call behind another helper' move 3d ruled out."
-    },
-    "compact_range": {
-      "class": "operational",
-      "why": "Retention mutation."
-    },
-    "count": {
-      "class": "operational",
-      "why": "A scalar row count."
-    },
-    "current": {
-      "class": "bounded",
-      "why": "STRUCTURAL bound: `world_current` is keyed by (subject, predicate_key), so one subject yields at most one row per predicate. Not a page, and does not need one -- a subject's predicate set does not grow without limit the way its event history does."
-    },
-    "current_all": {
-      "class": "unbounded",
-      "why": "The whole claims projection. Grows with the number of subjects."
-    },
-    "cursor_anchor": {
-      "class": "bounded",
-      "why": "Two point reads: one row by primary key, and the log head via ORDER BY generation DESC LIMIT 1. Structurally bounded \u2014 the result is two scalars regardless of log size. It exists so a continuation cursor can be REFUSED rather than silently continued from a coordinate the log no longer holds."
-    },
-    "entity_projection_generation": {
-      "class": "operational",
-      "why": "Checkpoint metadata."
-    },
-    "entity_projection_state_digest": {
-      "class": "operational",
-      "why": "Checkpoint metadata."
-    },
-    "fold": {
-      "class": "operational",
-      "why": "Projection fold."
-    },
-    "fold_entity_projection": {
-      "class": "operational",
-      "why": "Projection fold."
-    },
-    "fold_subject_summary": {
-      "class": "operational",
-      "why": "Projection fold."
-    },
-    "has_citations": {
-      "class": "operational",
-      "why": "Existence probe."
-    },
-    "has_entity_projection": {
-      "class": "operational",
-      "why": "Existence probe."
-    },
-    "has_projections": {
-      "class": "operational",
-      "why": "Existence probe."
-    },
-    "has_subject_summary": {
-      "class": "operational",
-      "why": "Existence probe."
-    },
-    "has_summaries": {
-      "class": "operational",
-      "why": "Existence probe."
-    },
-    "head_chain": {
-      "class": "bounded",
-      "why": "One row: the log head."
-    },
-    "history_page": {
-      "class": "bounded",
-      "why": "Box 3d's bounded replacement for `history`. Narrows in SQL with `generation > cursor` and `LIMIT limit + 1` rather than fetching the record and truncating \u2014 #1440's lesson, since truncating after the fetch bounds the ANSWER while leaving the WORK unbounded, which is what made all three defects invisible. The boundary decision is `lineage::boundary_for`, shared with the lineage family so the off-by-one has one implementation."
-    },
-    "history_whole": {
-      "class": "unbounded",
-      "why": "EVERY confirmed claim ever recorded about a subject, no page and no cursor. The third instance of the defect class this gate exists for, and the one that proves per-query vigilance does not work: it was written in the PR that documented the other two. Its bounded replacement is the paginated form. RENAMED from `history` in the 3d dispatch slice: `WorldView::history` is the BOUNDED family of the same name, and the collision made the gate read the engine's dispatch into the bounded family as a call to this one. The same correction `resolve_at` -> `resolve_at_whole_graph` already took \u2014 a name that does not say `whole` is how a whole-record read gets called by mistake."
-    },
-    "identity_view": {
-      "class": "unbounded",
-      "why": "The whole entity equivalence graph."
-    },
-    "identity_view_at": {
-      "class": "unbounded",
-      "why": "The whole entity graph as it stood at a cut. Pinning the coordinate bounds WHEN, not HOW MUCH."
-    },
-    "invalid_shape_rows": {
-      "class": "operational",
-      "why": "A schema-diagnostic sweep, not a domain question."
-    },
-    "largest_compactable_prefix": {
-      "class": "operational",
-      "why": "The compaction planner's own query. WM_SCOPE names the planner as a legitimate reader below the engine."
-    },
-    "lineage_at_generation": {
-      "class": "bounded",
-      "why": "Takes a validated `LineagePage`, and #1440 made the fetch itself narrow to limit+1 rather than fetching the history and truncating."
-    },
-    "load_entity_projection": {
-      "class": "operational",
-      "why": "The fold's own loader."
-    },
-    "mint_entity_id": {
-      "class": "operational",
-      "why": "Id minting."
-    },
-    "minted_entity_id_count": {
-      "class": "operational",
-      "why": "A scalar count."
-    },
-    "open": {
-      "class": "operational",
-      "why": "Constructor."
-    },
-    "projected_row_count": {
-      "class": "operational",
-      "why": "A scalar count."
-    },
-    "projection_coordinate": {
-      "class": "operational",
-      "why": "Checkpoint metadata."
-    },
-    "projection_generation": {
-      "class": "operational",
-      "why": "Checkpoint metadata."
-    },
-    "projection_state_digest": {
-      "class": "operational",
-      "why": "Checkpoint metadata."
-    },
-    "provenance_edges_floor": {
-      "class": "bounded",
-      "why": "Tier 4 box 4a. One `world_store_meta` row by primary key. The fail-closed fallback for an absent/unparseable value is `MAX(generation)`, an index max rather than a scan. Constant result size -- one integer."
-    },
-    "read_at_generation": {
-      "class": "unbounded",
-      "why": "The whole claims projection reconstructed at a generation. Pinning the coordinate bounds WHEN, not HOW MUCH -- the same trap as `identity_view_at`."
-    },
-    "read_composed_at_generation": {
-      "class": "unbounded",
-      "why": "Both projections at a generation. Unbounded for the same reason as `read_at_generation`."
-    },
-    "read_snapshot": {
-      "class": "operational",
-      "why": "Returns a HANDLE, reading nothing. The rows come from `ReadSnapshot`'s own methods, which are classified separately below -- a snapshot must not become a way to reach an unbounded read without being seen."
-    },
-    "rebuild_entity_projection": {
-      "class": "operational",
-      "why": "Projection rebuild."
-    },
-    "rebuild_projections": {
-      "class": "operational",
-      "why": "Projection rebuild."
-    },
-    "rebuild_subject_summary": {
-      "class": "operational",
-      "why": "Projection rebuild."
-    },
-    "resolve_at_whole_graph": {
-      "class": "unbounded",
-      "why": "RENAMED from `resolve_at` on box 3d. Its body is `self.identity_view_at(cut)?.resolve_at(id)` \u2014 it materialises the WHOLE equivalence graph and then indexes it, so the old name read as a point lookup and was classified `bounded` from its signature on the first pass. The name now says what it does. Renaming also removes a real ambiguity in the gate's name-based scan: `HistoricalIdentityView::resolve_at` is a pure in-memory call on an already-loaded view, and sharing a name with an unbounded store method made every use of it look like a violation. `resolve_bounded_at` is the bounded form."
-    },
-    "resolve_bounded": {
-      "class": "bounded",
-      "why": "Box 3d's identity primitive. Loads only the entities within MAX_REDIRECT_EDGES hops of the queried id and resolves over that subset, so the work is bounded by the traversal budget the resolver already enforces rather than by graph size. The resolution RULE is unchanged \u2014 the same `resolve` over a smaller view \u2014 which is what lets `bounded_resolution_agrees_with_whole_graph_resolution` assert the two are identical. Classified `bounded` and MEANT: the transitive check reads its body, so it stays honest."
-    },
-    "resolve_bounded_at": {
-      "class": "bounded",
-      "why": "Box 3d's bounded historical identity read. Discovers the adjudications affecting the queried id through the affected-entity reverse index, expands newly-named entities, and stops at the resolver's own MAX_REDIRECT_EDGES budget \u2014 so it folds the records bearing on one entity's identity rather than every adjudication in the log. The index supplies GENERATIONS only; every record is read from world_events and folded by the unchanged fold_adjudication, so the log remains the sole evidence."
-    },
-    "resolved_entities": {
-      "class": "unbounded",
-      "why": "Every summarised entity in the store."
-    },
-    "schema_version": {
-      "class": "operational",
-      "why": "PRAGMA read."
-    },
-    "subject_summaries": {
-      "class": "unbounded",
-      "why": "Every retained summary row."
-    },
-    "subject_summaries_for": {
-      "class": "bounded",
-      "why": "One subject's summaries across kinds -- SQL-narrowed, at most one row per kind."
-    },
-    "subject_summaries_with_coverage": {
-      "class": "unbounded",
-      "why": "Every summary AND every citation, grouped once. A deliberate BULK api, optimised as one -- which is precisely why #1441's per-subject query standing on it was a defect rather than a slow path."
-    },
-    "subject_summary": {
-      "class": "bounded",
-      "why": "One (kind, subject) row."
-    },
-    "subject_summary_generation": {
-      "class": "operational",
-      "why": "Checkpoint metadata."
-    },
-    "subject_summary_state_digest": {
-      "class": "operational",
-      "why": "Checkpoint metadata."
-    },
-    "subject_summary_with_coverage": {
-      "class": "bounded",
-      "why": "One subject, both sources SQL-narrowed. The bounded replacement #1441's review produced."
-    },
-    "summaries": {
-      "class": "unbounded",
-      "why": "Every degraded-summary citation in the store."
-    },
-    "verify_chain": {
-      "class": "operational",
-      "why": "The audit walk. WM_SCOPE names it explicitly as a legitimate reader below the engine."
-    }
+ "_comment": [
+  "Tier 3 box 3d \u2014 the boundedness classification of the store's read surface.",
+  "",
+  "KIRRA-WM-ANSWER-IDENTITY-001 clause 2 is 'queries are bounded'. Three defects",
+  "in three consecutive PRs showed that per-query vigilance does not enforce it:",
+  "",
+  "  #1440  lineage      per-page query over a whole-history fetch   (review)",
+  "  #1441  subject_summary  per-subject query over a store scan     (review)",
+  "  #1441  history      no bound at all, in the same PR that wrote up the first two",
+  "",
+  "Each looked bounded at the API and called an unbounded store method underneath.",
+  "So boundedness is an ENGINE-level invariant, not per-query hygiene, and this",
+  "file is what makes it mechanical.",
+  "",
+  "WHY A CLASSIFICATION AND NOT A DENYLIST OF UNBOUNDED METHODS",
+  "",
+  "A denylist fails the way the three defects failed: a new store method simply",
+  "is not on it, and nothing notices. This is FAIL-CLOSED instead, on 3e's",
+  "pattern -- every public read method must appear here, and an unclassified one",
+  "REDS THE GATE. Adding a store method without deciding its boundedness becomes",
+  "a red build naming the rule.",
+  "",
+  "THE CATEGORIES",
+  "",
+  "  bounded      Result size is bounded by the ARGUMENTS. An interactive query",
+  "               may call this.",
+  "  unbounded    Result grows with store size or with a subject's accumulated",
+  "               history. An interactive query may NOT call this. Legitimate for",
+  "               operators, rebuilds and analysis -- none of which sit on a",
+  "               request path.",
+  "  operational  Not a domain read: mutations, folds, schema, diagnostics,",
+  "               counts. WM_SCOPE names these as legitimate readers below the",
+  "               engine, and a rule forbidding them 'would be false on the day",
+  "               it was written'.",
+  "",
+  "'Bounded' means bounded by the arguments, not small. `current` returns one row",
+  "per predicate for one subject -- bounded by the PRIMARY KEY, which is a",
+  "STRUCTURAL bound rather than a page. That counts, and is asserted rather than",
+  "assumed (see the structural-bound tests).",
+  "",
+  "Methods ending `_for_test` are classified automatically and are not listed:",
+  "they are compiled out of the production path, and listing them would be a",
+  "second thing to maintain for no coverage."
+ ],
+ "world_store": {
+  "append": {
+   "class": "operational",
+   "why": "Write path."
+  },
+  "append_adjudication": {
+   "class": "operational",
+   "why": "Write path."
+  },
+  "as_of": {
+   "class": "bounded",
+   "why": "One subject at one bitemporal point. Same PRIMARY KEY bound as `current`."
+  },
+  "as_of_composed": {
+   "class": "unbounded",
+   "why": "Composes `as_of` (bounded) with `identity_view_at` (the whole graph). The claims half is bounded and the identity half is not, so the composition is not \u2014 a bounded half does not bound a composition."
+  },
+  "as_of_composed_bounded": {
+   "class": "bounded",
+   "why": "Box 3d. Both halves bounded inside ONE transaction: `as_of` was already subject-keyed, and the identity half now folds only the adjudications bearing on the objects those claims name, discovered through the affected-entity reverse index. Deliberately one primitive rather than two bounded calls \u2014 two would satisfy boundedness while reintroducing the cross-read incoherence box 3h closed."
+  },
+  "backfill_adjudication_affects": {
+   "class": "operational",
+   "why": "The one-time scan that fills the v6 reverse index on a migrated store. Deliberately a full scan and deliberately NOT on any request path \u2014 an explicit operational call rather than work hidden in `open`, so the cost lands where an operator can see it. This is exactly the trade box 3d is for: one operational scan buys bounded interactive reads."
+  },
+  "backfill_provenance_edges": {
+   "class": "operational",
+   "why": "Tier 4 box 4a. The one-time scan that fills the v7 citation index on a migrated store, and drops the coverage floor to 0. A full log scan by design, and deliberately NOT on any request path -- an explicit operational call rather than work hidden in `open`, exactly as `backfill_adjudication_affects`."
+  },
+  "candidates": {
+   "class": "unbounded",
+   "why": "Every candidate claim ever proposed about a subject, no page. The same shape as `history` and unbounded for the same reason -- an LLM proposing repeatedly grows this without limit."
+  },
+  "changed_since": {
+   "class": "unbounded",
+   "why": "Every change after a timestamp. The result grows with how long ago the caller asks about."
+  },
+  "citations": {
+   "class": "unbounded",
+   "why": "Every compaction citation in the store. Accumulates for the store's life."
+  },
+  "citations_of": {
+   "class": "bounded",
+   "why": "Tier 4 box 4a. Bounded by the ARGUMENT: `limit`, refused above MAX_CITATIONS_PAGE and at 0, applied as SQL LIMIT with one extra probe row so truncation is reported rather than inferred. It is bounded BECAUSE it was made so -- nothing else bounds it. No schema constraint, no domain rule and no other argument limits how many observations one event may cite, so the whole-array read this replaced was structurally unbounded while looking fine at the API: the exact shape of the three defects in the header. Classifying it `unbounded` and leaving 4b to bound it would have been the 'move the unbounded call behind another helper' move 3d ruled out."
+  },
+  "compact_range": {
+   "class": "operational",
+   "why": "Retention mutation."
+  },
+  "count": {
+   "class": "operational",
+   "why": "A scalar row count."
+  },
+  "current": {
+   "class": "bounded",
+   "why": "STRUCTURAL bound: `world_current` is keyed by (subject, predicate_key), so one subject yields at most one row per predicate. Not a page, and does not need one -- a subject's predicate set does not grow without limit the way its event history does."
+  },
+  "current_all": {
+   "class": "unbounded",
+   "why": "The whole claims projection. Grows with the number of subjects."
+  },
+  "cursor_anchor": {
+   "class": "bounded",
+   "why": "Two point reads: one row by primary key, and the log head via ORDER BY generation DESC LIMIT 1. Structurally bounded \u2014 the result is two scalars regardless of log size. It exists so a continuation cursor can be REFUSED rather than silently continued from a coordinate the log no longer holds."
+  },
+  "entity_projection_generation": {
+   "class": "operational",
+   "why": "Checkpoint metadata."
+  },
+  "entity_projection_state_digest": {
+   "class": "operational",
+   "why": "Checkpoint metadata."
+  },
+  "fold": {
+   "class": "operational",
+   "why": "Projection fold."
+  },
+  "fold_entity_projection": {
+   "class": "operational",
+   "why": "Projection fold."
+  },
+  "fold_subject_summary": {
+   "class": "operational",
+   "why": "Projection fold."
+  },
+  "has_citations": {
+   "class": "operational",
+   "why": "Existence probe."
+  },
+  "has_entity_projection": {
+   "class": "operational",
+   "why": "Existence probe."
+  },
+  "has_projections": {
+   "class": "operational",
+   "why": "Existence probe."
+  },
+  "has_subject_summary": {
+   "class": "operational",
+   "why": "Existence probe."
+  },
+  "has_summaries": {
+   "class": "operational",
+   "why": "Existence probe."
+  },
+  "head_chain": {
+   "class": "bounded",
+   "why": "One row: the log head."
+  },
+  "history_page": {
+   "class": "bounded",
+   "why": "Box 3d's bounded replacement for `history`. Narrows in SQL with `generation > cursor` and `LIMIT limit + 1` rather than fetching the record and truncating \u2014 #1440's lesson, since truncating after the fetch bounds the ANSWER while leaving the WORK unbounded, which is what made all three defects invisible. The boundary decision is `lineage::boundary_for`, shared with the lineage family so the off-by-one has one implementation."
+  },
+  "history_whole": {
+   "class": "unbounded",
+   "why": "EVERY confirmed claim ever recorded about a subject, no page and no cursor. The third instance of the defect class this gate exists for, and the one that proves per-query vigilance does not work: it was written in the PR that documented the other two. Its bounded replacement is the paginated form. RENAMED from `history` in the 3d dispatch slice: `WorldView::history` is the BOUNDED family of the same name, and the collision made the gate read the engine's dispatch into the bounded family as a call to this one. The same correction `resolve_at` -> `resolve_at_whole_graph` already took \u2014 a name that does not say `whole` is how a whole-record read gets called by mistake."
+  },
+  "identity_view": {
+   "class": "unbounded",
+   "why": "The whole entity equivalence graph."
+  },
+  "identity_view_at": {
+   "class": "unbounded",
+   "why": "The whole entity graph as it stood at a cut. Pinning the coordinate bounds WHEN, not HOW MUCH."
+  },
+  "invalid_shape_rows": {
+   "class": "operational",
+   "why": "A schema-diagnostic sweep, not a domain question."
+  },
+  "largest_compactable_prefix": {
+   "class": "operational",
+   "why": "The compaction planner's own query. WM_SCOPE names the planner as a legitimate reader below the engine."
+  },
+  "lineage_at_generation": {
+   "class": "bounded",
+   "why": "Takes a validated `LineagePage`, and #1440 made the fetch itself narrow to limit+1 rather than fetching the history and truncating."
+  },
+  "load_entity_projection": {
+   "class": "operational",
+   "why": "The fold's own loader."
+  },
+  "mint_entity_id": {
+   "class": "operational",
+   "why": "Id minting."
+  },
+  "minted_entity_id_count": {
+   "class": "operational",
+   "why": "A scalar count."
+  },
+  "open": {
+   "class": "operational",
+   "why": "Constructor."
+  },
+  "projected_row_count": {
+   "class": "operational",
+   "why": "A scalar count."
+  },
+  "projection_coordinate": {
+   "class": "operational",
+   "why": "Checkpoint metadata."
+  },
+  "projection_generation": {
+   "class": "operational",
+   "why": "Checkpoint metadata."
+  },
+  "projection_state_digest": {
+   "class": "operational",
+   "why": "Checkpoint metadata."
+  },
+  "provenance_edges_floor": {
+   "class": "bounded",
+   "why": "Tier 4 box 4a. One `world_store_meta` row by primary key. The fail-closed fallback for an absent/unparseable value is `MAX(generation)`, an index max rather than a scan. Constant result size -- one integer."
+  },
+  "provenance_tree": {
+   "class": "bounded",
+   "why": "Tier 4 box 4b. Every dimension of the WALK has a validated ceiling: at most `GraphSpec::max_nodes` nodes (<= MAX_PROVENANCE_NODES), each reading one citation page (<= MAX_CITATIONS_PAGE, probe-truncated) and resolving each citation against at most MAX_CARRIERS carriers by the observation_id index. Stated rather than waved at, because the product is the honest part: 256 nodes x 256 citations is ~65k index lookups in the theoretical worst case, and a caller wanting an interactive answer passes a smaller GraphSpec rather than relying on real provenance being shallow. Two independent budgets is deliberate -- a depth bound alone leaves width open, since one event may cite any number of observations. KNOWN DEVIATION, recorded rather than claimed away (found in review of #1448): the walk additionally loads the compaction-span list ONCE per call via `compacted_spans()`, an unlimited scan of `compaction_citations`, so one dimension DOES grow with the store's compaction history -- not with event count, and not per node, but not constant either. The list feeds exactly two things: whether any span has `lo <= at_generation` (the NeverVisible vs PossiblyCompacted qualification) and the enumerated spans carried on PossiblyCompacted. Only the ENUMERATION is unbounded -- the qualification needs mere existence -- so the bounded form is a `WHERE lo_generation <= ? LIMIT n+1` with a truncation flag, which cannot flip the qualification because it only ever truncates a non-empty list. That fix touches the pinned `citation_resolution` region and the CitationLookup seam, so it is deliberately NOT folded into the review round that found it."
+  },
+  "read_at_generation": {
+   "class": "unbounded",
+   "why": "The whole claims projection reconstructed at a generation. Pinning the coordinate bounds WHEN, not HOW MUCH -- the same trap as `identity_view_at`."
+  },
+  "read_composed_at_generation": {
+   "class": "unbounded",
+   "why": "Both projections at a generation. Unbounded for the same reason as `read_at_generation`."
   },
   "read_snapshot": {
-    "current": {
-      "class": "bounded",
-      "why": "The snapshot-scoped `current`; same PRIMARY KEY bound."
-    },
-    "coordinate": {
-      "class": "operational",
-      "why": "Checkpoint metadata."
-    },
-    "identity_is_current": {
-      "class": "operational",
-      "why": "A boolean freshness probe."
-    },
-    "identity_view": {
-      "class": "unbounded",
-      "why": "The whole entity graph, snapshot-scoped. A snapshot bounds COHERENCE, not size."
-    },
-    "lineage_at_generation": {
-      "class": "bounded",
-      "why": "Takes a validated `LineagePage`; narrows to limit+1 in SQL."
-    },
-    "read_at_generation": {
-      "class": "unbounded",
-      "why": "The whole claims projection at a generation."
-    },
-    "read_composed_at_generation": {
-      "class": "unbounded",
-      "why": "Both projections at a generation."
-    },
-    "identity_view_for": {
-      "class": "bounded",
-      "why": "Box 3d. Loads only the entities reachable from the seed ids within MAX_REDIRECT_EDGES hops, so `ask` pays O(predicates x budget) instead of O(entities) to resolve the objects its own claims name. Snapshot-scoped so the identity half of a composed answer is observed at the same point as the claims half \u2014 a WorldStore-level bounded resolve would be a second connection and would reintroduce the between-walks incoherence 3c closed."
-    },
-    "read_composed_subject_at_generation": {
-      "class": "bounded",
-      "why": "Box 3d. Re-executes a recorded reference with the identity half bounded to the adjudications bearing on the objects that subject's claims name, cut at the pinned GENERATION rather than a transaction time. Still ONE composed read taken from this snapshot's transaction: splitting it into a bounded claims read plus a bounded identity read would bound the work and reintroduce the cross-read incoherence box 3h closed. The reproducibility refusal is delegated to read_at_generation, so one refusal still covers both halves."
-    }
+   "class": "operational",
+   "why": "Returns a HANDLE, reading nothing. The rows come from `ReadSnapshot`'s own methods, which are classified separately below -- a snapshot must not become a way to reach an unbounded read without being seen."
   },
-  "interactive_paths": {
-    "_comment": [
-      "Files whose functions are INTERACTIVE query paths -- reached by a caller",
-      "asking a domain question, so subject to the bounded-only rule.",
-      "",
-      "Everything else in the boundary crate is free to call unbounded methods:",
-      "a test, a rebuild helper or an operator tool legitimately reads the store",
-      "whole. The rule is about what sits on a request path."
-    ],
-    "crates/kirra-world-service/src/read_view.rs": "WorldView -- the four non-lineage query families",
-    "crates/kirra-world-service/src/lineage.rs": "LineageRef::resolve -- the lineage family",
-    "crates/kirra-world-service/src/answer_ref.rs": "AnswerRef::resolve -- re-execution of a recorded reference",
-    "crates/kirra-world-service/src/query.rs": "QueryEngine + the typed requests -- the ONE sanctioned entry point. Every request dispatches into the family implementations below it and adds no query logic of its own, so this file is on the request path by definition."
+  "rebuild_entity_projection": {
+   "class": "operational",
+   "why": "Projection rebuild."
+  },
+  "rebuild_projections": {
+   "class": "operational",
+   "why": "Projection rebuild."
+  },
+  "rebuild_subject_summary": {
+   "class": "operational",
+   "why": "Projection rebuild."
+  },
+  "resolve_at_whole_graph": {
+   "class": "unbounded",
+   "why": "RENAMED from `resolve_at` on box 3d. Its body is `self.identity_view_at(cut)?.resolve_at(id)` \u2014 it materialises the WHOLE equivalence graph and then indexes it, so the old name read as a point lookup and was classified `bounded` from its signature on the first pass. The name now says what it does. Renaming also removes a real ambiguity in the gate's name-based scan: `HistoricalIdentityView::resolve_at` is a pure in-memory call on an already-loaded view, and sharing a name with an unbounded store method made every use of it look like a violation. `resolve_bounded_at` is the bounded form."
+  },
+  "resolve_bounded": {
+   "class": "bounded",
+   "why": "Box 3d's identity primitive. Loads only the entities within MAX_REDIRECT_EDGES hops of the queried id and resolves over that subset, so the work is bounded by the traversal budget the resolver already enforces rather than by graph size. The resolution RULE is unchanged \u2014 the same `resolve` over a smaller view \u2014 which is what lets `bounded_resolution_agrees_with_whole_graph_resolution` assert the two are identical. Classified `bounded` and MEANT: the transitive check reads its body, so it stays honest."
+  },
+  "resolve_bounded_at": {
+   "class": "bounded",
+   "why": "Box 3d's bounded historical identity read. Discovers the adjudications affecting the queried id through the affected-entity reverse index, expands newly-named entities, and stops at the resolver's own MAX_REDIRECT_EDGES budget \u2014 so it folds the records bearing on one entity's identity rather than every adjudication in the log. The index supplies GENERATIONS only; every record is read from world_events and folded by the unchanged fold_adjudication, so the log remains the sole evidence."
+  },
+  "resolved_entities": {
+   "class": "unbounded",
+   "why": "Every summarised entity in the store."
+  },
+  "schema_version": {
+   "class": "operational",
+   "why": "PRAGMA read."
+  },
+  "subject_summaries": {
+   "class": "unbounded",
+   "why": "Every retained summary row."
+  },
+  "subject_summaries_for": {
+   "class": "bounded",
+   "why": "One subject's summaries across kinds -- SQL-narrowed, at most one row per kind."
+  },
+  "subject_summaries_with_coverage": {
+   "class": "unbounded",
+   "why": "Every summary AND every citation, grouped once. A deliberate BULK api, optimised as one -- which is precisely why #1441's per-subject query standing on it was a defect rather than a slow path."
+  },
+  "subject_summary": {
+   "class": "bounded",
+   "why": "One (kind, subject) row."
+  },
+  "subject_summary_generation": {
+   "class": "operational",
+   "why": "Checkpoint metadata."
+  },
+  "subject_summary_state_digest": {
+   "class": "operational",
+   "why": "Checkpoint metadata."
+  },
+  "subject_summary_with_coverage": {
+   "class": "bounded",
+   "why": "One subject, both sources SQL-narrowed. The bounded replacement #1441's review produced."
+  },
+  "summaries": {
+   "class": "unbounded",
+   "why": "Every degraded-summary citation in the store."
+  },
+  "verify_chain": {
+   "class": "operational",
+   "why": "The audit walk. WM_SCOPE names it explicitly as a legitimate reader below the engine."
   }
+ },
+ "read_snapshot": {
+  "current": {
+   "class": "bounded",
+   "why": "The snapshot-scoped `current`; same PRIMARY KEY bound."
+  },
+  "coordinate": {
+   "class": "operational",
+   "why": "Checkpoint metadata."
+  },
+  "identity_is_current": {
+   "class": "operational",
+   "why": "A boolean freshness probe."
+  },
+  "identity_view": {
+   "class": "unbounded",
+   "why": "The whole entity graph, snapshot-scoped. A snapshot bounds COHERENCE, not size."
+  },
+  "lineage_at_generation": {
+   "class": "bounded",
+   "why": "Takes a validated `LineagePage`; narrows to limit+1 in SQL."
+  },
+  "read_at_generation": {
+   "class": "unbounded",
+   "why": "The whole claims projection at a generation."
+  },
+  "read_composed_at_generation": {
+   "class": "unbounded",
+   "why": "Both projections at a generation."
+  },
+  "identity_view_for": {
+   "class": "bounded",
+   "why": "Box 3d. Loads only the entities reachable from the seed ids within MAX_REDIRECT_EDGES hops, so `ask` pays O(predicates x budget) instead of O(entities) to resolve the objects its own claims name. Snapshot-scoped so the identity half of a composed answer is observed at the same point as the claims half \u2014 a WorldStore-level bounded resolve would be a second connection and would reintroduce the between-walks incoherence 3c closed."
+  },
+  "read_composed_subject_at_generation": {
+   "class": "bounded",
+   "why": "Box 3d. Re-executes a recorded reference with the identity half bounded to the adjudications bearing on the objects that subject's claims name, cut at the pinned GENERATION rather than a transaction time. Still ONE composed read taken from this snapshot's transaction: splitting it into a bounded claims read plus a bounded identity read would bound the work and reintroduce the cross-read incoherence box 3h closed. The reproducibility refusal is delegated to read_at_generation, so one refusal still covers both halves."
+  }
+ },
+ "interactive_paths": {
+  "_comment": [
+   "Files whose functions are INTERACTIVE query paths -- reached by a caller",
+   "asking a domain question, so subject to the bounded-only rule.",
+   "",
+   "Everything else in the boundary crate is free to call unbounded methods:",
+   "a test, a rebuild helper or an operator tool legitimately reads the store",
+   "whole. The rule is about what sits on a request path."
+  ],
+  "crates/kirra-world-service/src/read_view.rs": "WorldView -- the four non-lineage query families",
+  "crates/kirra-world-service/src/lineage.rs": "LineageRef::resolve -- the lineage family",
+  "crates/kirra-world-service/src/answer_ref.rs": "AnswerRef::resolve -- re-execution of a recorded reference",
+  "crates/kirra-world-service/src/query.rs": "QueryEngine + the typed requests -- the ONE sanctioned entry point. Every request dispatches into the family implementations below it and adds no query logic of its own, so this file is on the request path by definition."
+ }
 }

@@ -43,6 +43,13 @@
         "corpus_digest": "750c6e83b752ea7743032696b2a57b40134e97a91492961513a61e5a1fb8bc55",
         "source_pin": "e25f2863158f146facab6c2a135c0e6b6efb0fdaa50ee139329bf4b340baa964"
       }
+    ],
+    "citation_resolution": [
+      {
+        "version": 1,
+        "corpus_digest": "d74f62272fc120646d699e587bfd181e55aa00b00e57b7e23542245fb6f65b4a",
+        "source_pin": "ee863d52f132a5f8671ee60ab01cc9c84d9062296ccd65641ed70934de460428"
+      }
     ]
   }
 }

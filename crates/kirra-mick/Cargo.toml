@@ -19,6 +19,12 @@ license-file = "../../COPYRIGHT"
 publish = false  # proprietary (see COPYRIGHT) — not for crates.io
 
 [dependencies]
+# The Tier 4 box 4c explanation contract (KIRRA-WM-EXPLAIN-PLACEMENT-001). It has
+# NO dependencies of its own and is deliberately NOT named `kirra-world*`, which
+# is what lets Mick render a Kirra World explanation without acquiring a route to
+# Kirra World. The neutrality that makes this safe is asserted by
+# ci/check_explain_artifact_neutral.py, not by this comment.
+kirra-explain-types = { path = "../kirra-explain-types" }
 # The MickBrain seam: ModelClient / ModelError / LlmBrain / WorldContext live here.
 kirra-planner = { path = "../kirra-planner" }
 # Blocking HTTP (matches the sync ModelClient port). rustls so there is no system OpenSSL

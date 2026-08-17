@@ -2220,6 +2220,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "kirra-explain-types"
+version = "0.1.0"
+
+[[package]]
 name = "kirra-fabric-types"
 version = "0.1.0"
 dependencies = [
@@ -2339,6 +2343,7 @@ version = "0.1.0"
 dependencies = [
  "kirra-capture-schema",
  "kirra-core",
+ "kirra-explain-types",
  "kirra-planner",
  "kirra-taj",
  "kirra-trajectory",
@@ -2626,6 +2631,7 @@ version = "0.1.0"
 name = "kirra-world-service"
 version = "0.1.0"
 dependencies = [
+ "kirra-explain-types",
  "kirra-world",
  "kirra-world-store",
 ]

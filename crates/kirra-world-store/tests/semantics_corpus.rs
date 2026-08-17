@@ -68,6 +68,11 @@ use kirra_world::entity::Lifecycle;
 use kirra_world_store::entity_projection::{Contradiction, ProjectedEntity};
 use kirra_world_store::lineage::{LineageEvent, PageBoundary, SelectedLineage};
 use kirra_world_store::projection::ProjectedClaim;
+use kirra_world_store::provenance_graph::{
+    Branch, BranchContinuation, Carriers, CitationLookup, CitationResolution, DanglingReason,
+    GraphOutcome, InMemoryCitations, NodeCitations, NotWalkedReason, ProvenanceNode,
+    ProvenanceTree,
+};
 use kirra_world_store::semantics::{
     self, corpus_digest, corpus_rendering, entity_corpus, render_entities, render_subjects,
     render_world_current, subject_corpus, world_current_corpus, RuleId, SEMANTICS,
@@ -673,6 +678,7 @@ fn every_rule_has_at_least_one_sensitivity_control() {
         RuleId::EntityFold,
         RuleId::SubjectSummaryFold,
         RuleId::LineageSelection,
+        RuleId::CitationResolution,
     ];
     for rule in RuleId::all() {
         assert!(
@@ -683,4 +689,366 @@ fn every_rule_has_at_least_one_sensitivity_control() {
         );
     }
     assert_eq!(controlled.len(), semantics::SEMANTICS.len());
+}
+
+// --- citation_resolution -------------------------------------------------
+
+/// Which behavioural axis a citation-resolution variant flips.
+///
+/// The same one-struct-of-switches shape as [`LineageVariant`], for the same
+/// reason: seven near-identical copies of a walk would drift apart, and the
+/// controls only ever assert *inequality*, so the drift would never show.
+///
+/// Every switch here is a collapse the ruling names, or the mechanism that
+/// prevents one. They are not hypothetical failure modes — each is the tidier
+/// implementation someone reaches for first.
+#[derive(Clone, Copy)]
+struct CitationVariant {
+    /// Resolve against every carrier, ignoring the pin — the graph that is
+    /// resolvable *today* rather than the one that was resolvable *then*.
+    unpinned: bool,
+    /// Collapse several carriers to the newest.
+    newest_wins: bool,
+    /// Detect cycles by visitation rather than path membership, which makes a
+    /// diamond look circular.
+    visited_not_path: bool,
+    /// Treat a generation below the coverage floor as having cited nothing.
+    floor_ignored: bool,
+    /// Read the surviving edges of an event that was compacted away.
+    compacted_source_ignored: bool,
+    /// Report every dangle as never-recorded, deleted evidence included.
+    never_qualify_dangle: bool,
+    /// Deduplicate a source's repeated citations.
+    dedupe_citations: bool,
+}
+
+impl CitationVariant {
+    /// Every switch off — the real rule, reimplemented.
+    fn faithful() -> Self {
+        Self {
+            unpinned: false,
+            newest_wins: false,
+            visited_not_path: false,
+            floor_ignored: false,
+            compacted_source_ignored: false,
+            never_qualify_dangle: false,
+            dedupe_citations: false,
+        }
+    }
+}
+
+struct CitationWalk<'a> {
+    store: &'a InMemoryCitations,
+    at: i64,
+    v: CitationVariant,
+    max_depth: usize,
+    max_nodes: usize,
+    floor: i64,
+    spans: Vec<(i64, i64)>,
+    nodes: Vec<ProvenanceNode>,
+    path: Vec<i64>,
+    visited: Vec<i64>,
+    outcome: GraphOutcome,
+}
+
+impl CitationWalk<'_> {
+    fn expand(&mut self, generation: i64, depth: usize, parent: Option<usize>, via: Option<i64>) {
+        let index = self.nodes.len();
+        self.nodes.push(ProvenanceNode {
+            generation,
+            depth,
+            parent,
+            via_ordinal: via,
+            citations: NodeCitations::BelowCoverageFloor,
+        });
+        self.visited.push(generation);
+        let citations = self.citations_of(generation, depth);
+        self.nodes[index].citations = citations;
+    }
+
+    fn citations_of(&mut self, generation: i64, depth: usize) -> NodeCitations {
+        let retained = self.store.is_retained(generation).expect("infallible");
+        if !retained && !self.v.compacted_source_ignored {
+            self.outcome.degraded = true;
+            return NodeCitations::EvidenceCompacted;
+        }
+        if generation <= self.floor && !self.v.floor_ignored {
+            self.outcome.coverage_limited = true;
+            return NodeCitations::BelowCoverageFloor;
+        }
+        let (edges, truncated) = self.store.citations(generation).expect("infallible");
+        if truncated {
+            self.outcome.truncated = true;
+        }
+
+        self.path.push(generation);
+        let mut seen: Vec<String> = Vec::new();
+        let mut branches = Vec::new();
+        for edge in edges {
+            if self.v.dedupe_citations {
+                if seen.contains(&edge.cited_observation_id) {
+                    continue;
+                }
+                seen.push(edge.cited_observation_id.clone());
+            }
+            let pin = if self.v.unpinned { i64::MAX } else { self.at };
+            let carriers = self
+                .store
+                .carriers(&edge.cited_observation_id, pin)
+                .expect("infallible");
+            let resolution = self.resolve(&carriers, pin);
+            if matches!(
+                resolution,
+                CitationResolution::Dangling {
+                    reason: DanglingReason::PossiblyCompacted { .. }
+                }
+            ) {
+                self.outcome.degraded = true;
+            }
+            let continuation = self.continue_into(&resolution, depth, edge.ordinal);
+            branches.push(Branch {
+                ordinal: edge.ordinal,
+                cited_observation_id: edge.cited_observation_id,
+                resolution,
+                continuation,
+            });
+        }
+        self.path.pop();
+        NodeCitations::Indexed {
+            branches,
+            truncated,
+        }
+    }
+
+    fn resolve(&self, carriers: &Carriers, pin: i64) -> CitationResolution {
+        let mut visible: Vec<i64> = carriers
+            .generations
+            .iter()
+            .copied()
+            .filter(|g| *g <= pin)
+            .collect();
+        visible.sort_unstable();
+        if visible.len() > 1 {
+            if self.v.newest_wins {
+                return CitationResolution::Resolved {
+                    target_generation: *visible.last().expect("non-empty"),
+                };
+            }
+            return CitationResolution::Plural {
+                target_generations: visible,
+                truncated: carriers.truncated,
+            };
+        }
+        if let Some(only) = visible.first() {
+            return CitationResolution::Resolved {
+                target_generation: *only,
+            };
+        }
+        let spans: Vec<i64> = self
+            .spans
+            .iter()
+            .filter(|(lo, _)| *lo <= pin)
+            .map(|(lo, _)| *lo)
+            .collect();
+        CitationResolution::Dangling {
+            reason: if spans.is_empty() || self.v.never_qualify_dangle {
+                DanglingReason::NeverVisible
+            } else {
+                DanglingReason::PossiblyCompacted { spans }
+            },
+        }
+    }
+
+    fn continue_into(
+        &mut self,
+        resolution: &CitationResolution,
+        depth: usize,
+        ordinal: i64,
+    ) -> BranchContinuation {
+        let target = match resolution {
+            CitationResolution::Resolved { target_generation } => *target_generation,
+            CitationResolution::Plural { .. } => {
+                return BranchContinuation::NotWalked(NotWalkedReason::Plural)
+            }
+            CitationResolution::Dangling { .. } => {
+                return BranchContinuation::NotWalked(NotWalkedReason::Nothing)
+            }
+        };
+        let loops = if self.v.visited_not_path {
+            self.visited.contains(&target)
+        } else {
+            self.path.contains(&target)
+        };
+        if loops {
+            self.outcome.cycle_detected = true;
+            return BranchContinuation::NotWalked(NotWalkedReason::CycleDetected {
+                back_to_generation: target,
+            });
+        }
+        if depth + 1 > self.max_depth {
+            self.outcome.truncated = true;
+            return BranchContinuation::NotWalked(NotWalkedReason::DepthLimit);
+        }
+        if self.nodes.len() >= self.max_nodes {
+            self.outcome.truncated = true;
+            return BranchContinuation::NotWalked(NotWalkedReason::NodeLimit);
+        }
+        let parent = self.nodes.len().saturating_sub(1);
+        let node = self.nodes.len();
+        self.expand(target, depth + 1, Some(parent), Some(ordinal));
+        BranchContinuation::Walked { node }
+    }
+}
+
+/// Walk with one axis flipped, and render it under every corpus walk.
+fn render_citation_variant(v: CitationVariant) -> String {
+    let store = semantics::citation_corpus();
+    let floor = store.coverage_floor().expect("infallible");
+    let mut out = String::new();
+    for (label, root, at, max_depth, max_nodes) in semantics::citation_walks() {
+        out.push_str(label);
+        out.push('\u{1f}');
+        if root <= floor && !v.floor_ignored {
+            out.push_str(&format!("refused:index_incomplete:{root}:{floor}"));
+        } else {
+            let mut walk = CitationWalk {
+                store: &store,
+                at,
+                v,
+                max_depth,
+                max_nodes,
+                floor,
+                spans: store.compacted_spans().expect("infallible"),
+                nodes: Vec::new(),
+                path: Vec::new(),
+                visited: Vec::new(),
+                outcome: GraphOutcome::default(),
+            };
+            walk.expand(root, 0, None, None);
+            out.push_str(&semantics::render_provenance(&ProvenanceTree {
+                root_generation: root,
+                at_generation: at,
+                nodes: walk.nodes,
+                outcome: walk.outcome,
+                rule_version: semantics::version_of(RuleId::CitationResolution),
+            }));
+        }
+        out.push('\u{1e}');
+    }
+    out
+}
+
+/// **The faithfulness control**, doing the same job it does for lineage: without
+/// it the seven controls below would all pass against a harness that had drifted
+/// from the real walk, and their inequality would mean *"something differs"*
+/// rather than *"this axis differs"*.
+#[test]
+fn the_citation_variant_harness_reproduces_the_real_rule_when_faithful() {
+    assert_eq!(
+        render_citation_variant(CitationVariant::faithful()),
+        corpus_rendering(RuleId::CitationResolution),
+        "the variant harness has drifted from `walk_provenance`; every control \
+         below is measuring the drift rather than the axis it names"
+    );
+}
+
+/// **The historical-correctness axis**, and the single most important control in
+/// this file: resolving against every carrier rather than the visible ones is
+/// exactly the collapse `KIRRA-WM-PROVENANCE-GRAPH-001` exists to forbid.
+#[test]
+fn the_citation_corpus_catches_resolving_against_the_present() {
+    assert_variant_is_caught(
+        RuleId::CitationResolution,
+        "unpinned",
+        &render_citation_variant(CitationVariant {
+            unpinned: true,
+            ..CitationVariant::faithful()
+        }),
+    );
+}
+
+/// Plural collapsed to the newest carrier names one event as the source of a
+/// claim the store cannot attribute — and produces a tidier tree while doing it.
+#[test]
+fn the_citation_corpus_catches_newest_carrier_wins() {
+    assert_variant_is_caught(
+        RuleId::CitationResolution,
+        "newest_wins",
+        &render_citation_variant(CitationVariant {
+            newest_wins: true,
+            ..CitationVariant::faithful()
+        }),
+    );
+}
+
+/// Cycle detection by visitation reports a diamond — two claims resting on one
+/// observation — as malformed provenance.
+#[test]
+fn the_citation_corpus_catches_visitation_used_as_cycle_detection() {
+    assert_variant_is_caught(
+        RuleId::CitationResolution,
+        "visited_not_path",
+        &render_citation_variant(CitationVariant {
+            visited_not_path: true,
+            ..CitationVariant::faithful()
+        }),
+    );
+}
+
+/// Box 4a's floor, consumed. Ignoring it turns *"the index makes no claim"* into
+/// *"this source cited nothing"* — a positive claim about provenance, made
+/// silently, about every source in an un-backfilled store.
+#[test]
+fn the_citation_corpus_catches_an_ignored_coverage_floor() {
+    assert_variant_is_caught(
+        RuleId::CitationResolution,
+        "floor_ignored",
+        &render_citation_variant(CitationVariant {
+            floor_ignored: true,
+            ..CitationVariant::faithful()
+        }),
+    );
+}
+
+/// Reading the edges of a compacted event is the index promoting itself to
+/// evidence — a citation still readable after the hash-covered statement it came
+/// from was deleted.
+#[test]
+fn the_citation_corpus_catches_reading_a_compacted_sources_edges() {
+    assert_variant_is_caught(
+        RuleId::CitationResolution,
+        "compacted_source_ignored",
+        &render_citation_variant(CitationVariant {
+            compacted_source_ignored: true,
+            ..CitationVariant::faithful()
+        }),
+    );
+}
+
+/// Reporting deleted evidence as never-recorded is §11.3's silent rewrite: an
+/// investigation cannot tell *"nothing was known"* from *"we deleted it"*.
+#[test]
+fn the_citation_corpus_catches_an_unqualified_dangle() {
+    assert_variant_is_caught(
+        RuleId::CitationResolution,
+        "never_qualify_dangle",
+        &render_citation_variant(CitationVariant {
+            never_qualify_dangle: true,
+            ..CitationVariant::faithful()
+        }),
+    );
+}
+
+/// A source citing the same observation twice said so twice. Deduplicating
+/// describes a provenance array the hash does not cover.
+#[test]
+fn the_citation_corpus_catches_deduplicated_citations() {
+    assert_variant_is_caught(
+        RuleId::CitationResolution,
+        "dedupe_citations",
+        &render_citation_variant(CitationVariant {
+            dedupe_citations: true,
+            ..CitationVariant::faithful()
+        }),
+    );
 }

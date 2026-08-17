@@ -2550,7 +2550,53 @@ not optional:
    layer; it was found by checking a migration comment that claimed the two were
    already distinguishable, and they were not.)
 
-#### 4b — historical provenance graph
+#### 4b — historical provenance graph — LANDED 2026-08-17
+
+`kirra_world_store::provenance_graph`, reached through
+`WorldStore::provenance_tree(root, at_generation, GraphSpec)`. The resolution
+rule is versioned as `RuleId::CitationResolution` v1, with its own corpus, source
+pin and baseline row, because it decides whether a claim is reported as resting
+on one event, on several, or on nothing that can be found.
+
+Three shape decisions that differ from the sketch below, each recorded rather
+than left to be rediscovered:
+
+* **`GraphOutcome` is a struct of four independent facts**, not an enum of
+  outcomes. `Truncated` and `CycleDetected` are named below as distinct, and a
+  walk can legitimately be both at once — plus degraded, plus coverage-limited.
+  An enum forces a precedence among them and whichever arm loses is invisible;
+  two booleans are more distinct than two arms of which only one survives.
+* **A plural citation is reported, not expanded.** Walking every carrier is the
+  other non-choosing option and is rejected: the tree's meaning is that every
+  walked edge is a *determinate* provenance link, and expanding an ambiguous one
+  puts evidence under a claim without being able to say it belongs there.
+* **`Dangling` is qualified by whether a compacted span could have carried the
+  id** (`NeverVisible` / `PossiblyCompacted`). Dangling-because-never-existed and
+  dangling-because-deleted are identical at the node and completely different
+  facts in an incident reconstruction, and the qualification is a **necessary
+  condition** on the same footing as `Resolution::Degraded` — it may over-report,
+  it may never under-report.
+
+**The finding worth carrying forward.** The load-bearing T1/T2 test passed
+against a rule with its pin filter *deleted*, and so did every other test,
+because both shipped lookups filter by the pin in their own query. The
+composition was correct while the rule had stopped being — a rule one caller away
+from wrong, with a green suite. Fixed by an adversarial lookup that violates the
+seam's contract on purpose
+(`a_lookup_that_ignores_the_pin_cannot_make_the_rule_dishonest`). The general
+shape: **when a judgement is enforced at two layers, the tests prove the
+composition and say nothing about either layer**, and the only way to test the
+inner one is a deliberately faithless outer one. It applies anywhere this
+codebase re-applies a filter defensively, `select_lineage` included.
+
+A second, smaller one: `ci/check_world_semantics.py` **silently skipped** a
+declaration row whose digests were not 64 hex characters — the row was invisible
+to every check rather than failing one, and the gate reported OK while listing
+every rule except the one being added. Found by hitting it with `"TBD"`
+placeholders mid-development. Closed by counting row openers and refusing a
+count mismatch, with a self-test.
+
+The sketch this box was built to, unchanged:
 
 Where resolution happens. At pinned generation *G*, each edge resolves against
 the events visible at *G* into one of three **first-class** outcomes:
@@ -2591,7 +2637,201 @@ T2: an event carrying observation_id X appended → a current query resolves X
 and its plural counterpart: a query before the second row resolves one; after it,
 reports plural.
 
+#### `KIRRA-WM-EXPLAIN-PLACEMENT-001` — RULED 2026-08-17
+
+> **Explanation is computed on the Kirra World side of a process boundary and
+> exported as a bounded, immutable, presentation-only artifact through a
+> World-independent transport/type contract. Mick renders that artifact but does
+> not query Kirra World, resolve provenance, or alter its evidentiary meaning.**
+
+§9 recorded that a consumer *"needs a host that consumes world knowledge and
+never feeds the checker"*, that no such crate exists, and that this was **an open
+placement decision, not a task**. This closes it — without reopening Fence B,
+which was the tempting move and the wrong one. `kirra-mick` acquiring a renderer
+that depends on `kirra-world*` reconstructs `kirra-sidecars → kirra-mick → … →
+kirra-world*`, and Fence B would be *correct* to refuse it. Superseding an ADR to
+make `Explain` convenient is not a reason.
+
+```text
+Kirra World / world-service
+        │  bounded ProvenanceTree
+        ▼
+Explanation projection (World-side)
+        │  neutral artifact — no World types, no queryable handles
+        ▼
+Mick
+        │
+        ▼ human-readable rendering
+```
+
+A neutral crate — `kirra-explain-types`, **zero** `kirra-world*` dependencies —
+is depended on by both sides. There is no Cargo arrow between Mick and
+`kirra-world-service`; runtime delivery is IPC.
+
+**The clause that makes the boundary real rather than nominal:** Mick receives
+*resolved presentation data*, not identifiers it can query World with. A
+generation number is a query handle — `provenance_tree(root, at)` takes exactly
+those — so an artifact carrying one lets Mick reconstruct the forbidden
+dependency dynamically, at which point the process boundary exists on paper only.
+Digests are carried (citable, opaque, not a query key); coordinates are not.
+
+**Verified against the fence rather than assumed**, because the whole ruling
+rests on the neutral crate being neutral in the sense the gate actually
+implements:
+
+* `is_world_package` is `name in {kirra-world, kirra-world-store,
+  kirra-world-service} or name.startswith("kirra-world")`, so
+  `kirra-explain-types` is not a World package for **Fence B**, and Mick may
+  depend on it.
+* `FENCE_A_EXTRA_PACKAGES` — used **only** by `check_2_world_outbound`, and
+  deliberately not by `is_world_package` — exists for *"Kirra World work without
+  claiming the namespace"*. That is exactly what this crate is, so listing it
+  there gives it **Fence A** coverage (it can never grow an actuation edge)
+  without giving it Fence B World-ness.
+
+The separation the ruling needs is therefore a distinction the fence already
+draws, not a hole in it.
+
+**The residual, stated rather than left implicit.** If `kirra-explain-types`
+later gained a `kirra-world*` dependency, Fence B *would* still fire — but only
+transitively, via `kirra-sidecars`' `CorridorSource` impl and the closure walk,
+which is a chain of other facts rather than the invariant itself. The invariant
+this ruling needs is direct: **`kirra-explain-types` depends on no `kirra-world*`
+package.** It is asserted as its own check rather than inferred.
+
 #### 4c — `Explain` / Mick rendering
+
+Split into two responsibilities under the ruling above:
+
+* **4c.1 — World-side projection.** `ProvenanceTree` → neutral
+  `ExplanationArtifact`. Deterministic, no LLM wording.
+* **4c.2 — Mick rendering.** Artifact → natural language. Mick chooses wording
+  and **may not change the artifact's semantics.**
+
+Mick's rendering obligations, pinned:
+
+| Artifact state | Rendering must not |
+|---|---|
+| `Dangling` | become *"came from X"* |
+| `Plural` | pick one carrier |
+| `Degraded` | omit the disclosure |
+| `CycleDetected` | look like ordinary truncation |
+| `Truncated` | omit that more evidence exists |
+| historical | drift out of historical tense |
+| generation-pinned | silently use current evidence |
+
+The closing test: hand Mick artifacts for `Resolved`, `Dangling`, `Plural`,
+`Degraded`, `CycleDetected` and `Truncated`, then mutation-test each semantic
+distinction. A renderer that turns a dangling historical citation into a
+confident current statement must red.
+
+**LANDED 2026-08-17** — `kirra_mick::explain_render`, consuming only
+`kirra-explain-types`. Deterministic templates, not the model: a paraphrase of a
+*proven* artifact is reasonable later, but a model cannot be the mechanism that
+proves the six states stay distinct, because the property is *"this sentence does
+not assert something the artifact denies"* and that is not assertable about a
+sampled distribution. A paraphrase layer, if added, goes after this and inherits
+these tests.
+
+Assertions are on **published phrase constants**, not on sentences, so rewording
+is free and swapping which phrase a state gets is a mutation. Each state asserts
+its own phrase present AND the other states' phrases absent — the negative half
+is the load-bearing half, because the collapse is not silence, it is a confident
+sentence sitting next to an honest one.
+
+**The combined-artifact test earned its place twice, and neither time was the
+predicted one.** It was requested to catch a renderer that handles whichever
+caveat its template reaches first — the enum-precedence mistake `GraphOutcome`
+avoided, arriving two layers later. What it actually caught:
+
+1. **An overloaded phrase constant.** `PHRASE_RESTED_ON` was used both as
+   confident attribution (*"it rested on X"*) and neutrally (*"what it rested on
+   is unknown"*), so every `never_says(PHRASE_RESTED_ON)` in the suite was
+   measuring an overloaded token rather than the property it named. The combined
+   artifact was the first case putting a `NotIndexed` node and a `Dangling`
+   branch in one rendering. The unknown-evidence sentences now say *"what it
+   cited is unknown"*.
+2. **A single-flag test reading the wrong source.** Suppressing the truncation
+   disclosure entirely left `truncation_says_a_bound_was_reached…` GREEN, because
+   its branch stopped at `DepthLimit`, whose stop sentence carries the same two
+   phrases. Only the combined test failed. The single-flag test now stops at
+   `NothingToFollow`, so the phrases can only have come from the disclosure.
+
+Both are the session's recurring lesson in a third costume: **a control is not
+evidence until you have shown it changes when the thing it tests changes.**
+
+**A fourth costume, found by CI rather than by us.** The orphan-core gate
+(`ci/check_orphan_cores.py`) failed on `kirra_world_service::explain` — a
+crate-root `pub mod` with no non-test consumer. It was right, and the honest
+answer is that Tier 4 built **both ends of the explanation boundary and not the
+wire between them**: 4c.1 projects, 4c.2 renders, and nothing carries an artifact
+from one to the other. Both modules are baselined with that justification rather
+than wired, because inventing a route to satisfy a gate is inventing the
+consumer — the refusal the `same_as_adjudication` entry already records. The
+transport retires **both** entries together.
+
+The instructive half is why the gate flagged only ONE of the two. Mick's renderer
+exported a free `pub fn narrate`, and an unrelated binary
+(`kirra-sidecars/src/bin/speech_shell.rs`) defines and calls its OWN private
+`fn narrate`; the gate's textual scan credited that as consumption, so the
+renderer read as wired while being exactly as orphaned as its twin. This is the
+`same_as_candidate` collision bug in a new position: that fix was **supplier**-side
+(which of a module's items are importable at all) and cannot reach a collision on
+the **consumer** side. The function is now `render_explanation`, so the baseline
+records a real state instead of the gate being credulous. The gate's blind spot
+itself is left standing and unfixed here — tightening consumer-side matching
+across 251 modules is not a change to make in passing at the end of a tier.
+
+Which is the lesson once more, now about a control we did not write: **a gate
+that passes has told you nothing until you know which reference made it pass.**
+
+#### A fifth, found by the reviewer rather than by any gate
+
+An automated review of 4b raised three things. All three were real, and the first
+was a defect no control in this repository was positioned to catch.
+
+**The walk attached later branches to the wrong parent.** `continue_into` took the
+parent as `self.nodes.len() - 1` — "the node most recently appended" — which is
+the citing node only until some branch descends. After that, the tail is somewhere
+inside the previous branch's subtree, and every later sibling was hung off it. The
+probe that established it is worth stating exactly, because the corruption is
+visible without any semantic argument: a node at **depth 1** whose parent sat at
+**depth 2**. A tree whose own depths contradict its own edges.
+
+This is the tier's subject matter turned on the tier itself. 4b exists so an
+explanation cannot attribute a claim to evidence that did not support it; a
+mis-parented node does precisely that, and the renderer downstream would have
+narrated it in confident prose. The fix threads the expanding node's real index
+down instead of guessing it. Two tests now hold it: the specific sibling case, and
+the generic invariant — **every child is exactly one level below its parent** —
+which is the form that catches a misattachment in any shape, including ones no one
+thought to write a case for.
+
+The corpus digest did not move, because the corpus encodes citation *resolution*
+and never encoded *topology*. That is the honest reading of why this passed: the
+rule was pinned against a behaviour the rule did not specify. Re-pinned per the
+gate's own convention (source moved, corpus did not), with the under-specification
+noted here rather than smoothed over.
+
+The other two: `set_provenance_edges_floor_for_test` was the only `_for_test` hook
+in the crate not behind `#[cfg(any(test, feature = "test-support"))]`, so a
+coverage-floor mutator was compiled into production builds — gated. And
+`provenance_tree`'s boundedness rationale claimed **no** dimension grows with store
+size, which is false: `compacted_spans()` scans `compaction_citations` unlimited,
+once per call. The rationale is corrected rather than the code, deliberately —
+the bounded form is a `LIMIT n+1` with a truncation flag (safe, since it can only
+truncate an already non-empty list and so can never flip `PossiblyCompacted` back
+to `NeverVisible`), but it touches the pinned region and the `CitationLookup`
+seam, and folding that into the round that found it is how a small fix becomes an
+unreviewed one.
+
+**The lesson this one adds:** the other four were controls that did not measure
+what they claimed. This was a property **no control claimed at all** — the suite
+asserted what the tree *said* and never that the tree *held together*. Structural
+invariants are cheap and catch what case-by-case assertions cannot, because they
+do not depend on anyone having imagined the failing shape.
+
+The original sketch:
 
 Only once 4b's type exists. Mick receives typed lineage and turns it into
 language; **Mick does not discover provenance, and does not repair it.**
@@ -2680,6 +2920,29 @@ too — which takes `kirra-mick`, the "LLM crate" of the same list, with it.
 So the consumer needs a host that consumes world knowledge and **never feeds the
 checker**. No such crate exists today, and the tier plan does not provide for
 one. That is an open placement decision, not a task.
+
+> **Superseded 2026-08-17 — and it was already stale when it was written down
+> here.** Two hosts now exist, both with placement rulings and mechanical
+> capability gates, and the pattern they share is the answer this paragraph said
+> was missing:
+>
+> * `kirra-proposal-context` (`KIRRA-WM-CONSUMER-PLACEMENT-001`) — Tier 2.5's
+>   sanctioned consumer, guarded by `ci/check_proposal_context_symbolic.py`.
+> * `kirra-explain-types` + the World-side projection
+>   (`KIRRA-WM-EXPLAIN-PLACEMENT-001`) — Tier 4's, guarded by
+>   `ci/check_explain_artifact_neutral.py`.
+>
+> The technique both use, which is what makes the placement work rather than the
+> naming: **a seam is made safe by having nowhere to put the dangerous thing.**
+> For the proposal seam the dangerous thing is a checker bound and the ban is on
+> numeric magnitudes; for the explanation seam it is a query handle and the ban
+> is on Kirra World coordinates. Neither relies on the consuming crate
+> remembering to behave.
+>
+> The paragraph is left standing rather than rewritten because the reasoning
+> above it — Fence B refusing every doer-side host, and *why* it was right to —
+> is what produced both rulings. Deleting the dead end would take the argument
+> with it.
 
 **What the attempt produced anyway**, because the falsification §9 predicted did
 happen — twice:

@@ -88,6 +88,7 @@ pub mod entity_projection;
 pub mod lineage;
 pub mod projection;
 pub mod provenance_edges;
+pub mod provenance_graph;
 pub mod retention_driver;
 pub mod retention_sweeper;
 pub mod schema;
@@ -261,6 +262,21 @@ pub enum StoreError {
     /// gives about lineage pages, and the error type is shared rather than
     /// duplicated because it is the same decision about the same kind of bound.
     CitationPageSpec(lineage::PageSpecError),
+    /// A provenance walk was asked to explain a generation the citation index
+    /// does not cover — Tier 4 box 4b.
+    ///
+    /// **Refused rather than answered**, and that asymmetry is the whole point
+    /// of box 4a's floor. Below it an empty edge set is what an un-backfilled
+    /// store makes every source look like, so returning a tree with no
+    /// citations would be a positive claim about this event's provenance that
+    /// the index does not support. `backfill_provenance_edges` is the operator
+    /// step that turns the refusal into an answer.
+    ProvenanceIndexIncomplete {
+        /// The root generation that was asked about.
+        requested: i64,
+        /// The highest generation the index does not cover.
+        floor: i64,
+    },
     /// A [`SubjectRef::Candidate`] was offered as a label.
     ///
     /// Refused by ruling `KIRRA-WM-CANDIDATE-ID-001` (2026-08-08), not by
@@ -394,6 +410,10 @@ impl std::fmt::Display for StoreError {
                 write!(f, "corrupt stored row: {detail}")
             }
             Self::CitationPageSpec(e) => write!(f, "citation page: {e}"),
+            Self::ProvenanceIndexIncomplete { requested, floor } => write!(
+                f,
+                "provenance index does not cover generation {requested} (floor {floor})"
+            ),
             Self::LlmCannotConfirm => write!(
                 f,
                 "writer_class=llm_candidate may not write claim_status=confirmed \
@@ -1588,6 +1608,27 @@ impl WorldStore {
         }
     }
 
+    /// Force the coverage floor, so a test can reproduce a migrated store
+    /// without one.
+    ///
+    /// The state this creates — events present, index not known to cover them —
+    /// is the whole reason the floor exists, and it is otherwise reachable only
+    /// by opening a v6 database. A test that cannot construct it cannot prove
+    /// the refusal is real.
+    ///
+    /// # Errors
+    ///
+    /// [`StoreError::Sqlite`] if the meta row cannot be written.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn set_provenance_edges_floor_for_test(&self, floor: i64) -> Result<(), StoreError> {
+        self.conn.execute(
+            "INSERT INTO world_store_meta (key, value) VALUES (?1, ?2)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            params![PROVENANCE_EDGES_FLOOR_KEY, floor.to_string()],
+        )?;
+        Ok(())
+    }
+
     /// **Record an identity adjudication.** The single door for §14.3's
     /// `EntityMerged` / `EntitySplit` / `EntityRetired` / `EntityEstablished`.
     ///
@@ -1988,6 +2029,44 @@ impl WorldStore {
         let truncated = edges.len() > limit;
         edges.truncate(limit);
         Ok(provenance_edges::CitationPage { edges, truncated })
+    }
+
+    /// **Explain one event's provenance at a historical coordinate** — Tier 4
+    /// box 4b.
+    ///
+    /// Walks the citation index from `root_generation`, resolving each cited
+    /// observation id against the events visible **at `at_generation`** into
+    /// [`provenance_graph::CitationResolution`]. Two pins over the same root are
+    /// two different and equally correct trees; that is the property the whole
+    /// box exists to have, and the reason resolution is not a stored column.
+    ///
+    /// Bounded in three dimensions — depth, node count, and citations per node —
+    /// which is why `spec` is a validated type rather than a pair of numbers.
+    ///
+    /// # Errors
+    ///
+    /// [`StoreError::ProvenanceIndexIncomplete`] when the root is at or below
+    /// the coverage floor, or [`StoreError::Sqlite`] if the store cannot be
+    /// read.
+    pub fn provenance_tree(
+        &self,
+        root_generation: i64,
+        at_generation: i64,
+        spec: provenance_graph::GraphSpec,
+    ) -> Result<provenance_graph::ProvenanceTree, StoreError> {
+        provenance_graph::walk_provenance(
+            self,
+            root_generation,
+            at_generation,
+            spec,
+            semantics::version_of(semantics::RuleId::CitationResolution),
+        )
+        .map_err(|e| match e {
+            provenance_graph::WalkError::IndexIncomplete { requested, floor } => {
+                StoreError::ProvenanceIndexIncomplete { requested, floor }
+            }
+            provenance_graph::WalkError::Lookup(err) => err,
+        })
     }
 
     /// Install the entity projection's DDL, lazily.
@@ -5113,4 +5192,72 @@ pub(crate) enum IdentityCut {
     TxnTimeAtMost(i64),
     /// Generation-pinned: adjudications at or below this log position.
     GenerationAtMost(i64),
+}
+
+/// **The store as a provenance walk's storage seam** — Tier 4 box 4b.
+///
+/// Five narrow reads and no judgement, which is the split
+/// [`provenance_graph::CitationLookup`] documents. Every filter here has a
+/// counterpart in the walk: the `generation <= at_generation` bound is applied
+/// in SQL as an index optimisation and re-applied by the rule, so a mistake in
+/// this impl narrows what the walk sees but cannot change what it *decides*.
+impl provenance_graph::CitationLookup for WorldStore {
+    type Error = StoreError;
+
+    fn coverage_floor(&self) -> Result<i64, Self::Error> {
+        self.provenance_edges_floor()
+    }
+
+    fn is_retained(&self, generation: i64) -> Result<bool, Self::Error> {
+        Ok(self.conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM world_events WHERE generation = ?1)",
+            params![generation],
+            |r| r.get::<_, i64>(0),
+        )? == 1)
+    }
+
+    fn citations(
+        &self,
+        generation: i64,
+    ) -> Result<(Vec<provenance_edges::CitationEdge>, bool), Self::Error> {
+        let page = self.citations_of(generation, provenance_edges::MAX_CITATIONS_PAGE, None)?;
+        Ok((page.edges, page.truncated))
+    }
+
+    fn carriers(
+        &self,
+        observation_id: &str,
+        at_generation: i64,
+    ) -> Result<provenance_graph::Carriers, Self::Error> {
+        // One over the ceiling, for `citations_of`'s reason: a set of exactly
+        // MAX_CARRIERS is complete, and inferring truncation from the length
+        // would report it cut short.
+        let probe = provenance_graph::MAX_CARRIERS.saturating_add(1);
+        let mut stmt = self.conn.prepare(
+            "SELECT generation FROM world_events
+             WHERE observation_id = ?1 AND generation <= ?2
+             ORDER BY generation ASC LIMIT ?3",
+        )?;
+        let mapped = stmt.query_map(params![observation_id, at_generation, probe as i64], |r| {
+            r.get::<_, i64>(0)
+        })?;
+        let mut generations = Vec::new();
+        for row in mapped {
+            generations.push(row?);
+        }
+        let truncated = generations.len() > provenance_graph::MAX_CARRIERS;
+        generations.truncate(provenance_graph::MAX_CARRIERS);
+        Ok(provenance_graph::Carriers {
+            generations,
+            truncated,
+        })
+    }
+
+    fn compacted_spans(&self) -> Result<Vec<(i64, i64)>, Self::Error> {
+        Ok(self
+            .citations()?
+            .into_iter()
+            .map(|c| (c.lo_generation, c.hi_generation))
+            .collect())
+    }
 }
