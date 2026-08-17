@@ -68,6 +68,10 @@
       "class": "operational",
       "why": "The one-time scan that fills the v6 reverse index on a migrated store. Deliberately a full scan and deliberately NOT on any request path \u2014 an explicit operational call rather than work hidden in `open`, so the cost lands where an operator can see it. This is exactly the trade box 3d is for: one operational scan buys bounded interactive reads."
     },
+    "backfill_provenance_edges": {
+      "class": "operational",
+      "why": "Tier 4 box 4a. The one-time scan that fills the v7 citation index on a migrated store, and drops the coverage floor to 0. A full log scan by design, and deliberately NOT on any request path -- an explicit operational call rather than work hidden in `open`, exactly as `backfill_adjudication_affects`."
+    },
     "candidates": {
       "class": "unbounded",
       "why": "Every candidate claim ever proposed about a subject, no page. The same shape as `history` and unbounded for the same reason -- an LLM proposing repeatedly grows this without limit."
@@ -79,6 +83,10 @@
     "citations": {
       "class": "unbounded",
       "why": "Every compaction citation in the store. Accumulates for the store's life."
+    },
+    "citations_of": {
+      "class": "bounded",
+      "why": "Tier 4 box 4a. Bounded by the ARGUMENT: `limit`, refused above MAX_CITATIONS_PAGE and at 0, applied as SQL LIMIT with one extra probe row so truncation is reported rather than inferred. It is bounded BECAUSE it was made so -- nothing else bounds it. No schema constraint, no domain rule and no other argument limits how many observations one event may cite, so the whole-array read this replaced was structurally unbounded while looking fine at the API: the exact shape of the three defects in the header. Classifying it `unbounded` and leaving 4b to bound it would have been the 'move the unbounded call behind another helper' move 3d ruled out."
     },
     "compact_range": {
       "class": "operational",
@@ -203,6 +211,10 @@
     "projection_state_digest": {
       "class": "operational",
       "why": "Checkpoint metadata."
+    },
+    "provenance_edges_floor": {
+      "class": "bounded",
+      "why": "Tier 4 box 4a. One `world_store_meta` row by primary key. The fail-closed fallback for an absent/unparseable value is `MAX(generation)`, an index max rather than a scan. Constant result size -- one integer."
     },
     "read_at_generation": {
       "class": "unbounded",
