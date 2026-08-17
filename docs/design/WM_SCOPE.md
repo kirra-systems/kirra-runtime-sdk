@@ -2760,6 +2760,31 @@ avoided, arriving two layers later. What it actually caught:
 Both are the session's recurring lesson in a third costume: **a control is not
 evidence until you have shown it changes when the thing it tests changes.**
 
+**A fourth costume, found by CI rather than by us.** The orphan-core gate
+(`ci/check_orphan_cores.py`) failed on `kirra_world_service::explain` — a
+crate-root `pub mod` with no non-test consumer. It was right, and the honest
+answer is that Tier 4 built **both ends of the explanation boundary and not the
+wire between them**: 4c.1 projects, 4c.2 renders, and nothing carries an artifact
+from one to the other. Both modules are baselined with that justification rather
+than wired, because inventing a route to satisfy a gate is inventing the
+consumer — the refusal the `same_as_adjudication` entry already records. The
+transport retires **both** entries together.
+
+The instructive half is why the gate flagged only ONE of the two. Mick's renderer
+exported a free `pub fn narrate`, and an unrelated binary
+(`kirra-sidecars/src/bin/speech_shell.rs`) defines and calls its OWN private
+`fn narrate`; the gate's textual scan credited that as consumption, so the
+renderer read as wired while being exactly as orphaned as its twin. This is the
+`same_as_candidate` collision bug in a new position: that fix was **supplier**-side
+(which of a module's items are importable at all) and cannot reach a collision on
+the **consumer** side. The function is now `render_explanation`, so the baseline
+records a real state instead of the gate being credulous. The gate's blind spot
+itself is left standing and unfixed here — tightening consumer-side matching
+across 251 modules is not a change to make in passing at the end of a tier.
+
+Which is the lesson once more, now about a control we did not write: **a gate
+that passes has told you nothing until you know which reference made it pass.**
+
 The original sketch:
 
 Only once 4b's type exists. Mick receives typed lineage and turns it into

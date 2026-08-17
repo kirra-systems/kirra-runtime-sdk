@@ -29,9 +29,10 @@ use kirra_explain_types::{
     EXPLANATION_ARTIFACT_VERSION,
 };
 use kirra_mick::explain_render::{
-    narrate, PHRASE_AS_OF, PHRASE_CANNOT_SAY_WHICH, PHRASE_CIRCULAR, PHRASE_COVERAGE_REDUCED,
-    PHRASE_EVIDENCE_REMOVED, PHRASE_LIMIT_REACHED, PHRASE_MAY_BE_DELETED, PHRASE_MORE_EVIDENCE,
-    PHRASE_NOT_INDEXED, PHRASE_RECORD_DELETED, PHRASE_RESTED_ON, PHRASE_UNRESOLVED,
+    render_explanation, PHRASE_AS_OF, PHRASE_CANNOT_SAY_WHICH, PHRASE_CIRCULAR,
+    PHRASE_COVERAGE_REDUCED, PHRASE_EVIDENCE_REMOVED, PHRASE_LIMIT_REACHED, PHRASE_MAY_BE_DELETED,
+    PHRASE_MORE_EVIDENCE, PHRASE_NOT_INDEXED, PHRASE_RECORD_DELETED, PHRASE_RESTED_ON,
+    PHRASE_UNRESOLVED,
 };
 
 /// Labels deliberately free of digits, so the "introduces no quantity" test can
@@ -121,7 +122,7 @@ fn never_says(text: &str, phrase: &str) {
 /// `Resolved` is the ONE state allowed to attribute confidently.
 #[test]
 fn resolved_states_the_evidence_confidently() {
-    let text = narrate(&artifact(
+    let text = render_explanation(&artifact(
         recorded(resolved(), stopped(StopReason::NothingToFollow)),
         Tense::Current,
         Completeness::default(),
@@ -139,7 +140,7 @@ fn resolved_states_the_evidence_confidently() {
 /// could not find — a confident sentence about something that is not there.
 #[test]
 fn dangling_says_it_could_not_be_resolved_and_never_attributes() {
-    let text = narrate(&artifact(
+    let text = render_explanation(&artifact(
         recorded(
             dangling(DanglingReason::NeverRecorded),
             stopped(StopReason::NothingToFollow),
@@ -161,7 +162,7 @@ fn dangling_says_it_could_not_be_resolved_and_never_attributes() {
 /// The qualification inside dangling survives into the language.
 #[test]
 fn a_possibly_deleted_dangle_discloses_that_deletion_could_explain_it() {
-    let text = narrate(&artifact(
+    let text = render_explanation(&artifact(
         recorded(
             dangling(DanglingReason::PossiblyDeleted),
             stopped(StopReason::NothingToFollow),
@@ -180,7 +181,7 @@ fn a_possibly_deleted_dangle_discloses_that_deletion_could_explain_it() {
 /// refused two layers down, and it would look like a better answer.
 #[test]
 fn plural_says_several_matched_and_never_picks_one() {
-    let text = narrate(&artifact(
+    let text = render_explanation(&artifact(
         recorded(plural(3), stopped(StopReason::Ambiguous)),
         Tense::Current,
         Completeness::default(),
@@ -196,7 +197,7 @@ fn plural_says_several_matched_and_never_picks_one() {
 /// not saying so reads as complete.
 #[test]
 fn degraded_discloses_that_evidence_was_removed() {
-    let text = narrate(&artifact(
+    let text = render_explanation(&artifact(
         NodeEvidence::DeletedByCompaction,
         Tense::Current,
         Completeness {
@@ -214,7 +215,7 @@ fn degraded_discloses_that_evidence_was_removed() {
 /// one and nothing fixes the other.
 #[test]
 fn coverage_limited_discloses_an_unindexed_gap_distinctly_from_deletion() {
-    let text = narrate(&artifact(
+    let text = render_explanation(&artifact(
         NodeEvidence::NotIndexed,
         Tense::Current,
         Completeness {
@@ -233,7 +234,7 @@ fn coverage_limited_discloses_an_unindexed_gap_distinctly_from_deletion() {
 /// one says raise the limit, the other says the evidence is malformed.
 #[test]
 fn a_cycle_is_named_malformed_and_never_reads_as_truncation() {
-    let text = narrate(&artifact(
+    let text = render_explanation(&artifact(
         recorded(resolved(), stopped(StopReason::Cycle)),
         Tense::Current,
         Completeness {
@@ -261,7 +262,7 @@ fn a_cycle_is_named_malformed_and_never_reads_as_truncation() {
 /// own job again.
 #[test]
 fn truncation_says_a_bound_was_reached_and_that_more_evidence_exists() {
-    let text = narrate(&artifact(
+    let text = render_explanation(&artifact(
         recorded(resolved(), stopped(StopReason::NothingToFollow)),
         Tense::Current,
         Completeness {
@@ -284,7 +285,7 @@ fn truncation_says_a_bound_was_reached_and_that_more_evidence_exists() {
 /// the reader has heard anything that sounds like a present-tense fact.
 #[test]
 fn a_historical_artifact_is_narrated_in_the_past() {
-    let text = narrate(&artifact(
+    let text = render_explanation(&artifact(
         recorded(resolved(), stopped(StopReason::NothingToFollow)),
         Tense::Historical {
             pinned_at: label("nine fourteen on the seventeenth"),
@@ -300,7 +301,7 @@ fn a_historical_artifact_is_narrated_in_the_past() {
 
 #[test]
 fn a_current_artifact_is_narrated_in_the_present() {
-    let text = narrate(&artifact(
+    let text = render_explanation(&artifact(
         recorded(resolved(), stopped(StopReason::NothingToFollow)),
         Tense::Current,
         Completeness::default(),
@@ -358,7 +359,7 @@ fn all_four_incompleteness_facts_survive_together_with_the_tense() {
         },
     };
 
-    let text = narrate(&artifact).text();
+    let text = render_explanation(&artifact).text();
 
     // All four, each in its own words.
     says(&text, PHRASE_EVIDENCE_REMOVED);
@@ -387,7 +388,7 @@ fn all_four_incompleteness_facts_survive_together_with_the_tense() {
 /// from.
 #[test]
 fn the_rendering_introduces_no_quantity_the_artifact_does_not_carry() {
-    let text = narrate(&artifact(
+    let text = render_explanation(&artifact(
         recorded(plural(4), stopped(StopReason::Ambiguous)),
         Tense::Historical {
             pinned_at: label("nine fourteen on the seventeenth"),
@@ -418,7 +419,7 @@ fn an_empty_artifact_says_so_rather_than_narrating_nothing_as_something() {
         nodes: vec![],
         completeness: Completeness::default(),
     };
-    let text = narrate(&empty).text();
+    let text = render_explanation(&empty).text();
 
     says(&text, "nothing recorded to explain");
     never_says(&text, PHRASE_RESTED_ON);
@@ -430,7 +431,7 @@ fn an_empty_artifact_says_so_rather_than_narrating_nothing_as_something() {
 /// distinction box 4a's coverage floor exists for, surfacing as language.
 #[test]
 fn cited_nothing_reads_differently_from_citations_unknown() {
-    let cited_nothing = narrate(&artifact(
+    let cited_nothing = render_explanation(&artifact(
         NodeEvidence::Recorded {
             branches: vec![],
             more_citations: false,
@@ -439,7 +440,7 @@ fn cited_nothing_reads_differently_from_citations_unknown() {
         Completeness::default(),
     ))
     .text();
-    let unknown = narrate(&artifact(
+    let unknown = render_explanation(&artifact(
         NodeEvidence::NotIndexed,
         Tense::Current,
         Completeness {

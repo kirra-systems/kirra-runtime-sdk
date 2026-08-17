@@ -147,7 +147,7 @@ impl Narration {
 /// produces the same sentences, which is what lets the obligations be tested at
 /// all.
 #[must_use]
-pub fn narrate(artifact: &ExplanationArtifact) -> Narration {
+pub fn render_explanation(artifact: &ExplanationArtifact) -> Narration {
     let mut sentences = Vec::new();
 
     let Some(root) = artifact.root() else {
@@ -239,7 +239,7 @@ fn stop_sentence(reason: StopReason) -> Option<String> {
     match reason {
         // Nothing to add: the branch state already said the citation dangles or
         // is plural, and a second sentence saying "so Kirra stopped" would
-        // narrate the walk rather than the evidence.
+        // render_explanation the walk rather than the evidence.
         StopReason::NothingToFollow | StopReason::Ambiguous => None,
         StopReason::DepthLimit | StopReason::NodeLimit => Some(format!(
             "Kirra did not follow that further because {PHRASE_LIMIT_REACHED}; \
