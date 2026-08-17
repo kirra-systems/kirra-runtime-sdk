@@ -2637,7 +2637,95 @@ T2: an event carrying observation_id X appended → a current query resolves X
 and its plural counterpart: a query before the second row resolves one; after it,
 reports plural.
 
+#### `KIRRA-WM-EXPLAIN-PLACEMENT-001` — RULED 2026-08-17
+
+> **Explanation is computed on the Kirra World side of a process boundary and
+> exported as a bounded, immutable, presentation-only artifact through a
+> World-independent transport/type contract. Mick renders that artifact but does
+> not query Kirra World, resolve provenance, or alter its evidentiary meaning.**
+
+§9 recorded that a consumer *"needs a host that consumes world knowledge and
+never feeds the checker"*, that no such crate exists, and that this was **an open
+placement decision, not a task**. This closes it — without reopening Fence B,
+which was the tempting move and the wrong one. `kirra-mick` acquiring a renderer
+that depends on `kirra-world*` reconstructs `kirra-sidecars → kirra-mick → … →
+kirra-world*`, and Fence B would be *correct* to refuse it. Superseding an ADR to
+make `Explain` convenient is not a reason.
+
+```text
+Kirra World / world-service
+        │  bounded ProvenanceTree
+        ▼
+Explanation projection (World-side)
+        │  neutral artifact — no World types, no queryable handles
+        ▼
+Mick
+        │
+        ▼ human-readable rendering
+```
+
+A neutral crate — `kirra-explain-types`, **zero** `kirra-world*` dependencies —
+is depended on by both sides. There is no Cargo arrow between Mick and
+`kirra-world-service`; runtime delivery is IPC.
+
+**The clause that makes the boundary real rather than nominal:** Mick receives
+*resolved presentation data*, not identifiers it can query World with. A
+generation number is a query handle — `provenance_tree(root, at)` takes exactly
+those — so an artifact carrying one lets Mick reconstruct the forbidden
+dependency dynamically, at which point the process boundary exists on paper only.
+Digests are carried (citable, opaque, not a query key); coordinates are not.
+
+**Verified against the fence rather than assumed**, because the whole ruling
+rests on the neutral crate being neutral in the sense the gate actually
+implements:
+
+* `is_world_package` is `name in {kirra-world, kirra-world-store,
+  kirra-world-service} or name.startswith("kirra-world")`, so
+  `kirra-explain-types` is not a World package for **Fence B**, and Mick may
+  depend on it.
+* `FENCE_A_EXTRA_PACKAGES` — used **only** by `check_2_world_outbound`, and
+  deliberately not by `is_world_package` — exists for *"Kirra World work without
+  claiming the namespace"*. That is exactly what this crate is, so listing it
+  there gives it **Fence A** coverage (it can never grow an actuation edge)
+  without giving it Fence B World-ness.
+
+The separation the ruling needs is therefore a distinction the fence already
+draws, not a hole in it.
+
+**The residual, stated rather than left implicit.** If `kirra-explain-types`
+later gained a `kirra-world*` dependency, Fence B *would* still fire — but only
+transitively, via `kirra-sidecars`' `CorridorSource` impl and the closure walk,
+which is a chain of other facts rather than the invariant itself. The invariant
+this ruling needs is direct: **`kirra-explain-types` depends on no `kirra-world*`
+package.** It is asserted as its own check rather than inferred.
+
 #### 4c — `Explain` / Mick rendering
+
+Split into two responsibilities under the ruling above:
+
+* **4c.1 — World-side projection.** `ProvenanceTree` → neutral
+  `ExplanationArtifact`. Deterministic, no LLM wording.
+* **4c.2 — Mick rendering.** Artifact → natural language. Mick chooses wording
+  and **may not change the artifact's semantics.**
+
+Mick's rendering obligations, pinned:
+
+| Artifact state | Rendering must not |
+|---|---|
+| `Dangling` | become *"came from X"* |
+| `Plural` | pick one carrier |
+| `Degraded` | omit the disclosure |
+| `CycleDetected` | look like ordinary truncation |
+| `Truncated` | omit that more evidence exists |
+| historical | drift out of historical tense |
+| generation-pinned | silently use current evidence |
+
+The closing test: hand Mick artifacts for `Resolved`, `Dangling`, `Plural`,
+`Degraded`, `CycleDetected` and `Truncated`, then mutation-test each semantic
+distinction. A renderer that turns a dangling historical citation into a
+confident current statement must red.
+
+The original sketch:
 
 Only once 4b's type exists. Mick receives typed lineage and turns it into
 language; **Mick does not discover provenance, and does not repair it.**
