@@ -2815,6 +2815,29 @@ So the consumer needs a host that consumes world knowledge and **never feeds the
 checker**. No such crate exists today, and the tier plan does not provide for
 one. That is an open placement decision, not a task.
 
+> **Superseded 2026-08-17 — and it was already stale when it was written down
+> here.** Two hosts now exist, both with placement rulings and mechanical
+> capability gates, and the pattern they share is the answer this paragraph said
+> was missing:
+>
+> * `kirra-proposal-context` (`KIRRA-WM-CONSUMER-PLACEMENT-001`) — Tier 2.5's
+>   sanctioned consumer, guarded by `ci/check_proposal_context_symbolic.py`.
+> * `kirra-explain-types` + the World-side projection
+>   (`KIRRA-WM-EXPLAIN-PLACEMENT-001`) — Tier 4's, guarded by
+>   `ci/check_explain_artifact_neutral.py`.
+>
+> The technique both use, which is what makes the placement work rather than the
+> naming: **a seam is made safe by having nowhere to put the dangerous thing.**
+> For the proposal seam the dangerous thing is a checker bound and the ban is on
+> numeric magnitudes; for the explanation seam it is a query handle and the ban
+> is on Kirra World coordinates. Neither relies on the consuming crate
+> remembering to behave.
+>
+> The paragraph is left standing rather than rewritten because the reasoning
+> above it — Fence B refusing every doer-side host, and *why* it was right to —
+> is what produced both rulings. Deleting the dead end would take the argument
+> with it.
+
 **What the attempt produced anyway**, because the falsification §9 predicted did
 happen — twice:
 

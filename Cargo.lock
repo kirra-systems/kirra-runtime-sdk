@@ -2630,6 +2630,7 @@ version = "0.1.0"
 name = "kirra-world-service"
 version = "0.1.0"
 dependencies = [
+ "kirra-explain-types",
  "kirra-world",
  "kirra-world-store",
 ]

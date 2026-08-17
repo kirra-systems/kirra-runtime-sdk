@@ -32,6 +32,7 @@
 
 pub mod answer_ref;
 pub mod cursor;
+pub mod explain;
 pub mod freshness;
 pub mod lineage;
 pub mod query;
