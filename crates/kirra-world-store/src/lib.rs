@@ -87,6 +87,7 @@ pub mod compaction;
 pub mod entity_projection;
 pub mod lineage;
 pub mod projection;
+pub mod provenance_edges;
 pub mod retention_driver;
 pub mod retention_sweeper;
 pub mod schema;
@@ -254,6 +255,12 @@ pub enum StoreError {
         /// Which row, and how it disagreed.
         detail: String,
     },
+    /// A citation page was requested with an unusable bound — Tier 4 box 4a.
+    ///
+    /// **Refused, never clamped**, for the reason [`lineage::PageSpecError`]
+    /// gives about lineage pages, and the error type is shared rather than
+    /// duplicated because it is the same decision about the same kind of bound.
+    CitationPageSpec(lineage::PageSpecError),
     /// A [`SubjectRef::Candidate`] was offered as a label.
     ///
     /// Refused by ruling `KIRRA-WM-CANDIDATE-ID-001` (2026-08-08), not by
@@ -381,6 +388,7 @@ impl std::fmt::Display for StoreError {
             Self::CorruptEntityProjectionRow { detail } => {
                 write!(f, "corrupt entities_projection row: {detail}")
             }
+            Self::CitationPageSpec(e) => write!(f, "citation page: {e}"),
             Self::LlmCannotConfirm => write!(
                 f,
                 "writer_class=llm_candidate may not write claim_status=confirmed \
@@ -988,6 +996,7 @@ pub fn schema_digest() -> String {
     effective.push_str(schema::SCHEMA_V4_MIGRATION);
     effective.push_str(schema::SCHEMA_V5_MIGRATION);
     effective.push_str(schema::SCHEMA_V6_MIGRATION);
+    effective.push_str(schema::SCHEMA_V7_MIGRATION);
     sha256_hex(effective.as_bytes())
 }
 
@@ -997,6 +1006,19 @@ pub fn schema_digest() -> String {
 pub fn schema_digest_v1() -> String {
     sha256_hex(schema::SCHEMA_V1.as_bytes())
 }
+
+/// The `world_store_meta` key holding the citation index's coverage floor.
+///
+/// The highest generation the `provenance_edges` index does **not** cover. `0`
+/// means fully covered — a store born at v7, or a migrated one whose backfill
+/// has completed.
+///
+/// It exists because an empty edge set is ambiguous on its own: it is what a
+/// source citing nothing looks like, and equally what an un-backfilled store
+/// makes every source look like. Box 4b consults this before reporting that a
+/// source cited nothing, so a missing backfill is a refusal rather than a
+/// confident wrong answer about provenance.
+pub const PROVENANCE_EDGES_FLOOR_KEY: &str = "provenance_edges_floor";
 
 /// The genesis value the first event chains from.
 ///
@@ -1043,9 +1065,16 @@ impl WorldStore {
             tx.execute_batch(schema::SCHEMA_V4_MIGRATION)?;
             tx.execute_batch(schema::SCHEMA_V5_MIGRATION)?;
             tx.execute_batch(schema::SCHEMA_V6_MIGRATION)?;
+            tx.execute_batch(schema::SCHEMA_V7_MIGRATION)?;
             tx.execute(
                 "INSERT INTO world_store_meta (key, value) VALUES ('schema_version', ?1)",
                 params![SCHEMA_VERSION.to_string()],
+            )?;
+            // A store born at v7 indexes every event as it is appended, so no
+            // generation is outside the citation index and the floor is 0.
+            tx.execute(
+                "INSERT INTO world_store_meta (key, value) VALUES (?1, '0')",
+                params![PROVENANCE_EDGES_FLOOR_KEY],
             )?;
             tx.execute(
                 "INSERT INTO world_store_meta (key, value) VALUES ('chain_algorithm', ?1)",
@@ -1153,6 +1182,41 @@ impl WorldStore {
         // it, not on the path of whoever happens to open the store first.
         if from < 6 {
             tx.execute_batch(schema::SCHEMA_V6_MIGRATION)?;
+        }
+        // v7 is the same shape as v6 — a table and its index, no column change,
+        // no trigger, no existing row touched — and it migrates EMPTY for the
+        // same reason, with `backfill_provenance_edges` as the explicit
+        // operational step.
+        //
+        // But emptiness is NOT harmless here the way it is for
+        // `adjudication_affects`, and the difference is worth the extra row this
+        // writes. A missing affects-row makes a lookup return nothing, which
+        // reads as "no such adjudication" — wrong, but the caller was asking a
+        // question with a negative answer either way. A missing citation edge
+        // makes a source event look like it CITED NOTHING, which is a positive
+        // claim about its provenance, and an unbackfilled store would make it
+        // about every event it holds.
+        //
+        // So the migration records the highest generation the index does not
+        // cover. Above the floor, appends index themselves; at or below it, the
+        // index is not authoritative until `backfill_provenance_edges` has run
+        // and reset it to 0. That is what lets 4b tell "cited nothing" from "not
+        // indexed yet" instead of guessing, and it costs one meta row rather
+        // than a per-append write.
+        if from < 7 {
+            tx.execute_batch(schema::SCHEMA_V7_MIGRATION)?;
+            let head: i64 = tx
+                .query_row(
+                    "SELECT COALESCE(MAX(generation), 0) FROM world_events",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap_or(0);
+            tx.execute(
+                "INSERT INTO world_store_meta (key, value) VALUES (?1, ?2)
+                 ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                params![PROVENANCE_EDGES_FLOOR_KEY, head.to_string()],
+            )?;
         }
 
         // Digest before version, inside the transaction. The order no longer
@@ -1394,7 +1458,99 @@ impl WorldStore {
                 e.subject_ref.map(SubjectRef::as_str),
             ],
         )?;
+        self.write_citation_edges(generation, e.provenance)?;
         Ok(generation)
+    }
+
+    /// Index one event's citations — Tier 4 box 4a, the append half.
+    ///
+    /// Derived by [`provenance_edges::citation_edges`], the same function the
+    /// backfill uses, so the two paths agree by construction rather than by
+    /// happening to match. Written from the `&[&str]` the caller passed rather
+    /// than by re-parsing the JSON this row just stored: the array is the
+    /// authoritative statement and it is right here, so a decode step would only
+    /// add a way for the index to disagree with the evidence.
+    ///
+    /// # A SAVEPOINT, not a transaction
+    ///
+    /// The event row and its edges must commit together — an index that could
+    /// lag the log by one crash would under-report the newest event's
+    /// provenance, and silently, since missing edges read as "cited nothing".
+    ///
+    /// It cannot be `BEGIN IMMEDIATE`, because [`Self::append_adjudication`]
+    /// already holds an open transaction across its call to `append`, and SQLite
+    /// refuses a nested `BEGIN` with "cannot start a transaction within a
+    /// transaction". A savepoint composes in both cases: standalone it opens and
+    /// commits its own transaction, and inside one it nests.
+    fn write_citation_edges(&self, generation: i64, cited: &[&str]) -> Result<(), StoreError> {
+        let edges = provenance_edges::citation_edges(cited);
+        if edges.is_empty() {
+            return Ok(());
+        }
+        self.conn.execute_batch("SAVEPOINT kirra_prov_edges")?;
+        for edge in &edges {
+            // Plain INSERT, not INSERT OR IGNORE. The primary key is
+            // (generation, ordinal) and both are freshly minted here, so a
+            // conflict is not a duplicate append — it means this generation was
+            // already indexed, which would mean the log reused a generation.
+            // Failing loudly is the only honest response.
+            if let Err(err) = self.conn.execute(
+                "INSERT INTO provenance_edges
+                     (source_generation, ordinal, cited_observation_id)
+                 VALUES (?1, ?2, ?3)",
+                params![generation, edge.ordinal, edge.cited_observation_id],
+            ) {
+                let _ = self.conn.execute_batch("ROLLBACK TO kirra_prov_edges");
+                let _ = self.conn.execute_batch("RELEASE kirra_prov_edges");
+                return Err(err.into());
+            }
+        }
+        // A failing RELEASE leaves the savepoint on the stack. Same hazard as
+        // the failed-COMMIT case in `append_adjudication`: returning without
+        // unwinding poisons every later write on this connection with a fault
+        // that names the wrong operation.
+        if let Err(err) = self.conn.execute_batch("RELEASE kirra_prov_edges") {
+            let _ = self.conn.execute_batch("ROLLBACK TO kirra_prov_edges");
+            let _ = self.conn.execute_batch("RELEASE kirra_prov_edges");
+            return Err(err.into());
+        }
+        Ok(())
+    }
+
+    /// The highest generation the citation index does **not** cover.
+    ///
+    /// `0` means fully covered. See [`PROVENANCE_EDGES_FLOOR_KEY`] for why a
+    /// reader must consult this before concluding that a source cited nothing.
+    ///
+    /// A store predating the key reports its own head, which is the fail-closed
+    /// reading: nothing is known to be indexed.
+    ///
+    /// # Errors
+    ///
+    /// [`StoreError::Sqlite`] if the meta table cannot be read.
+    pub fn provenance_edges_floor(&self) -> Result<i64, StoreError> {
+        let stored: Option<String> = self
+            .conn
+            .query_row(
+                "SELECT value FROM world_store_meta WHERE key = ?1",
+                params![PROVENANCE_EDGES_FLOOR_KEY],
+                |r| r.get(0),
+            )
+            .optional()?;
+        match stored.as_deref().and_then(|v| v.parse::<i64>().ok()) {
+            Some(floor) => Ok(floor),
+            // Absent or unparseable. Both mean the same thing operationally —
+            // this store makes no claim about its index's coverage — and the
+            // safe reading of "no claim" is "covers nothing".
+            None => self
+                .conn
+                .query_row(
+                    "SELECT COALESCE(MAX(generation), 0) FROM world_events",
+                    [],
+                    |r| r.get(0),
+                )
+                .map_err(Into::into),
+        }
     }
 
     /// **Record an identity adjudication.** The single door for §14.3's
@@ -1630,6 +1786,173 @@ impl WorldStore {
         }
         tx.commit()?;
         Ok(written)
+    }
+
+    /// **Populate the citation index from the existing log** — Tier 4 box 4a.
+    ///
+    /// A v7 migration installs an EMPTY index and records a coverage floor at
+    /// the log head. This fills the index and drops the floor to 0. Like
+    /// [`Self::backfill_adjudication_affects`] it is an explicit operational
+    /// call rather than work hidden in `open`, because it scans the whole log.
+    ///
+    /// # Why it deletes before it writes
+    ///
+    /// Each source's edges are replaced wholesale rather than merged with
+    /// `INSERT OR IGNORE`, so this is a REBUILD rather than a top-up.
+    ///
+    /// The tempting justification — that a merge could interleave ordinals from
+    /// a half-written earlier attempt — does not actually hold, and is worth
+    /// recording as rejected rather than left as folklore: the log is immutable,
+    /// so a generation's array never changes, and both writers are atomic (a
+    /// savepoint at append, this transaction here), so no half-written state is
+    /// reachable without tampering. A merge would in fact converge.
+    ///
+    /// The real reason is what the method is FOR. Its correctness argument is
+    /// *"rebuilding from retained sources reproduces the index"*, and a merge
+    /// can only claim *"…provided what is already there is a prefix of the
+    /// truth"* — a precondition the caller cannot check and the test cannot
+    /// state. Replacing makes the postcondition depend on the source events
+    /// alone, which is exactly the property that makes this table an index
+    /// rather than evidence.
+    ///
+    /// # It reads the stored JSON, and that is the point
+    ///
+    /// The append path indexes from the caller's slice; this one decodes the
+    /// hash-covered `provenance` column. Two inputs, one derivation
+    /// ([`provenance_edges::citation_edges`]) — which is exactly what makes
+    /// rebuild-equivalence a property of the design rather than of two code
+    /// paths agreeing today.
+    ///
+    /// # Errors
+    ///
+    /// [`StoreError::CorruptEntityProjectionRow`] if a stored provenance column
+    /// is not a JSON array of strings. Fail-closed: an index built over a
+    /// citation nobody could decode would be an index nobody can trust, and
+    /// silently skipping the row would understate that source's provenance.
+    pub fn backfill_provenance_edges(&mut self) -> Result<usize, StoreError> {
+        let mut rows: Vec<(i64, String)> = Vec::new();
+        {
+            let mut stmt = self.conn.prepare(
+                "SELECT generation, provenance FROM world_events ORDER BY generation ASC",
+            )?;
+            let mapped = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
+            for row in mapped {
+                rows.push(row?);
+            }
+        }
+
+        // Decode EVERY row before writing anything. A corrupt column halfway
+        // through would otherwise leave the index half-rebuilt and the floor
+        // still claiming the old coverage, which is a worse state than the one
+        // we started in.
+        let mut decoded: Vec<(i64, Vec<provenance_edges::CitationEdge>)> =
+            Vec::with_capacity(rows.len());
+        for (generation, provenance) in rows {
+            let cited: Vec<String> = serde_json::from_str(&provenance).map_err(|e| {
+                StoreError::CorruptEntityProjectionRow {
+                    detail: format!("generation {generation}: provenance is not a JSON array: {e}"),
+                }
+            })?;
+            decoded.push((generation, provenance_edges::citation_edges(&cited)));
+        }
+
+        let mut written = 0usize;
+        let tx = self.conn.unchecked_transaction()?;
+        for (generation, edges) in decoded {
+            tx.execute(
+                "DELETE FROM provenance_edges WHERE source_generation = ?1",
+                params![generation],
+            )?;
+            for edge in edges {
+                written += tx.execute(
+                    "INSERT INTO provenance_edges
+                         (source_generation, ordinal, cited_observation_id)
+                     VALUES (?1, ?2, ?3)",
+                    params![generation, edge.ordinal, edge.cited_observation_id],
+                )?;
+            }
+        }
+        // Floor last, inside the same transaction: it is the CLAIM that the
+        // index is complete, and a crash that committed the claim without the
+        // rows would make an un-indexed store assert full coverage.
+        tx.execute(
+            "INSERT INTO world_store_meta (key, value) VALUES (?1, '0')
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            params![PROVENANCE_EDGES_FLOOR_KEY],
+        )?;
+        tx.commit()?;
+        Ok(written)
+    }
+
+    /// **The citations one source event recorded**, in recorded order.
+    ///
+    /// The structural replacement for decoding `provenance` JSON at the query
+    /// path — box 4b resolves these against the events visible at a pinned
+    /// generation, and this is what it walks.
+    ///
+    /// Returns what the source CLAIMED to cite. Whether any of it resolves, and
+    /// to how many rows, is not asked or answered here.
+    ///
+    /// # An empty result is not by itself "cited nothing"
+    ///
+    /// It is also what an un-backfilled generation looks like. This method
+    /// reports the index as it stands and does not consult
+    /// [`Self::provenance_edges_floor`], because a raw read that silently
+    /// refused would be harder to reason about than one that answers narrowly.
+    /// The floor check belongs to the caller that turns an empty set into the
+    /// CLAIM *"this source cited nothing"* — box 4b — and it must not skip it:
+    /// at or below the floor, the honest answer is a refusal, not an empty
+    /// provenance.
+    ///
+    /// # Errors
+    ///
+    /// [`StoreError::Sqlite`] if the index cannot be read.
+    pub fn citations_of(
+        &self,
+        source_generation: i64,
+        limit: usize,
+        after_ordinal: Option<i64>,
+    ) -> Result<provenance_edges::CitationPage, StoreError> {
+        if limit == 0 {
+            return Err(StoreError::CitationPageSpec(
+                lineage::PageSpecError::ZeroLimit,
+            ));
+        }
+        if limit > provenance_edges::MAX_CITATIONS_PAGE {
+            return Err(StoreError::CitationPageSpec(
+                lineage::PageSpecError::LimitTooLarge {
+                    requested: limit,
+                    maximum: provenance_edges::MAX_CITATIONS_PAGE,
+                },
+            ));
+        }
+
+        // Fetch one MORE than asked for. That extra row is what makes
+        // `truncated` a fact rather than an inference: `edges.len() == limit` is
+        // ambiguous exactly at the boundary, where a source with precisely
+        // `limit` citations is complete and would be reported cut short.
+        let probe = limit.saturating_add(1);
+        let mut stmt = self.conn.prepare(
+            "SELECT ordinal, cited_observation_id FROM provenance_edges
+             WHERE source_generation = ?1 AND ordinal > ?2
+             ORDER BY ordinal ASC LIMIT ?3",
+        )?;
+        let mapped = stmt.query_map(
+            params![source_generation, after_ordinal.unwrap_or(-1), probe as i64],
+            |r| {
+                Ok(provenance_edges::CitationEdge {
+                    ordinal: r.get(0)?,
+                    cited_observation_id: r.get(1)?,
+                })
+            },
+        )?;
+        let mut edges = Vec::new();
+        for row in mapped {
+            edges.push(row?);
+        }
+        let truncated = edges.len() > limit;
+        edges.truncate(limit);
+        Ok(provenance_edges::CitationPage { edges, truncated })
     }
 
     /// Install the entity projection's DDL, lazily.
@@ -2486,6 +2809,59 @@ impl WorldStore {
     #[cfg(any(test, feature = "test-support"))]
     pub fn query_scalar_for_test(&self, sql: &str) -> Result<i64, StoreError> {
         Ok(self.conn.query_row(sql, [], |r| r.get(0))?)
+    }
+
+    /// Test-only: every citation edge in the store, in a total order.
+    ///
+    /// Gated like its neighbours. Exists for box 4a's rebuild-equivalence proof,
+    /// which has to compare two whole tables rather than one source's edges —
+    /// a per-source comparison would miss an extra row under a generation the
+    /// test never thought to ask about, which is exactly the drift the proof is
+    /// looking for.
+    ///
+    /// # Panics
+    ///
+    /// If the index cannot be read. Test-only, and an unreadable index during a
+    /// rebuild proof is the proof failing.
+    #[cfg(any(test, feature = "test-support"))]
+    #[must_use]
+    pub fn raw_query_edges_for_test(&self) -> Vec<(i64, i64, String)> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT source_generation, ordinal, cited_observation_id
+                 FROM provenance_edges
+                 ORDER BY source_generation ASC, ordinal ASC",
+            )
+            .expect("prepare edge scan");
+        let rows = stmt
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+            .expect("scan edges");
+        rows.map(|r| r.expect("edge row")).collect()
+    }
+
+    /// Test-only: how many edges name a source generation the log no longer has.
+    ///
+    /// Must be 0 at all times — see the compaction delete in
+    /// [`Self::compact_range`]. Written as a LEFT JOIN rather than a
+    /// `NOT IN (SELECT …)` because the latter is silently empty-safe in a way
+    /// that would make this count 0 for the wrong reason on an empty log.
+    ///
+    /// # Panics
+    ///
+    /// If the query fails.
+    #[cfg(any(test, feature = "test-support"))]
+    #[must_use]
+    pub fn raw_count_orphan_edges_for_test(&self) -> i64 {
+        self.conn
+            .query_row(
+                "SELECT COUNT(*) FROM provenance_edges e
+                 LEFT JOIN world_events w ON w.generation = e.source_generation
+                 WHERE w.generation IS NULL",
+                [],
+                |r| r.get(0),
+            )
+            .expect("orphan count")
     }
 
     /// Test-only: rewrite one column of one row, bypassing the write path.
@@ -3437,6 +3813,25 @@ impl WorldStore {
         let tx = self.conn.transaction()?;
         tx.execute(
             "DELETE FROM world_events WHERE generation BETWEEN ?1 AND ?2",
+            params![lo, hi],
+        )?;
+        // The citation index goes with its sources, in the SAME transaction.
+        //
+        // This is the one invariant Tier 4 box 4a rests on. `provenance_edges`
+        // is a deterministic index over retained source events, never evidence
+        // of its own — and an edge that outlived its source event would be
+        // exactly that: a citation still readable after the hash-covered
+        // statement it was derived from has been deleted, with nothing left to
+        // check it against.
+        //
+        // Deleting is what makes the branch honest rather than what loses the
+        // information. A compacted source is already `Degraded` through the
+        // citation/summary machinery, and `Degraded` is the true answer —
+        // "the evidence was deleted", not "it cited nothing". Keeping the edges
+        // would let a walk descend confidently into a region whose events no
+        // longer exist.
+        tx.execute(
+            "DELETE FROM provenance_edges WHERE source_generation BETWEEN ?1 AND ?2",
             params![lo, hi],
         )?;
         for s in &summaries {

@@ -113,7 +113,9 @@ pub const CHAIN_ALGORITHM: &str = "kirra-audit-hash/compute_record_hash_v2";
 /// | 3 | the `subject_kind` discriminant | `KIRRA-WM-CANDIDATE-ID-001` |
 /// | 4 | the `entity_id_mint` ledger | `WM_SCOPE.md` §5 |
 /// | 5 | the object-requires-predicate trigger | `KIRRA-WM-CLAIM-SHAPES-001` |
-pub const SCHEMA_VERSION: i64 = 6;
+/// | 6 | the `adjudication_affects` reverse index | `WM_SCOPE.md` box 3d |
+/// | 7 | the `provenance_edges` citation index | `KIRRA-WM-PROVENANCE-GRAPH-001` |
+pub const SCHEMA_VERSION: i64 = 7;
 
 /// **v2 — the four orthogonal trust axes, added additively.**
 ///
@@ -418,4 +420,80 @@ CREATE TABLE IF NOT EXISTS adjudication_affects (
 );
 CREATE INDEX IF NOT EXISTS adjudication_affects_by_entity
     ON adjudication_affects (entity_id, generation);
+"#;
+
+/// **v7 — the citation edge index.** Tier 4 box 4a.
+///
+/// `KIRRA-WM-PROVENANCE-GRAPH-001`:
+///
+/// > Materialize the citation relation at append, but **do not materialize its
+/// > resolved target.**
+///
+/// `world_events.provenance` is a JSON array of observation ids, and `WM_SCOPE`
+/// §7 makes `Explain` wait on *"derivation edges being real structure rather
+/// than a JSON array of identifiers"*. This is that structure — and the
+/// distinction the ruling draws is the whole design, so it is worth stating as
+/// what this table CANNOT say.
+///
+/// # It records the citation, never its resolution
+///
+/// The real relation is:
+///
+/// ```text
+/// source event  ──cites──▶  observation id X
+/// ```
+///
+/// and deliberately NOT:
+///
+/// ```text
+/// source event  ──cites──▶  target event row Y
+/// ```
+///
+/// because at any given generation *T*, X may resolve to exactly one row, to
+/// several, or to none — `world_events.observation_id` is indexed but **not
+/// unique**, and nothing constrains a cited id to exist at all. A citation that
+/// dangles at *T* may become resolvable later, and Tier 4 must still be able to
+/// say it was dangling THEN. Baking a target generation in here would fix one
+/// answer for all time and destroy exactly that.
+///
+/// So the table has no target column, and there is nowhere to put one without a
+/// migration that a reviewer would have to see. Resolution happens at read, in
+/// box 4b, against the events visible at the pinned coordinate.
+///
+/// # Order and duplicates are preserved
+///
+/// The primary key is `(source_generation, ordinal)` rather than
+/// `(source_generation, cited_observation_id)`. A source citing the same
+/// observation twice is a source that said something twice, and an index that
+/// deduplicated it would be reporting a provenance array the hash does not
+/// cover. `ordinal` is the element's index in the stored array, dense from 0.
+///
+/// # The index is never evidence
+///
+/// Same rule as `adjudication_affects`, and the same structural reason: the
+/// table holds no claim content, so it cannot manufacture one. The authoritative
+/// statement stays the hash-covered `provenance` column on `world_events`, and
+/// this table must remain a pure function of the source events still retained —
+/// which is why compaction deletes an event's edges along with the event. An
+/// edge outliving its source would be the index quietly promoting itself to
+/// evidence, which is the one failure mode this design has.
+///
+/// No foreign key, because `PRAGMA foreign_keys` is off by default and a
+/// constraint that silently does not run is worse than a stated invariant with a
+/// test behind it.
+pub const SCHEMA_V7_MIGRATION: &str = r#"
+CREATE TABLE IF NOT EXISTS provenance_edges (
+    source_generation    INTEGER NOT NULL,
+    ordinal              INTEGER NOT NULL,
+    cited_observation_id TEXT    NOT NULL,
+
+    PRIMARY KEY (source_generation, ordinal),
+    CHECK (ordinal >= 0)
+);
+
+-- The reverse direction: who cited this observation. Not used by 4a, and
+-- installed with the table rather than later because adding an index to a
+-- populated table is a migration, while adding it to an empty one is free.
+CREATE INDEX IF NOT EXISTS provenance_edges_by_cited
+    ON provenance_edges (cited_observation_id, source_generation);
 "#;

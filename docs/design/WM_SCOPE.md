@@ -2454,8 +2454,9 @@ carelessly. Neither can be exercised end-to-end, and no test pretends to.
 
 ## 7. Tier 4 — `Explain`, the flagship
 
-- [ ] `Explain(FactHandle) → ProvenanceTree`
-- [ ] Prose rendering through Mick (§16)
+- [ ] **4a — structured citation edges** (in progress)
+- [ ] **4b — historical provenance graph**
+- [ ] **4c — `Explain` / Mick rendering** (§16)
 
 Depends on the provenance model **and** on derivation edges being real structure
 rather than a JSON array of identifiers. This is the capability the whole
@@ -2465,6 +2466,139 @@ between a database and something that can be asked to justify itself.
 Mick's three non-negotiables apply unchanged and are already precedented in
 `robot/mick_chat_contract.py`: **never invent**, **never state stale as
 current**, **never supply geometry**.
+
+### What Tier 3 did and did not take off this tier — audited 2026-08-16
+
+Re-scoped rather than inherited, because box 3f built lineage machinery and the
+question was whether it had already absorbed part of `Explain`.
+
+**It absorbed the retrieval mechanics.** Bounded pagination (`MAX_LINEAGE_PAGE`,
+`Continuation`, the family-bound `PageCursor`), generation pinning, a reproducible
+`LineageRef`, a citable `EvidenceDigest` per entry, and — the one most likely to
+have been rebuilt from scratch here — `LineagePageAnswer::completeness()`, which
+already distinguishes *"the evidence was deleted"* from *"there was none"*. Tier 4
+does not re-derive any of it; 4b pushes the last of these from the PAGE down to
+the BRANCH.
+
+**It did not touch the graph, and said so.** `kirra_world_store::lineage` reports
+`provenance` verbatim and stops:
+
+> It is **not** a traversal of that array. […] Following it would mean inventing
+> the structure whose absence is the reason `Explain` is Tier 4. The stopping
+> point is the tier boundary, not an oversight.
+
+So the answer to *"rendering layer, provenance-graph layer, or both"* is **both,
+with the graph strictly first** — rendering cannot be specified until the tree
+has a type, and the tree cannot have a type until the citation edge has defined
+cardinality and defined failure modes.
+
+### `KIRRA-WM-PROVENANCE-GRAPH-001` — RULED 2026-08-16
+
+> **Materialize the citation relation at append; do not materialize its resolved
+> target.** Tier 4 reports the provenance graph that was resolvable at the
+> answer's historical coordinate, not the graph that happens to be resolvable
+> today.
+
+The real structure is `source event → cites observation id X`, and deliberately
+not `source event → target event row Y`. At generation *T*, X may resolve to
+exactly one row, to several, or to none:
+
+* `world_events.observation_id` is indexed but **not unique** — many-to-many, not
+  a parent pointer;
+* nothing requires a cited id to exist at all, in the log or anywhere;
+* a citation dangling at *T* may become resolvable later, and Tier 4 must still
+  report it as dangling *then*.
+
+Baking a target in at append would fix, at write time, an answer whose only
+correct value depends on the coordinate the question is asked at. This is §7's
+own warning — *"2d's trap re-appearing one tier up, and it will look like reuse
+when it arrives"* — and the ruling is what forecloses it structurally rather than
+by discipline.
+
+#### 4a — structured citation edges
+
+Normalize the hash-covered provenance array into a deterministic edge table at
+append: `(source_generation, ordinal) → cited_observation_id`. Invariants:
+
+* one stored edge per array element, **order and duplicates preserved**;
+* no target generation, and no resolution performed at append;
+* rebuilding from retained source events reproduces the table exactly;
+* raw JSON traversal is not part of the Tier 4 query path.
+
+**A deterministic index, never independent evidence.** The authoritative
+statement stays the hash-covered `provenance` column. Two consequences that are
+not optional:
+
+1. **Compaction deletes an event's edges with the event.** An edge outliving its
+   source would be the index promoting itself to evidence — a citation still
+   readable after the statement it came from was deleted, with nothing left to
+   check it against. The affected branch reads `Degraded`, which is the true
+   answer; the edges are not what carries it.
+2. **An empty edge set is ambiguous, so coverage is recorded.** It is what a
+   source citing nothing looks like, and equally what an un-backfilled store
+   makes *every* source look like — a positive claim about provenance, made
+   about the whole log, silently. A `provenance_edges_floor` meta row records the
+   highest generation the index does not cover, so 4b refuses rather than
+   reporting a confident empty provenance. (This is Tier 3 case 8's
+   absent-because-unknown / absent-because-empty distinction, at the storage
+   layer; it was found by checking a migration comment that claimed the two were
+   already distinguishable, and they were not.)
+
+#### 4b — historical provenance graph
+
+Where resolution happens. At pinned generation *G*, each edge resolves against
+the events visible at *G* into one of three **first-class** outcomes:
+
+| Outcome | Meaning |
+|---|---|
+| `Resolved(target)` | exactly one visible event carries the cited id |
+| `Plural(targets…)` | several do |
+| `Dangling(cited_id)` | none do |
+
+Plural must not become "pick the newest", and dangling must not become an empty
+child list. Both are the same collapse Tier 3 case 8 ruled out, one tier up.
+
+`ProvenanceTree` / `ProvenanceGraphPage` carries: the generation pin, the
+semantic-version set, max depth, max nodes, a continuation cursor, visible
+truncation, per-branch completeness/degradation, and explicit plural/dangling
+nodes.
+
+**Cycles are not truncation.** Once provenance is a real graph, a cycle is
+possible unless admission proves otherwise, and a depth limit alone would make a
+malformed cycle look like an ordinary bound being reached. Two distinct
+outcomes, because they mean different things in an explanation:
+
+```text
+Truncated      // a legitimate bound was reached
+CycleDetected  // malformed / recursive provenance
+```
+
+The load-bearing test — if it ever returns the T2 node, Tier 4 has become
+historically dishonest:
+
+```text
+T1: A cites observation X; nothing carries X   → Dangling(X)
+T2: an event carrying observation_id X appended → a current query resolves X
+    query pinned to T1                          → MUST still say Dangling(X)
+```
+
+and its plural counterpart: a query before the second row resolves one; after it,
+reports plural.
+
+#### 4c — `Explain` / Mick rendering
+
+Only once 4b's type exists. Mick receives typed lineage and turns it into
+language; **Mick does not discover provenance, and does not repair it.**
+
+```text
+AnswerRef → Tier 3 reproducible answer → Tier 4 provenance graph → Mick rendering
+```
+
+Rendering must preserve historical tense, degradation, dangling evidence,
+plural/ambiguous citations, truncation, and freshness/validity where relevant.
+So it may say *"at that time, this claim cited observation X, but Kirra could not
+resolve X to a recorded event"* — and must not rewrite that into *"this came from
+camera observation X"* because X became resolvable later.
 
 ---
 
