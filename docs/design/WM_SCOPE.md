@@ -2725,6 +2725,41 @@ The closing test: hand Mick artifacts for `Resolved`, `Dangling`, `Plural`,
 distinction. A renderer that turns a dangling historical citation into a
 confident current statement must red.
 
+**LANDED 2026-08-17** — `kirra_mick::explain_render`, consuming only
+`kirra-explain-types`. Deterministic templates, not the model: a paraphrase of a
+*proven* artifact is reasonable later, but a model cannot be the mechanism that
+proves the six states stay distinct, because the property is *"this sentence does
+not assert something the artifact denies"* and that is not assertable about a
+sampled distribution. A paraphrase layer, if added, goes after this and inherits
+these tests.
+
+Assertions are on **published phrase constants**, not on sentences, so rewording
+is free and swapping which phrase a state gets is a mutation. Each state asserts
+its own phrase present AND the other states' phrases absent — the negative half
+is the load-bearing half, because the collapse is not silence, it is a confident
+sentence sitting next to an honest one.
+
+**The combined-artifact test earned its place twice, and neither time was the
+predicted one.** It was requested to catch a renderer that handles whichever
+caveat its template reaches first — the enum-precedence mistake `GraphOutcome`
+avoided, arriving two layers later. What it actually caught:
+
+1. **An overloaded phrase constant.** `PHRASE_RESTED_ON` was used both as
+   confident attribution (*"it rested on X"*) and neutrally (*"what it rested on
+   is unknown"*), so every `never_says(PHRASE_RESTED_ON)` in the suite was
+   measuring an overloaded token rather than the property it named. The combined
+   artifact was the first case putting a `NotIndexed` node and a `Dangling`
+   branch in one rendering. The unknown-evidence sentences now say *"what it
+   cited is unknown"*.
+2. **A single-flag test reading the wrong source.** Suppressing the truncation
+   disclosure entirely left `truncation_says_a_bound_was_reached…` GREEN, because
+   its branch stopped at `DepthLimit`, whose stop sentence carries the same two
+   phrases. Only the combined test failed. The single-flag test now stops at
+   `NothingToFollow`, so the phrases can only have come from the disclosure.
+
+Both are the session's recurring lesson in a third costume: **a control is not
+evidence until you have shown it changes when the thing it tests changes.**
+
 The original sketch:
 
 Only once 4b's type exists. Mick receives typed lineage and turns it into

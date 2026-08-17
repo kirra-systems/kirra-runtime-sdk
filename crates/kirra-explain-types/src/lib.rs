@@ -119,6 +119,12 @@ impl std::fmt::Display for DisplayLabel {
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct EvidenceDigest(String);
 
+impl std::fmt::Display for EvidenceDigest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
 impl EvidenceDigest {
     /// Wrap a digest.
     #[must_use]

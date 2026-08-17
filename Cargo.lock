@@ -2343,6 +2343,7 @@ version = "0.1.0"
 dependencies = [
  "kirra-capture-schema",
  "kirra-core",
+ "kirra-explain-types",
  "kirra-planner",
  "kirra-taj",
  "kirra-trajectory",
