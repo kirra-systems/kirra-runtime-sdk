@@ -140,6 +140,16 @@ FENCE_A_EXTRA_PACKAGES: dict[str, str] = {
         "the ADR-0041 (WM-2) measurement harness — Kirra World work by purpose, "
         "outside the namespace by design"
     ),
+    "kirra-explain-types": (
+        "the Tier 4 box 4c explanation seam (KIRRA-WM-EXPLAIN-PLACEMENT-001) — "
+        "Kirra World work by purpose, outside the namespace BY DESIGN, because "
+        "`kirra-mick` must be able to depend on it and `is_world_package` is "
+        "name-prefixed. Listing it here is what keeps Fence A over it while "
+        "leaving Fence B able to admit it: this dict feeds "
+        "`check_2_world_outbound` ONLY, deliberately not `is_world_package`. "
+        "Its own neutrality (no kirra-world* dependency, no query handles on "
+        "the wire) is asserted directly by ci/check_explain_artifact_neutral.py"
+    ),
     "wm2-schema-growth": (
         "the KIRRA-WM2-SCHEMA-001 §8.4 bytes/event instrument (ADR-0041 D-20) — "
         "same shape as the harness, and it additionally DEPENDS on "

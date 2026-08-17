@@ -2220,6 +2220,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "kirra-explain-types"
+version = "0.1.0"
+
+[[package]]
 name = "kirra-fabric-types"
 version = "0.1.0"
 dependencies = [
