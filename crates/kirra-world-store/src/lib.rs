@@ -1009,9 +1009,15 @@ pub fn schema_digest_v1() -> String {
 
 /// The `world_store_meta` key holding the citation index's coverage floor.
 ///
-/// The highest generation the `provenance_edges` index does **not** cover. `0`
-/// means fully covered — a store born at v7, or a migrated one whose backfill
-/// has completed.
+/// The rule it exists to state:
+///
+/// > The provenance-edge index is only authoritative over the generation range
+/// > it explicitly covers. **Outside that range, absence of edges is not
+/// > evidence of "no citations."**
+///
+/// The value is the highest generation the index does **not** cover. `0` means
+/// fully covered — a store born at v7, or a migrated one whose backfill has
+/// completed.
 ///
 /// It exists because an empty edge set is ambiguous on its own: it is what a
 /// source citing nothing looks like, and equally what an un-backfilled store

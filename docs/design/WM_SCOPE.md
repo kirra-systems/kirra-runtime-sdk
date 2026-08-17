@@ -2534,7 +2534,13 @@ not optional:
    readable after the statement it came from was deleted, with nothing left to
    check it against. The affected branch reads `Degraded`, which is the true
    answer; the edges are not what carries it.
-2. **An empty edge set is ambiguous, so coverage is recorded.** It is what a
+2. **An empty edge set is ambiguous, so coverage is recorded.**
+
+   > The provenance-edge index is only authoritative over the generation range
+   > it explicitly covers. **Outside that range, absence of edges is not
+   > evidence of "no citations."**
+
+   An empty set is what a
    source citing nothing looks like, and equally what an un-backfilled store
    makes *every* source look like — a positive claim about provenance, made
    about the whole log, silently. A `provenance_edges_floor` meta row records the

@@ -154,8 +154,12 @@ fn an_edge_is_identical_whether_or_not_its_target_exists() {
         kind: "mission",
         subject: "package_17",
         subject_ref: None,
-        predicate: Some("scanned_by"),
-        object: Some("scanner_1"),
+        // `last_seen_at`, not an invented predicate. These fixtures need a
+        // second EVENT, not a second vocabulary term — and minting one would
+        // force a real freshness ruling (`check_freshness_coverage`) on a
+        // predicate the domain does not actually use. Caught by that gate.
+        predicate: Some("last_seen_at"),
+        object: Some("dock_b"),
         payload: "{}",
         payload_schema: 1,
         retention_class: "raw",
@@ -215,8 +219,8 @@ fn an_edge_is_unchanged_when_its_target_becomes_plural() {
             kind: "mission",
             subject: "package_17",
             subject_ref: None,
-            predicate: Some("scanned_by"),
-            object: Some("scanner_1"),
+            predicate: Some("last_seen_at"),
+            object: Some("dock_b"),
             payload: "{}",
             payload_schema: 1,
             retention_class: "raw",
