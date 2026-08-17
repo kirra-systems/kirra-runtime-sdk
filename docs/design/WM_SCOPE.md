@@ -2550,7 +2550,53 @@ not optional:
    layer; it was found by checking a migration comment that claimed the two were
    already distinguishable, and they were not.)
 
-#### 4b — historical provenance graph
+#### 4b — historical provenance graph — LANDED 2026-08-17
+
+`kirra_world_store::provenance_graph`, reached through
+`WorldStore::provenance_tree(root, at_generation, GraphSpec)`. The resolution
+rule is versioned as `RuleId::CitationResolution` v1, with its own corpus, source
+pin and baseline row, because it decides whether a claim is reported as resting
+on one event, on several, or on nothing that can be found.
+
+Three shape decisions that differ from the sketch below, each recorded rather
+than left to be rediscovered:
+
+* **`GraphOutcome` is a struct of four independent facts**, not an enum of
+  outcomes. `Truncated` and `CycleDetected` are named below as distinct, and a
+  walk can legitimately be both at once — plus degraded, plus coverage-limited.
+  An enum forces a precedence among them and whichever arm loses is invisible;
+  two booleans are more distinct than two arms of which only one survives.
+* **A plural citation is reported, not expanded.** Walking every carrier is the
+  other non-choosing option and is rejected: the tree's meaning is that every
+  walked edge is a *determinate* provenance link, and expanding an ambiguous one
+  puts evidence under a claim without being able to say it belongs there.
+* **`Dangling` is qualified by whether a compacted span could have carried the
+  id** (`NeverVisible` / `PossiblyCompacted`). Dangling-because-never-existed and
+  dangling-because-deleted are identical at the node and completely different
+  facts in an incident reconstruction, and the qualification is a **necessary
+  condition** on the same footing as `Resolution::Degraded` — it may over-report,
+  it may never under-report.
+
+**The finding worth carrying forward.** The load-bearing T1/T2 test passed
+against a rule with its pin filter *deleted*, and so did every other test,
+because both shipped lookups filter by the pin in their own query. The
+composition was correct while the rule had stopped being — a rule one caller away
+from wrong, with a green suite. Fixed by an adversarial lookup that violates the
+seam's contract on purpose
+(`a_lookup_that_ignores_the_pin_cannot_make_the_rule_dishonest`). The general
+shape: **when a judgement is enforced at two layers, the tests prove the
+composition and say nothing about either layer**, and the only way to test the
+inner one is a deliberately faithless outer one. It applies anywhere this
+codebase re-applies a filter defensively, `select_lineage` included.
+
+A second, smaller one: `ci/check_world_semantics.py` **silently skipped** a
+declaration row whose digests were not 64 hex characters — the row was invisible
+to every check rather than failing one, and the gate reported OK while listing
+every rule except the one being added. Found by hitting it with `"TBD"`
+placeholders mid-development. Closed by counting row openers and refusing a
+count mismatch, with a self-test.
+
+The sketch this box was built to, unchanged:
 
 Where resolution happens. At pinned generation *G*, each edge resolves against
 the events visible at *G* into one of three **first-class** outcomes:

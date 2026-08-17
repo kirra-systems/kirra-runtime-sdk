@@ -97,6 +97,11 @@ _SPEC = re.compile(
 # rename drift the baseline key silently.
 _AS_STR = re.compile(r"Self::(?P<variant>\w+)\s*=>\s*\"(?P<name>[a-z0-9_]+)\"")
 
+# Just the row opener, used to COUNT rows so an unparseable one is an error
+# rather than a silent omission. Deliberately not a second parser: it recognises
+# where a row starts and nothing about its contents.
+_SPEC_HEAD = re.compile(r"\w*RuleSpec\s*\{\s*rule:")
+
 # `RuleSpec` and `BoundaryRuleSpec` are STRUCT DEFINITIONS, not rows. Their
 # field declarations look enough like a row's assignments to be worth excluding
 # explicitly rather than relying on the `:` versus `,` shape to differ.
@@ -146,6 +151,26 @@ def parse_declarations(text: str, where: str = "declaration") -> list[dict]:
             "emptied — which would leave its rules unversioned — or its "
             "formatting changed in a way this gate cannot follow. Both are "
             "failures; neither is a pass."
+        )
+
+    # Every `RuleSpec {` occurrence must have produced a row.
+    #
+    # `_SPEC` requires both digests to be 64 hex characters, so a row whose
+    # digest is a placeholder, truncated, or hand-typed does not MATCH — and an
+    # unmatched row is invisible to every check below rather than failing one.
+    # That is the "silently found nothing" shape this function's docstring
+    # already refuses at zero, reaching the same file one row at a time.
+    #
+    # Found by hitting it: a rule declared with `"TBD"` digests during
+    # development passed this gate, which reported OK and listed every rule
+    # except the one being added.
+    present = len(_SPEC_HEAD.findall(_STRUCT_DEF.sub("", text)))
+    if present != len(rows):
+        raise GateError(
+            f"{where}: found {present} `RuleSpec` row(s) but could parse only "
+            f"{len(rows)}. A row this gate cannot read is a row it does not "
+            "check — most likely a `corpus_digest` or `source_pin` that is not "
+            "64 hex characters."
         )
     return rows
 
@@ -395,6 +420,28 @@ def _self_test() -> int:
             return
         raise AssertionError("an empty pinned region was not an error")
 
+    def t_an_unparseable_row_is_an_error_not_a_silent_skip():
+        # The hole this closes: the row is well-formed Rust and obviously a
+        # declaration, but its digest is not 64 hex characters, so `_SPEC`
+        # cannot match it.
+        good = (
+            'RuleSpec { rule: RuleId::Foo, version: 1, '
+            f'corpus_digest: "{"a" * 64}", source_pin: "{"b" * 64}", '
+            'source_file: "f.rs", span: "foo", }'
+        )
+        bad = (
+            'RuleSpec { rule: RuleId::Bar, version: 1, '
+            'corpus_digest: "TBD", source_pin: "TBD", '
+            'source_file: "f.rs", span: "bar", }'
+        )
+        text = 'Self::Foo => "foo",\nSelf::Bar => "bar",\n' + good + bad
+        try:
+            parse_declarations(text)
+        except GateError as exc:
+            assert "could parse only" in str(exc), exc
+            return
+        raise AssertionError("an unparseable declaration row was silently skipped")
+
     def t_zero_declarations_is_an_error():
         try:
             parse_declarations('Self::Foo => "foo",\nconst SEMANTICS: &[RuleSpec] = &[];')
@@ -512,7 +559,7 @@ def _self_test() -> int:
     # A harness that discovers zero cases prints the same "OK" as one that ran
     # them all — the identical silent-pass shape `parse_declarations` refuses.
     # The floor is asserted rather than merely reported for that reason.
-    expected = 20
+    expected = 21
     if len(cases) != expected:
         print(
             f"SELF-TEST HARNESS: discovered {len(cases)} cases, expected {expected}. "

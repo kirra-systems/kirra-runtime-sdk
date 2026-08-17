@@ -216,6 +216,10 @@
       "class": "bounded",
       "why": "Tier 4 box 4a. One `world_store_meta` row by primary key. The fail-closed fallback for an absent/unparseable value is `MAX(generation)`, an index max rather than a scan. Constant result size -- one integer."
     },
+    "provenance_tree": {
+      "class": "bounded",
+      "why": "Tier 4 box 4b. Every dimension of the walk has a validated ceiling and NONE of them is a function of store size: at most `GraphSpec::max_nodes` nodes (<= MAX_PROVENANCE_NODES), each reading one citation page (<= MAX_CITATIONS_PAGE, probe-truncated) and resolving each citation against at most MAX_CARRIERS carriers by the observation_id index. Stated rather than waved at, because the product is the honest part: 256 nodes x 256 citations is ~65k index lookups in the theoretical worst case, and a caller wanting an interactive answer passes a smaller GraphSpec rather than relying on real provenance being shallow. Two independent budgets is deliberate -- a depth bound alone leaves width open, since one event may cite any number of observations."
+    },
     "read_at_generation": {
       "class": "unbounded",
       "why": "The whole claims projection reconstructed at a generation. Pinning the coordinate bounds WHEN, not HOW MUCH -- the same trap as `identity_view_at`."
