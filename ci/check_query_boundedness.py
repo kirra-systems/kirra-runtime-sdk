@@ -191,14 +191,22 @@ def page_bound_violation(signature: str, body: str) -> bool:
 
 ANY_IMPL_RE = r"^impl(?:<[^>]*>)? .*\{"
 CEILING_RE = re.compile(r"\bMAX_[A-Z0-9_]+\b")
-FN_ANY_RE = re.compile(r"\n    (?:pub )?fn ([a-z_0-9]+)\s*(?:<[^>]*>)?\s*\(")
+# Every visibility and qualifier an impl method can carry, not just the two that
+# happened to matter first. `pub(crate) fn` is the one that caught this out in
+# review: the scan claimed to see EVERY impl method while matching only bare `fn`
+# and `pub fn`, so a restricted-visibility query would have been invisible to
+# rule 6 with the docstring insisting otherwise.
+FN_ANY_RE = re.compile(
+    r"\n    (?:pub(?:\s*\([^)]*\))?\s+)?(?:const\s+|async\s+|unsafe\s+)*"
+    r"fn ([a-z_0-9]+)\s*(?:<[^>]*>)?\s*\("
+)
 
 
 def _any_fn_bodies(impl_body: str) -> list[tuple[str, str, str]]:
     """Like [`_fn_bodies`], but also sees methods that are not `pub`.
 
-    Trait-impl methods carry no `pub`, so the `pub fn` scan walked straight past
-    every one of them. That is not a hypothetical gap: `CitationLookup for
+    Trait-impl methods carry no `pub`, and restricted ones carry `pub(crate)`, so
+    a `pub fn` scan walked straight past both. That is not a hypothetical gap: `CitationLookup for
     WorldStore` is where the provenance walk gets ALL of its SQL, and the whole
     impl block was invisible to this gate — its block matched and it yielded
     zero functions, which reads identically to "nothing to flag".
@@ -718,6 +726,40 @@ impl provenance_graph::CitationLookup for WorldStore {
               "to the scan — rule 6 would report green on an unscanned surface.")
         return 1
     print("self-test: trait-impl methods are visible to the ceiling scan")
+
+    # ...and so is every other visibility an impl method can carry. Raised in
+    # review of #1450: the scan matched only `fn` and `pub fn` while its own
+    # docstring claimed it saw every impl method, which is the same shape of
+    # false completeness rule 6 exists to catch.
+    visibilities = """
+impl Store {
+    pub(crate) fn restricted(&self) -> Result<(), E> {
+        let mut stmt = self.conn.prepare("SELECT a FROM t")?;
+        rows.truncate(MAX_THING);
+    }
+    pub(super) fn super_scoped(&self) -> Result<(), E> { let _ = 1; }
+    async fn asynchronous(&self) -> Result<(), E> { let _ = 1; }
+    pub const fn constant(&self) -> usize { 1 }
+    unsafe fn unsafely(&self) -> usize { 1 }
+}
+"""
+    found = [f for b in _impl_bodies(visibilities, ANY_IMPL_RE) for f, _, _ in _any_fn_bodies(b)]
+    for expected in ("restricted", "super_scoped", "asynchronous", "constant", "unsafely"):
+        if expected not in found:
+            print(f"SELF-TEST FAIL: `{expected}` is invisible to the method scan, "
+                  f"so rule 6 would report green on an unscanned method. Saw: {found}")
+            return 1
+    print(f"self-test: all {len(found)} impl-method visibilities are scanned")
+
+    # Non-vacuity: the restricted one must not merely be SEEN, it must be JUDGED.
+    restricted_body = next(
+        body for b in _impl_bodies(visibilities, ANY_IMPL_RE)
+        for name, _, body in _any_fn_bodies(b) if name == "restricted")
+    if not ceiling_bound_violation(restricted_body):
+        print("SELF-TEST FAIL: a `pub(crate)` method with a MAX_* ceiling over a "
+              "LIMIT-less SELECT was discovered but NOT flagged.")
+        return 1
+    print("self-test: a restricted-visibility ceiling violation is flagged, not just seen")
 
     # (h) RULE 5, THE HISTORICAL ROUTE: `mission_context` as it actually shipped
     #     before the query engine existed. Copied from the commit that this box
