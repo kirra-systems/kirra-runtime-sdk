@@ -5253,11 +5253,35 @@ impl provenance_graph::CitationLookup for WorldStore {
         })
     }
 
-    fn compacted_spans(&self) -> Result<Vec<(i64, i64)>, Self::Error> {
-        Ok(self
-            .citations()?
-            .into_iter()
-            .map(|c| (c.lo_generation, c.hi_generation))
-            .collect())
+    fn compacted_spans(
+        &self,
+        at_generation: i64,
+    ) -> Result<provenance_graph::CompactedSpans, Self::Error> {
+        // Was an unlimited `SELECT ... FROM compaction_citations` whose cost grew
+        // with the store's whole compaction history — the one dimension of
+        // `provenance_tree` that was not bounded. The pin filter and the ceiling
+        // move into SQL; the walk re-applies both.
+        if !self.has_table("compaction_citations")? {
+            return Ok(provenance_graph::CompactedSpans::default());
+        }
+        // One past the ceiling, for `carriers`' reason: a set of exactly
+        // MAX_COMPACTED_SPANS is complete, and inferring truncation from the
+        // length alone would report a full page as a cut one.
+        let probe = provenance_graph::MAX_COMPACTED_SPANS.saturating_add(1);
+        let mut stmt = self.conn.prepare(
+            "SELECT lo_generation, hi_generation FROM compaction_citations
+             WHERE lo_generation <= ?1
+             ORDER BY lo_generation ASC LIMIT ?2",
+        )?;
+        let mapped = stmt.query_map(params![at_generation, probe as i64], |r| {
+            Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?))
+        })?;
+        let mut spans = Vec::new();
+        for row in mapped {
+            spans.push(row?);
+        }
+        let truncated = spans.len() > provenance_graph::MAX_COMPACTED_SPANS;
+        spans.truncate(provenance_graph::MAX_COMPACTED_SPANS);
+        Ok(provenance_graph::CompactedSpans { spans, truncated })
     }
 }

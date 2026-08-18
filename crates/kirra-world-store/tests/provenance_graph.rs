@@ -129,6 +129,79 @@ fn only_branch(t: &ProvenanceTree, node: usize) -> &kirra_world_store::provenanc
 }
 
 // ---------------------------------------------------------------------------
+// 0. The bound on the span enumeration
+// ---------------------------------------------------------------------------
+
+/// **`provenance_tree` is bounded in its LAST unbounded dimension.**
+///
+/// The span list used to be a `SELECT ... FROM compaction_citations` with no
+/// `LIMIT`, so one dimension of an otherwise-bounded query grew with the store's
+/// whole compaction history. This is the store-level proof that it no longer
+/// does — the resolver's own tests cannot show it, because they hand the rule a
+/// list that SQL already produced.
+///
+/// The assertions are deliberately three: the list is capped, the caller is told
+/// it was capped, and — the part that matters — the dangle is still qualified as
+/// possibly-compacted. A bound that achieved the first two by quietly reporting
+/// "nothing was ever recorded" would be worse than the unbounded scan.
+#[test]
+fn the_span_enumeration_is_capped_and_says_so_without_losing_the_qualification() {
+    let (mut s, p) = store("span-cap");
+    // One event citing an id nothing carries: a dangle needing qualification.
+    let src = append_ev(&mut s, "src", "obs-src", "robot-1", &["obs-gone"]);
+    // More compacted spans than the ceiling admits, every one of them below the
+    // pin so every one qualifies.
+    let over = kirra_world_store::provenance_graph::MAX_COMPACTED_SPANS + 12;
+    for i in 0..over {
+        s.forge_citation_for_test(-(i as i64) - 1, -(i as i64) - 1, T0)
+            .expect("forge citation");
+    }
+
+    let t = tree(&s, src, src);
+    match &only_branch(&t, 0).resolution {
+        CitationResolution::Dangling {
+            reason: DanglingReason::PossiblyCompacted { spans, truncated },
+        } => {
+            assert_eq!(
+                spans.len(),
+                kirra_world_store::provenance_graph::MAX_COMPACTED_SPANS,
+                "the enumeration is capped at the ceiling, not at the store size"
+            );
+            assert!(truncated, "and the caller is told the account is partial");
+        }
+        other => panic!("a capped span list must still qualify the dangle: {other:?}"),
+    }
+    clean(&p);
+}
+
+/// Below the ceiling nothing changes: the full list, and no truncation claim.
+///
+/// The negative control for the test above. Without it, a rule that reported
+/// `truncated` on every compacted dangle would pass — and "some evidence is
+/// missing from this account" is not a caveat to emit unconditionally.
+#[test]
+fn a_span_list_under_the_ceiling_is_complete_and_not_flagged() {
+    let (mut s, p) = store("span-uncapped");
+    let src = append_ev(&mut s, "src", "obs-src", "robot-1", &["obs-gone"]);
+    for i in 0..3 {
+        s.forge_citation_for_test(-i - 1, -i - 1, T0)
+            .expect("forge citation");
+    }
+
+    let t = tree(&s, src, src);
+    match &only_branch(&t, 0).resolution {
+        CitationResolution::Dangling {
+            reason: DanglingReason::PossiblyCompacted { spans, truncated },
+        } => {
+            assert_eq!(spans.len(), 3, "every qualifying span is named");
+            assert!(!truncated, "and nothing claims more were held back");
+        }
+        other => panic!("expected a qualified dangle: {other:?}"),
+    }
+    clean(&p);
+}
+
+// ---------------------------------------------------------------------------
 // 1. The load-bearing property: historical honesty
 // ---------------------------------------------------------------------------
 
@@ -402,7 +475,7 @@ fn a_citation_into_a_compacted_window_is_dangling_but_says_it_may_have_been_dele
     let branch_resolution = only_branch(&tree(&s, a, a), 0).resolution.clone();
     match branch_resolution {
         CitationResolution::Dangling {
-            reason: DanglingReason::PossiblyCompacted { spans },
+            reason: DanglingReason::PossiblyCompacted { spans, .. },
         } => assert_eq!(
             spans,
             vec![first],
@@ -436,7 +509,7 @@ fn an_id_that_never_existed_stays_never_visible_even_in_a_compacted_store() {
     // conservative one.
     match only_branch(&tree(&s, a, a), 0).resolution.clone() {
         CitationResolution::Dangling {
-            reason: DanglingReason::PossiblyCompacted { spans },
+            reason: DanglingReason::PossiblyCompacted { spans, .. },
         } => assert_eq!(spans, vec![first]),
         other => panic!("expected the conservative reading, got {other:?}"),
     }

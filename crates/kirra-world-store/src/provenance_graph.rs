@@ -81,6 +81,25 @@ pub const MAX_PROVENANCE_NODES: usize = 256;
 /// `truncated` set — never a silent choice among the ones that fit.
 pub const MAX_CARRIERS: usize = MAX_CITATIONS_PAGE;
 
+/// The most compacted spans named on one dangling citation.
+///
+/// Matches [`MAX_CARRIERS`] for the same reason it matches [`MAX_CITATIONS_PAGE`]:
+/// these are all "evidence a caller is walking", and separate ceilings would be
+/// separate numbers to keep in step for no stated reason.
+///
+/// # Why capping this list is safe, and capping the *decision* would not be
+///
+/// The span list does two different jobs. It decides
+/// [`DanglingReason::NeverVisible`] vs [`DanglingReason::PossiblyCompacted`],
+/// which needs only to know whether **any** qualifying span exists — and it
+/// enumerates the spans an investigator would go read, which is the part that
+/// grows with the store's compaction history. Truncating the enumeration can
+/// only ever shorten an already non-empty list, so it can never flip the
+/// qualification back to `NeverVisible`. That direction is the whole point: this
+/// module may over-report compaction at the cost of a caveat, and may never
+/// under-report it, which would be a false claim that nothing was recorded.
+pub const MAX_COMPACTED_SPANS: usize = MAX_CITATIONS_PAGE;
+
 // ---------------------------------------------------------------------------
 // Bounds
 // ---------------------------------------------------------------------------
@@ -265,8 +284,21 @@ pub enum DanglingReason {
     /// go to the compaction citation rather than conclude nothing was there.
     PossiblyCompacted {
         /// The `lo_generation` of each qualifying span — the key of its
-        /// compaction citation.
+        /// compaction citation. At most [`MAX_COMPACTED_SPANS`] of them.
+        ///
+        /// May be empty **only** when `truncated` is set: that is a store which
+        /// reported more qualifying spans than it returned and returned none the
+        /// walk could keep. Naming nothing is honest there; saying
+        /// `NeverVisible` would not be.
         spans: Vec<i64>,
+        /// Whether more qualifying spans exist than [`MAX_COMPACTED_SPANS`]
+        /// admits.
+        ///
+        /// Carried per-qualification rather than inferred from the list length,
+        /// because a full list and a truncated one are the same length and mean
+        /// different things — the second is not a complete account of what was
+        /// deleted.
+        truncated: bool,
     },
 }
 
@@ -439,6 +471,20 @@ pub struct Carriers {
     pub truncated: bool,
 }
 
+/// The compacted spans that could bear on one pin.
+///
+/// The bounded counterpart of [`Carriers`], and bounded for the same reason: a
+/// walk must not have a dimension that grows with the store. Here that dimension
+/// is the compaction history, which grows for as long as retention runs.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct CompactedSpans {
+    /// Qualifying spans as `(lo_generation, hi_generation)`, ascending by `lo`,
+    /// at most [`MAX_COMPACTED_SPANS`] of them.
+    pub spans: Vec<(i64, i64)>,
+    /// Whether more qualify than were returned.
+    pub truncated: bool,
+}
+
 /// **What a walk needs from storage** — five primitive questions, no judgement.
 ///
 /// The split is deliberate and matches [`crate::lineage::select_lineage`]'s: an
@@ -484,15 +530,23 @@ pub trait CitationLookup {
     /// Implementation-defined.
     fn carriers(&self, observation_id: &str, at_generation: i64) -> Result<Carriers, Self::Error>;
 
-    /// Every compacted span, as `(lo_generation, hi_generation)`.
+    /// Compacted spans that could bear on `at_generation`, ascending by `lo`,
+    /// at most [`MAX_COMPACTED_SPANS`] of them plus a truncation flag.
     ///
-    /// Unfiltered: which spans could bear on a pin is a judgement, and it is
-    /// made in the walk.
+    /// The pin is stated here **and re-applied** by the walk, exactly as
+    /// [`CitationLookup::carriers`]' bound is: an implementation may push the
+    /// filter into SQL — that is what the store does, and it is what makes this
+    /// bounded — but which spans bear on a pin is a judgement, so the walk does
+    /// not depend on the implementation having got it right.
+    ///
+    /// Ascending by `lo` is load-bearing rather than cosmetic: a limit has to
+    /// drop something, and dropping a deterministic something is what keeps two
+    /// walks at the same pin returning the same answer.
     ///
     /// # Errors
     ///
     /// Implementation-defined.
-    fn compacted_spans(&self) -> Result<Vec<(i64, i64)>, Self::Error>;
+    fn compacted_spans(&self, at_generation: i64) -> Result<CompactedSpans, Self::Error>;
 }
 
 /// What a walk refuses, as distinct from what its storage failed at.
@@ -540,7 +594,7 @@ pub enum WalkError<E> {
 pub fn resolve_citation(
     carriers: &Carriers,
     at_generation: i64,
-    compacted_spans: &[(i64, i64)],
+    compacted: &CompactedSpans,
 ) -> CitationResolution {
     let mut visible: Vec<i64> = carriers
         .generations
@@ -567,16 +621,23 @@ pub fn resolve_citation(
     // A span whose first removed generation is at or below the pin could have
     // held a carrier. Its hi bound is deliberately not consulted: a span
     // straddling the pin still removed events the pin could see.
-    let spans: Vec<i64> = compacted_spans
+    let mut spans: Vec<i64> = compacted
+        .spans
         .iter()
         .filter(|(lo, _hi)| *lo <= at_generation)
         .map(|(lo, _hi)| *lo)
         .collect();
+    let truncated = compacted.truncated || spans.len() > MAX_COMPACTED_SPANS;
+    spans.truncate(MAX_COMPACTED_SPANS);
     CitationResolution::Dangling {
-        reason: if spans.is_empty() {
+        // `NeverVisible` requires BOTH that no span qualifies AND that the store
+        // is not holding any back. An empty list under truncation means the
+        // store said more exist than it returned — naming none of them is the
+        // honest answer there, and claiming nothing was ever recorded is not.
+        reason: if spans.is_empty() && !truncated {
             DanglingReason::NeverVisible
         } else {
-            DanglingReason::PossiblyCompacted { spans }
+            DanglingReason::PossiblyCompacted { spans, truncated }
         },
     }
 }
@@ -620,7 +681,11 @@ pub fn walk_provenance<S: CitationLookup>(
             floor,
         });
     }
-    let spans = lookup.compacted_spans().map_err(WalkError::Lookup)?;
+    // Once per walk, not once per node: the pin is fixed for the whole walk, so
+    // every branch resolves against the same bounded set.
+    let spans = lookup
+        .compacted_spans(at_generation)
+        .map_err(WalkError::Lookup)?;
 
     let mut walk = Walk {
         lookup,
@@ -647,7 +712,7 @@ struct Walk<'a, S: CitationLookup> {
     at_generation: i64,
     spec: GraphSpec,
     floor: i64,
-    spans: Vec<(i64, i64)>,
+    spans: CompactedSpans,
     nodes: Vec<ProvenanceNode>,
     /// The generations on the path from the root — the gray set. Membership,
     /// not visitation: a node already popped is a diamond, not a cycle.
@@ -886,8 +951,23 @@ impl CitationLookup for InMemoryCitations {
         })
     }
 
-    fn compacted_spans(&self) -> Result<Vec<(i64, i64)>, Self::Error> {
-        Ok(self.spans.clone())
+    fn compacted_spans(&self, at_generation: i64) -> Result<CompactedSpans, Self::Error> {
+        // The same shape as the store's SQL: filter to the pin, order by `lo`,
+        // probe one past the ceiling so a full page is not mistaken for a cut
+        // one. The portability proof is only a proof if both do this the same.
+        let mut qualifying: Vec<(i64, i64)> = self
+            .spans
+            .iter()
+            .copied()
+            .filter(|(lo, _hi)| *lo <= at_generation)
+            .collect();
+        qualifying.sort_unstable();
+        let truncated = qualifying.len() > MAX_COMPACTED_SPANS;
+        qualifying.truncate(MAX_COMPACTED_SPANS);
+        Ok(CompactedSpans {
+            spans: qualifying,
+            truncated,
+        })
     }
 }
 
@@ -908,6 +988,102 @@ mod tests {
                 &branches[0]
             }
             other => panic!("no indexed citations: {other:?}"),
+        }
+    }
+
+    /// **Truncating the span list can never turn a compacted dangle into a
+    /// never-recorded one.**
+    ///
+    /// The load-bearing property of the bound, and first for that reason. The
+    /// qualification asks whether ANY span could have held a carrier; the list
+    /// only says which. So a cap may shorten the answer and may never reverse
+    /// it — the direction this module's `DanglingReason` docs call the
+    /// difference between a caveat and a false claim.
+    #[test]
+    fn a_truncated_span_list_still_qualifies_the_dangle() {
+        let compacted = CompactedSpans {
+            spans: vec![(2, 3), (4, 5)],
+            truncated: true,
+        };
+        let resolution = resolve_citation(&Carriers::default(), 9, &compacted);
+        match resolution {
+            CitationResolution::Dangling {
+                reason: DanglingReason::PossiblyCompacted { spans, truncated },
+            } => {
+                assert_eq!(spans, vec![2, 4], "the spans that fit are still named");
+                assert!(truncated, "and the caller is told more exist");
+            }
+            other => panic!("truncation must not change the qualification: {other:?}"),
+        }
+    }
+
+    /// The same property at its sharpest: a store that reports more spans than
+    /// it returned, and returns none the walk can keep.
+    ///
+    /// An empty list is normally `NeverVisible`. Under truncation it must not
+    /// be — "I am holding some back" and "there were none" are opposite claims,
+    /// and only one of them is safe to guess wrong.
+    #[test]
+    fn an_empty_but_truncated_span_list_is_not_never_visible() {
+        let compacted = CompactedSpans {
+            // Everything returned is above the pin, so the walk's re-filter
+            // drops it — while the store still says more qualify.
+            spans: vec![(50, 60)],
+            truncated: true,
+        };
+        let resolution = resolve_citation(&Carriers::default(), 9, &compacted);
+        match resolution {
+            CitationResolution::Dangling {
+                reason: DanglingReason::PossiblyCompacted { spans, truncated },
+            } => {
+                assert!(spans.is_empty(), "there is nothing it can honestly name");
+                assert!(truncated, "so the flag is all that carries the fact");
+            }
+            other => panic!("an empty truncated list must not read as never-recorded: {other:?}"),
+        }
+    }
+
+    /// Nothing held back and nothing qualifying is still `NeverVisible`.
+    ///
+    /// The negative control for the two above: without it, they are equally
+    /// satisfied by a rule that answered `PossiblyCompacted` unconditionally,
+    /// which would destroy the distinction the whole arm exists to draw.
+    #[test]
+    fn no_qualifying_span_and_no_truncation_is_never_visible() {
+        let compacted = CompactedSpans {
+            spans: vec![(50, 60)],
+            truncated: false,
+        };
+        let resolution = resolve_citation(&Carriers::default(), 9, &compacted);
+        assert_eq!(
+            resolution,
+            CitationResolution::Dangling {
+                reason: DanglingReason::NeverVisible
+            }
+        );
+    }
+
+    /// The walk caps the enumeration itself, not only its storage.
+    ///
+    /// The seam's ceiling is re-applied here for `carriers`' reason: an
+    /// implementation may push the bound into SQL, but the bound is a judgement,
+    /// so a store that ignored it must not make the walk unbounded.
+    #[test]
+    fn the_walk_caps_the_span_list_even_if_storage_did_not() {
+        let over = MAX_COMPACTED_SPANS + 7;
+        let compacted = CompactedSpans {
+            spans: (0..over).map(|i| (i as i64, i as i64)).collect(),
+            truncated: false,
+        };
+        let resolution = resolve_citation(&Carriers::default(), i64::MAX, &compacted);
+        match resolution {
+            CitationResolution::Dangling {
+                reason: DanglingReason::PossiblyCompacted { spans, truncated },
+            } => {
+                assert_eq!(spans.len(), MAX_COMPACTED_SPANS, "capped by the walk");
+                assert!(truncated, "and reported as capped, not as complete");
+            }
+            other => panic!("expected a compacted dangle: {other:?}"),
         }
     }
 
@@ -1061,8 +1237,8 @@ mod tests {
             // The violation: every carrier, at every coordinate.
             self.0.carriers(observation_id, i64::MAX)
         }
-        fn compacted_spans(&self) -> Result<Vec<(i64, i64)>, Self::Error> {
-            self.0.compacted_spans()
+        fn compacted_spans(&self, at_generation: i64) -> Result<CompactedSpans, Self::Error> {
+            self.0.compacted_spans(at_generation)
         }
     }
 
@@ -1134,7 +1310,10 @@ mod tests {
         assert_eq!(
             only(&walk(&store, 5, 5), 0).resolution,
             CitationResolution::Dangling {
-                reason: DanglingReason::PossiblyCompacted { spans: vec![1] }
+                reason: DanglingReason::PossiblyCompacted {
+                    spans: vec![1],
+                    truncated: false,
+                }
             }
         );
     }

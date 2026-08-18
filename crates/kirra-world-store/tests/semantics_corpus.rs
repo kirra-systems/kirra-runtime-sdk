@@ -744,7 +744,7 @@ struct CitationWalk<'a> {
     max_depth: usize,
     max_nodes: usize,
     floor: i64,
-    spans: Vec<(i64, i64)>,
+    spans: kirra_world_store::provenance_graph::CompactedSpans,
     nodes: Vec<ProvenanceNode>,
     path: Vec<i64>,
     visited: Vec<i64>,
@@ -846,6 +846,7 @@ impl CitationWalk<'_> {
         }
         let spans: Vec<i64> = self
             .spans
+            .spans
             .iter()
             .filter(|(lo, _)| *lo <= pin)
             .map(|(lo, _)| *lo)
@@ -854,7 +855,13 @@ impl CitationWalk<'_> {
             reason: if spans.is_empty() || self.v.never_qualify_dangle {
                 DanglingReason::NeverVisible
             } else {
-                DanglingReason::PossiblyCompacted { spans }
+                DanglingReason::PossiblyCompacted {
+                    spans,
+                    // The mirror carries the flag the real rule carries; a
+                    // harness that dropped it would render every qualification
+                    // as complete and quietly stop discriminating the case.
+                    truncated: self.spans.truncated,
+                }
             },
         }
     }
@@ -918,7 +925,7 @@ fn render_citation_variant(v: CitationVariant) -> String {
                 max_depth,
                 max_nodes,
                 floor,
-                spans: store.compacted_spans().expect("infallible"),
+                spans: store.compacted_spans(at).expect("infallible"),
                 nodes: Vec::new(),
                 path: Vec::new(),
                 visited: Vec::new(),

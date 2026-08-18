@@ -282,7 +282,10 @@ fn the_three_resolution_outcomes_arrive_distinguishable() {
                 branch(
                     "obs-gone",
                     CitationResolution::Dangling {
-                        reason: TreeDangling::PossiblyCompacted { spans: vec![2] },
+                        reason: TreeDangling::PossiblyCompacted {
+                            spans: vec![2],
+                            truncated: false,
+                        },
                     },
                     TreeContinuation::NotWalked(NotWalkedReason::Nothing),
                 ),
