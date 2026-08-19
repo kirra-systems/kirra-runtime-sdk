@@ -70,6 +70,7 @@ from __future__ import annotations
 
 import re
 import sys
+import tomllib
 from pathlib import Path
 
 # The crate this gate guards. A list, so a second neutral artifact crate
@@ -289,16 +290,70 @@ def violations_in(text: str) -> list[str]:
     return found
 
 
-def declared_dependencies(manifest_text: str) -> list[str]:
-    """Every package name declared as a dependency, comments stripped.
+# The manifest tables Cargo resolves dependencies from. `build-dependencies`
+# is here even though this crate has no build script: the rule is about what
+# the crate may pull in, and a build script pulling in an actuation transport
+# is not less of a breach for running at build time.
+DEPENDENCY_TABLES = ("dependencies", "dev-dependencies", "build-dependencies")
 
-    Deliberately not `kirra-`-scoped: an external actuation transport
-    (`r2r`, `serialport`, ...) is exactly as disqualifying as an internal one,
-    and scoping the regex to `kirra-` was how the previous version could only
-    ever have caught half the rule.
+
+def declared_dependencies(manifest_text: str) -> list[str]:
+    """Every package name declared as a dependency, in any Cargo spelling.
+
+    PARSED, not pattern-matched. The first version of this used a line regex,
+    and a line regex is wrong in both directions at once:
+
+      MISSES  `kirra-mick.path = "../kirra-mick"` (dotted key -- the name and
+              the `=` are not adjacent) and `[dependencies.kirra-mick]`
+              (sub-table -- the name is in the header, and no line under it
+              names the package at all). Both are ordinary Cargo, and either
+              one walks a forbidden dependency straight past the gate.
+
+      INVENTS a violation for `[features]\nkirra-mick = []`, because a line
+              regex cannot see which table it is standing in. A feature named
+              after a crate is not a dependency on it.
+
+    A gate that can be both bypassed and wrong is worse than a strict one: the
+    bypass is the hole, and the false positive is what teaches a reader to stop
+    believing the failures. `tomllib` knows the grammar; this function should
+    not be re-deriving it.
+
+    Renamed dependencies (`foo = { package = "kirra-mick" }`) are resolved to
+    the REAL package, because the alias is the caller's choice of local name and
+    the fence is about what actually gets linked.
     """
-    text = strip_comments_toml(manifest_text)
-    return sorted(set(re.findall(r"^\s*([A-Za-z][\w-]*)\s*=", text, re.M)))
+    try:
+        manifest = tomllib.loads(manifest_text)
+    except tomllib.TOMLDecodeError as exc:
+        # Fail closed: an unparseable manifest is not a neutral one.
+        raise GateError(f"guarded manifest is not valid TOML: {exc}") from exc
+
+    found: set[str] = set()
+
+    def harvest(table: object) -> None:
+        if not isinstance(table, dict):
+            return
+        for name, spec in table.items():
+            # `pkg = { package = "real-name" }` renames; the fence follows the
+            # real package, never the local alias.
+            if isinstance(spec, dict) and isinstance(spec.get("package"), str):
+                found.add(spec["package"])
+            else:
+                found.add(name)
+
+    for key in DEPENDENCY_TABLES:
+        harvest(manifest.get(key))
+
+    # `[target."cfg(unix)".dependencies]` and friends. Platform-conditional is
+    # still a dependency: "only on Linux" is not a neutrality exemption.
+    targets = manifest.get("target")
+    if isinstance(targets, dict):
+        for cfg in targets.values():
+            if isinstance(cfg, dict):
+                for key in DEPENDENCY_TABLES:
+                    harvest(cfg.get(key))
+
+    return sorted(found)
 
 
 def forbidden_dependencies(manifest_text: str) -> list[str]:
@@ -487,6 +542,60 @@ def _self_test() -> int:
         src = '[dependencies]\nserialport = "4"\n'
         assert forbidden_dependencies(src), "an external actuator transport was admitted"
 
+    def t_a_dotted_key_dependency_is_flagged():
+        # `kirra-mick.path = ...` -- the package name and the `=` are not
+        # adjacent, so the line regex this replaced saw nothing at all.
+        src = '[dependencies]\nkirra-mick.path = "../kirra-mick"\n'
+        assert forbidden_dependencies(src), "a dotted-key dependency was admitted"
+
+    def t_a_sub_table_dependency_is_flagged():
+        # `[dependencies.kirra-mick]` -- the name is in the HEADER, and no line
+        # inside the table mentions the package.
+        src = '[dependencies.kirra-mick]\npath = "../kirra-mick"\n'
+        assert forbidden_dependencies(src), "a sub-table dependency was admitted"
+
+    def t_a_dotted_external_transport_is_flagged():
+        src = '[dependencies]\nserialport.version = "4"\n'
+        assert forbidden_dependencies(src), "a dotted external transport was admitted"
+
+    def t_a_forbidden_dev_dependency_is_flagged():
+        # Dev-only still ships the edge to anyone building the tests, and the
+        # rule is about what this crate may pull in.
+        src = '[dev-dependencies]\nkirra-taj.path = "../kirra-taj"\n'
+        assert forbidden_dependencies(src), "a forbidden dev-dependency was admitted"
+
+    def t_a_forbidden_build_dependency_is_flagged():
+        src = '[build-dependencies]\nkirra-ros2-adapter = "0.1"\n'
+        assert forbidden_dependencies(src), "a forbidden build-dependency was admitted"
+
+    def t_a_platform_conditional_dependency_is_flagged():
+        # "only on Linux" is not a neutrality exemption.
+        src = '[target."cfg(unix)".dependencies]\nkirra-r2cp = { path = "../kirra-r2cp" }\n'
+        assert forbidden_dependencies(src), "a target-specific dependency was admitted"
+
+    def t_a_renamed_dependency_is_flagged_by_its_real_package():
+        # The alias is the caller's choice of local name; the fence follows what
+        # actually gets linked. Renaming must not be a way through.
+        src = '[dependencies]\nhelper = { package = "kirra-mick", path = "../kirra-mick" }\n'
+        assert forbidden_dependencies(src), "a renamed forbidden dependency was admitted"
+
+    def t_a_feature_named_after_a_crate_is_not_a_dependency():
+        # The other direction. A gate that invents violations teaches readers to
+        # stop believing its failures, which costs it the real ones too.
+        src = '[dependencies]\nserde = "1"\n\n[features]\nkirra-mick = []\n'
+        assert not forbidden_dependencies(src), "a feature name was read as a dependency"
+
+    def t_a_package_name_is_not_a_dependency():
+        src = '[package]\nname = "kirra-explain-types"\nversion = "0.1.0"\n'
+        assert not forbidden_dependencies(src), "[package] keys were read as dependencies"
+
+    def t_an_unparseable_manifest_fails_closed():
+        try:
+            forbidden_dependencies("[dependencies\nkirra-mick = 1\n")
+        except GateError:
+            return
+        raise AssertionError("a malformed manifest was treated as neutral")
+
     def t_serde_is_admitted():
         # The rule is neutrality, not emptiness. If this ever fails, the gate
         # has drifted back to counting entries.
@@ -512,7 +621,7 @@ def _self_test() -> int:
     for name, fn in cases:
         case(name, fn)
 
-    expected = 19
+    expected = 29
     if len(cases) != expected:
         print(
             f"SELF-TEST HARNESS: discovered {len(cases)} cases, expected {expected}.",
