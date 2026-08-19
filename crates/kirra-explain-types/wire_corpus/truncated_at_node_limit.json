@@ -1,0 +1,38 @@
+{
+  "outcome": "explained",
+  "explanation": {
+    "version": 1,
+    "tense": "Current",
+    "nodes": [
+      {
+        "depth": 0,
+        "parent": null,
+        "claim": "pallet_4 last_seen_at dock_a",
+        "evidence": {
+          "Recorded": {
+            "branches": [
+              {
+                "state": {
+                  "Resolved": {
+                    "evidence": "package_17 last_seen_at dock_a — recorded by warehouse-scanner as event ev-b",
+                    "digest": "f32ad18b9bc0c98133de1693e6eda66c8a3bf9e29d6af133258f006e32a78c5e"
+                  }
+                },
+                "continuation": {
+                  "Stopped": "NodeLimit"
+                }
+              }
+            ],
+            "more_citations": false
+          }
+        }
+      }
+    ],
+    "completeness": {
+      "truncated": true,
+      "cycle_detected": false,
+      "degraded": false,
+      "coverage_limited": false
+    }
+  }
+}

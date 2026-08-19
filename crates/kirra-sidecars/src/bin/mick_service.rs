@@ -53,6 +53,7 @@ use kirra_mick::OllamaClient;
 use kirra_planner::LlmBrain;
 use kirra_sidecars::destination::resolver_from_env;
 use kirra_sidecars::destination_service::{DestinationRequest, DestinationService};
+use kirra_sidecars::explainer::{explain_reply, not_configured_reply};
 use kirra_sidecars::http::{read_request, respond, respond_error};
 use kirra_sidecars::mick::{IntentOutcome, IntentRequest, IntentService};
 use kirra_sidecars::narrator::{fetch_last_verdict, NarratorConfig};
@@ -63,6 +64,7 @@ fn serve(
     svc: &mut IntentService<OllamaClient>,
     dest: &mut DestinationService,
     narrator: Option<&NarratorConfig>,
+    explainer: Option<&kirra_mick::explain_client::ExplainClient>,
 ) {
     let req = match read_request(&mut stream) {
         Ok(r) => r,
@@ -151,12 +153,46 @@ fn serve(
                 "{\"error\":\"NARRATOR_NOT_CONFIGURED\"}",
             ),
         },
+        // Tier 4 box 3b — the spoken end of the Kirra World explanation seam.
+        // Mick names a SUBJECT and nothing else: the pin, the freshness policy,
+        // the lineage depth and the graph bounds are all chosen by the producer,
+        // which is what keeps this a capability rather than a query surface.
+        ("POST", "/explain") => match explainer {
+            Some(client) => match serde_json::from_slice::<ExplainRequest>(&req.body) {
+                Ok(r) => respond(&mut stream, "200 OK", &explain_reply(client, &r.subject_id)),
+                Err(e) => respond(
+                    &mut stream,
+                    "400 Bad Request",
+                    &serde_json::json!({"error": format!("{e}")}).to_string(),
+                ),
+            },
+            // Unconfigured is NOT "there is nothing to explain": that would be
+            // a claim about Kirra World's contents from a process that never
+            // asked it anything.
+            None => respond(
+                &mut stream,
+                "503 Service Unavailable",
+                &not_configured_reply(),
+            ),
+        },
         _ => respond(
             &mut stream,
             "404 Not Found",
             "{\"error\":\"unknown route\"}",
         ),
     }
+}
+
+/// The sidecar's own request shape for `POST /explain`.
+///
+/// Deliberately NOT `kirra_explain_types::ExplainCurrentSubject` re-served: this
+/// is Mick's inbound surface, and the producer's contract is what Mick SENDS.
+/// Keeping them as separate types means a future field on the inbound side
+/// (a persona, a verbosity) cannot become a field on the wire to Kirra World by
+/// accident.
+#[derive(serde::Deserialize)]
+struct ExplainRequest {
+    subject_id: String,
 }
 
 fn main() {
@@ -198,6 +234,10 @@ fn main() {
             std::process::exit(1);
         }
     };
+    // Explainer: a base URL or nothing. No half-configured case to abort on —
+    // unlike the narrator, the producer serves presentation-only text and
+    // carries no credential to pair with the URL.
+    let explainer = kirra_sidecars::explainer::explainer_from_env();
     // The trusted destination resolver, from the SAME env config
     // planner_service uses — one config path, so two processes can never
     // disagree about what "the kitchen" means. Malformed → startup abort.
@@ -210,12 +250,19 @@ fn main() {
         std::process::exit(1);
     });
     println!(
-        "Mick intent service on http://{addr}  (POST /intent, GET /intent/last, POST /destination, GET /destination/last, GET /narration/last, GET /health) — persona {persona_label}, narrator {}",
-        if narrator.is_some() { "on" } else { "off" }
+        "Mick intent service on http://{addr}  (POST /intent, GET /intent/last, POST /destination, GET /destination/last, GET /narration/last, POST /explain, GET /health) — persona {persona_label}, narrator {}, explainer {}",
+        if narrator.is_some() { "on" } else { "off" },
+        if explainer.is_some() { "on" } else { "off" }
     );
     for stream in listener.incoming() {
         match stream {
-            Ok(s) => serve(s, &mut svc, &mut dest, narrator.as_ref()),
+            Ok(s) => serve(
+                s,
+                &mut svc,
+                &mut dest,
+                narrator.as_ref(),
+                explainer.as_ref(),
+            ),
             Err(e) => eprintln!("mick_service: accept error: {e}"),
         }
     }

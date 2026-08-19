@@ -1,0 +1,42 @@
+{
+  "outcome": "explained",
+  "explanation": {
+    "version": 1,
+    "tense": {
+      "Historical": {
+        "pinned_at": "2023-11-14 22:13:20 UTC"
+      }
+    },
+    "nodes": [
+      {
+        "depth": 0,
+        "parent": null,
+        "claim": "package_17 last_seen_at dock_a",
+        "evidence": {
+          "Recorded": {
+            "branches": [
+              {
+                "state": {
+                  "Dangling": {
+                    "cited": "the observation recorded as obs-missing",
+                    "reason": "NeverRecorded"
+                  }
+                },
+                "continuation": {
+                  "Stopped": "NothingToFollow"
+                }
+              }
+            ],
+            "more_citations": false
+          }
+        }
+      }
+    ],
+    "completeness": {
+      "truncated": false,
+      "cycle_detected": false,
+      "degraded": false,
+      "coverage_limited": false
+    }
+  }
+}

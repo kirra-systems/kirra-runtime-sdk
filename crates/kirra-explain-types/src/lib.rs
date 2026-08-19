@@ -365,7 +365,9 @@ impl ExplanationArtifact {
 }
 
 pub mod wire;
-pub use wire::{ExplainCurrentSubject, ExplainOutcome, EXPLAIN_CURRENT_SUBJECT_PATH};
+pub use wire::{
+    ExplainCurrentSubject, ExplainOutcome, ALL_SEMANTICS, EXPLAIN_CURRENT_SUBJECT_PATH,
+};
 
 #[cfg(test)]
 mod tests {

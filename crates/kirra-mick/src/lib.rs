@@ -562,4 +562,5 @@ mod tests {
     }
 }
 
+pub mod explain_client;
 pub mod explain_render;

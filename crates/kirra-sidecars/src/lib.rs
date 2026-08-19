@@ -25,6 +25,7 @@ pub mod capabilities;
 pub mod chat;
 pub mod destination;
 pub mod destination_service;
+pub mod explainer;
 pub mod http;
 pub mod mick;
 pub mod mick_fence;

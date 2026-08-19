@@ -1,0 +1,76 @@
+{
+  "outcome": "explained",
+  "explanation": {
+    "version": 1,
+    "tense": "Current",
+    "nodes": [
+      {
+        "depth": 0,
+        "parent": null,
+        "claim": "pallet_4 last_seen_at dock_a",
+        "evidence": {
+          "Recorded": {
+            "branches": [
+              {
+                "state": {
+                  "Resolved": {
+                    "evidence": "package_17 last_seen_at dock_a — recorded by warehouse-scanner as event ev-b",
+                    "digest": "f32ad18b9bc0c98133de1693e6eda66c8a3bf9e29d6af133258f006e32a78c5e"
+                  }
+                },
+                "continuation": {
+                  "Expanded": {
+                    "node": 1
+                  }
+                }
+              }
+            ],
+            "more_citations": false
+          }
+        }
+      },
+      {
+        "depth": 1,
+        "parent": 0,
+        "claim": "package_17 last_seen_at dock_a",
+        "evidence": {
+          "Recorded": {
+            "branches": [
+              {
+                "state": {
+                  "Resolved": {
+                    "evidence": "package_17 last_seen_at dock_a — recorded by warehouse-scanner as event ev-a",
+                    "digest": "c3a98c7f6df7bdd05559bc31acd2a0fb5a85a82fce7d6c37c854fe2e56c07df7"
+                  }
+                },
+                "continuation": {
+                  "Expanded": {
+                    "node": 2
+                  }
+                }
+              }
+            ],
+            "more_citations": false
+          }
+        }
+      },
+      {
+        "depth": 2,
+        "parent": 1,
+        "claim": "package_17 last_seen_at dock_a",
+        "evidence": {
+          "Recorded": {
+            "branches": [],
+            "more_citations": false
+          }
+        }
+      }
+    ],
+    "completeness": {
+      "truncated": false,
+      "cycle_detected": false,
+      "degraded": false,
+      "coverage_limited": false
+    }
+  }
+}
