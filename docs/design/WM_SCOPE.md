@@ -2863,7 +2863,7 @@ Established before design, because each could have invalidated the shape:
 | `kirra-sidecars` already depends on `kirra-mick` | the World producer may NOT live there — one crate would then depend on both `kirra-mick` and `kirra-world-service`, recreating the coupling the ruling prevents, one level up |
 | `is_world_package` is name-prefixed | a crate named `kirra-world-*` is automatically under Fence A — the producer is structurally unable to act, by construction rather than by review |
 | Fence A check 2 is a DENYLIST (`ACTUATION_PACKAGES` / `ACTUATION_EXTERNAL` = ROS/DDS/serial/CAN/GPIO) | HTTP is not actuation transport; serde is not either. Neither trips the fence |
-| existing sidecars serve HTTP on std `TcpListener` + `kirra_sidecars::http` | the producer needs NO new external dependency — but that helper is inside the `kirra-mick`-depending crate, so it must be duplicated or extracted to a neutral crate |
+| existing sidecars serve HTTP on std `TcpListener` + `kirra_sidecars::http` | the producer needs NO new external dependency — but that helper sits inside the `kirra-mick`-depending crate, so it cannot be reused as-is |
 | `kirra-mick` already carries `reqwest` + `serde` | the consumer side needs no new dependency and no new bus |
 
 ##### The pattern reused rather than invented
@@ -2883,16 +2883,49 @@ from the real type drifts silently** — this tier's whole defect class. Serde o
 definition cannot drift.
 
 The manifest's stated rule — *"NO dependencies at all"* — is therefore amended to
-say what it actually protects: no `kirra-world*`, nothing that could carry a query
-handle, which is precisely what `ci/check_explain_artifact_neutral.py` enforces.
+the property actually being protected: **presentation types stay neutral and cannot
+acquire World, Mick, planner, checker or actuation authority dependencies.** That is
+narrower than "none", strictly stronger than the accident of emptiness, and it is
+what `ci/check_explain_artifact_neutral.py` can enforce mechanically.
 **A rule that overstates itself and is then quietly broken is worth less than a
 narrower rule that is mechanically checked.**
 
-**The producer is a new `kirra-world-*` crate**, not the verifier and not deferred.
-The verifier would pull the entire World stack into the binary holding the actuator
-gate and the release-token path, against ADR-0042 condition 1. Deferring would stand
-up a World process with no consumer — itself a new unwired core, the same problem one
-level up, while both orphan baselines keep standing.
+**The producer is `kirra-world-explain-service`** — a dedicated crate whose only
+job is to expose bounded, presentation-safe `ExplanationArtifact` responses.
+
+Not the verifier: that would pull the entire World stack into the binary holding
+the actuator gate and the release-token path, against ADR-0042 condition 1. Not
+deferred: a World process with no consumer is itself a new unwired core, the same
+problem one level up, while both orphan baselines keep standing.
+
+And deliberately **not** a container name like `kirra-world-sidecars`. A container
+name creates gravitational pull — once it exists, every World-adjacent daemon wants
+to move in, and the crate's authority becomes whatever accumulated there. A name
+that states its one job is easier to fence, and a second World-facing service should
+have to justify its own crate rather than inherit this one's clearances.
+
+Its structural properties, which are the actual contract:
+
+| May depend on | May NOT depend on |
+|---|---|
+| `kirra-world-service` | `kirra-mick` (any Mick-side crate) |
+| `kirra-explain-types` | ROS / DDS / serial / CAN / GPIO |
+| HTTP / serde / runtime plumbing | checker, governor or release-token types |
+
+It falls under the `kirra-world-*` fence classification automatically, so Fence A
+holds over it by construction rather than by anyone remembering to register it.
+
+```text
+kirra-world-store
+      ↓
+kirra-world-service
+      ↓
+kirra-world-explain-service
+      ↓  HTTP / IPC
+kirra-mick
+      ↓
+explain_render
+```
 
 ##### Definition of done — all of it, or the box is not closed
 
@@ -2907,6 +2940,35 @@ level up, while both orphan baselines keep standing.
    serialization unchanged.
 8. A transport failure produces an explicit unavailable/error result, never a
    fabricated explanation.
+9. **The transport is presentation-only and request/response-shaped.** Mick may ask
+   for an artifact by OPAQUE explanation reference; the wire must not expose general
+   Kirra World query capability — no subject lookup, no lineage walk, no free
+   generation pin, no cursor. Without this, the explanation service quietly becomes
+   a generic World API and the placement problem reopens under a different name,
+   with every gate still green because each individual endpoint looks presentational.
+
+##### HTTP-helper extraction is NOT a prerequisite
+
+The explanation service starts with the **smallest local HTTP implementation** that
+serves its one route. Extraction of a neutral helper happens in a LATER PR, and only
+if the duplication turns out to be meaningful — request parsing, response framing,
+shutdown behaviour, error mapping.
+
+The reason is reviewability, not laziness: bundling it turns *"wire the explanation
+transport"* into *"redesign shared HTTP infrastructure"*, and the authority boundary
+this box exists to establish becomes the smaller half of the diff.
+
+##### Sequence
+
+1. Land this scope ruling.
+2. Add serde directly to `kirra-explain-types`; update the neutrality gate + rule.
+3. Create the narrow `kirra-world-explain-service` crate/binary.
+4. Wire the Mick-side client using its existing HTTP stack.
+5. Prove real producer → wire → decode → real deterministic renderer.
+6. Prove an unconfigured/unavailable producer yields explicit unavailable semantics,
+   never a fabricated explanation.
+7. Retire BOTH orphan baselines together.
+8. Only then decide whether duplicated HTTP plumbing justifies extraction.
 
 ##### The non-vacuity control
 
