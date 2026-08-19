@@ -29,14 +29,14 @@ license-file = "../../COPYRIGHT"
 publish = false  # proprietary (see COPYRIGHT) — not for crates.io
 
 [dependencies]
+# ONE dependency, and that is the ruling working.
+#
+# This crate owns the PROCESS BOUNDARY, not the explanation semantics, so it has
+# no business reading the store, holding the presentation types, or encoding
+# anything until it actually serves a route. `kirra-world-store`,
+# `kirra-explain-types`, `serde` and `serde_json` were all here while the labels
+# and the core lived in this crate; they left with them, and review caught that
+# the manifest had not caught up with a comment already claiming they had.
+#
+# Box 3b re-adds exactly what the transport needs and no more.
 kirra-world-service = { path = "../kirra-world-service" }
-# The store dependency was here while the labels lived in this crate, and went
-# away with them. That is the ruling working: this crate owns the PROCESS
-# BOUNDARY, not the explanation semantics, so it has no business reading the
-# store. `check_query_boundedness` rule 5 is what made the difference visible —
-# a consumer reaching past the query engine — and the answer was to move the
-# code rather than to reclassify the read.
-kirra-world-store = { path = "../kirra-world-store" }
-kirra-explain-types = { path = "../kirra-explain-types" }
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"

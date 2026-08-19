@@ -2635,11 +2635,7 @@ version = "0.1.0"
 name = "kirra-world-explain-service"
 version = "0.1.0"
 dependencies = [
- "kirra-explain-types",
  "kirra-world-service",
- "kirra-world-store",
- "serde",
- "serde_json",
 ]
 
 [[package]]
