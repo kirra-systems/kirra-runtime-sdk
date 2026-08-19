@@ -2843,11 +2843,26 @@ kirra-world-service ──builds──▶ ExplanationArtifact ──▶ transpor
 
 ##### The blocking finding: Kirra World has no process
 
-**No binary in the workspace links `kirra_world_service`** — checked across every
-`src/bin/` and the root. `kirra-world`, `kirra-world-store`, `kirra-world-service`
-and `kirra-mission-orchestrator` are library-only, and the verifier — the one real
-HTTP service — does NOT depend on `kirra-world-service` (its `[dependencies]`
-carry 12 `kirra-*` crates, all safety/persistence/policy).
+**No binary in the workspace links `kirra_world_service`** — established from the
+Cargo manifest graph rather than by scanning `src/bin/` directories, because a
+directory scan would miss `[[bin]]` targets and every `crates/*/src/bin/` entry
+point. `cargo tree --workspace -i kirra-world-service` closes at THREE crates:
+
+```text
+kirra-world-service
+└── kirra-proposal-context      (the only direct dependant)
+    └── kirra-mission-orchestrator   (no reverse dependencies at all)
+```
+
+None of the three declares a `[[bin]]` section or carries a `src/bin/` directory,
+and the closure terminates at `kirra-mission-orchestrator` — so there is no path,
+direct or transitive, from any binary target to `kirra-world-service`. The
+verifier, the one real HTTP service, is not in this closure: its `[dependencies]`
+carry 12 `kirra-*` crates, all safety/persistence/policy.
+
+That is a reverse-closure argument, not a sample. A grep over binary directories
+would have supported the same conclusion by weaker evidence, and this finding is
+load-bearing enough that the weaker evidence is not good enough for it.
 
 So this box cannot be "connect two running endpoints": one end has no process.
 Since `KIRRA-WM-EXPLAIN-PLACEMENT-001` places 4c behind a PROCESS boundary, an
@@ -2934,7 +2949,7 @@ explain_render
 3. **Both orphan-baseline entries retire in the same PR.**
 4. Removing either side breaks a NAMED integration test or the orphan gate.
 5. No World query handles, generations, cursors, store types or checker-bound types
-   cross the wire (`check_explain_artifact_neutral` already asserts the type half).
+   cross the wire (`ci/check_explain_artifact_neutral.py` already asserts the type half).
 6. Mick cannot use the transport to ask follow-up World questions.
 7. Historical / degraded / dangling / plural / cycle / truncated semantics survive
    serialization unchanged.
