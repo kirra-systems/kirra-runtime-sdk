@@ -49,8 +49,15 @@ pub use behavior::{
     BehaviorConfig, Behavioral, LaneBoundary, LineType, SignalState, TrafficControl,
 };
 
-pub mod lanemap;
-pub use lanemap::{
+// The lane graph lives in `kirra-map` (de-monolith Stage 6b). The crate-root
+// names below are UNCHANGED — they are the API consumers actually use — but the
+// `kirra_planner::lanemap` module path is gone: it was a six-line
+// `pub use kirra_map::lanemap::*;` shim kept for back-compat, and the
+// orphan-gate audit (docs/design/ORPHAN_GATE_FALLOUT.md) measured zero uses of
+// that path anywhere in the repository. A compatibility surface for an import
+// nobody imports is a shelf, and the zero-tolerance re-export ratchet would
+// forbid it outright if its scope reached `crates/`.
+pub use kirra_map::lanemap::{
     JunctionContext, Lane, LaneControl, LaneCorridor, LaneEdge, LaneGraph, Occluder,
     MAX_ROUTE_LANES,
 };
