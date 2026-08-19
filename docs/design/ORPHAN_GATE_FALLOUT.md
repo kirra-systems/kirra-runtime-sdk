@@ -1,7 +1,8 @@
 # Orphan-gate consumer-attribution audit — the fallout report
 
-**Status: measurement complete; dispositions LANDED. The gate's own logic is
-still untouched — rules A and B are the next step, not this one.**
+**Status: COMPLETE. Measurement → dispositions → rules A and B, all landed.
+The gate now attributes every reference to a crate and skips whole `pub use`
+statements. Numbers below are the "before" measurement that motivated them.**
 
 `ci/check_orphan_cores.py` is the wire-or-delete guard: a `pub mod` at a crate
 root must gain a non-test consumer, or be listed in
@@ -166,9 +167,47 @@ is what the existing `is_code_shaped` was already reaching for, one level up.
 1. ~~This report. No gate change.~~ **done**
 2. ~~Land the dispositions.~~ **done** — `lanemap` deleted; the other two
    baselined with explicit rationale. ← you are here
-3. Implement rules A and B, with the self-tests carrying the measured cases as
-   fixtures, so the gate's non-vacuity is anchored on real defects rather than
-   invented ones.
+3. ~~Implement rules A and B.~~ **done** — landed with **zero new red**: the
+   gate reports 21 orphans, 21 baselined, no `[NEW]` and no `[HEALED]`. Runtime
+   went DOWN (25 s), because rule A skips whole files before scanning them.
+
+## What landed
+
+**Rule A** — `can_name()`: a hit counts only if the crediting file's crate is
+the module's crate, or reaches it through the Cargo graph. Fail-closed on an
+unattributable file, for the reason the gate already gives elsewhere: a missed
+reference reports an orphan that is not one, which is visible and arguable,
+while a false match hides an unwired core.
+
+**Rule B** — `pub_use_lines()`: the whole `pub use` STATEMENT is skipped, not
+its first line. Plain `use` continuations are deliberately kept, because
+importing *is* consumption and only the `pub` form is a shelf.
+
+## The mutation set, and the control that did not observe
+
+Four mutations, each expected to die on its own control:
+
+| Mutation | Died on |
+|---|---|
+| rule A disabled (`can_name` → always true) | the rule-A fixture **and** `pointcloud2_shim is an orphan (rule A)` |
+| rule B disabled (no `pub use` spans) | the rule-B fixture **and** `backend_selector is an orphan (rule B)` |
+| rule A over-reaches (refuse all cross-crate) | both positive controls |
+| rule B over-reaches (skip plain `use` too) | **survived at first** — see below |
+
+The fourth **survived**, and the reason is worth keeping. The positive control
+imported `BackendChooser` in a wrapped `use` *and* named it again in a function
+signature, so when the mutant wrongly swallowed the continuation line, the
+signature line still supplied evidence and the test passed. The control existed
+and observed nothing.
+
+Fixed by isolating it: the module name now appears **only** on the continuation
+line, and the body mentions nothing the module owns. The mutant then dies on
+exactly that control.
+
+That is the same defect class this whole audit exists to find, one level up — a
+check that looks like coverage and measures something else. It is recorded here
+rather than quietly corrected, because "the mutation survived" is the only
+evidence that distinguishes a control that works from one that merely runs.
 
 ### Why the baselines landed BEFORE the rules
 
