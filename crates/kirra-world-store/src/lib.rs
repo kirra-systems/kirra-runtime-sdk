@@ -2043,6 +2043,86 @@ impl WorldStore {
     /// Bounded in three dimensions — depth, node count, and citations per node —
     /// which is why `spec` is a validated type rather than a pair of numbers.
     ///
+    /// **The retained event at exactly `generation`, decoded — an EVIDENCE
+    /// lookup primitive, not a query family.**
+    ///
+    /// Tier 4 box 4c. `explain::ClaimLabels` is generation-addressed
+    /// (`claim_label(generation)`, `evidence(generation)`), and until this
+    /// existed there was nothing public to implement it against: every route to
+    /// a [`ProjectedClaim`] is subject-scoped ([`Self::current`],
+    /// [`Self::candidates`]) or whole-world-current ([`Self::current_all`]), and
+    /// [`Self::read_at_generation`] hands back a projection whose rows are
+    /// private and reachable only per-subject.
+    ///
+    /// # Why the missing primitive was a TRUTH problem, not an ergonomics one
+    ///
+    /// A provenance walk follows citations into whatever events carry the cited
+    /// observations, and those routinely belong to OTHER subjects. So a
+    /// `ClaimLabels` built on a subject-scoped map would return `None` for every
+    /// cross-subject node — and `explain::project_explanation` DEFINES `None` as
+    /// *"the event is gone"*, rendering `DELETED_CLAIM_LABEL`. The artifact would
+    /// have stated that evidence was deleted when it was sitting in the log,
+    /// and every gate would still have been green, because nothing checks
+    /// whether a label is true. This method exists so `None` can mean what the
+    /// projection already says it means.
+    ///
+    /// # The contract, stated precisely because the three cases differ
+    ///
+    /// - `Some(claim)` — an event IS retained at exactly this generation and
+    ///   decoded successfully.
+    /// - `None` — that generation is genuinely absent from retained evidence:
+    ///   never written, or compacted away. There is **no fallback** to current
+    ///   state, no nearest-neighbour, and no inference beyond the exact
+    ///   coordinate. An absent generation is absent.
+    /// - `Err` — a row is there and cannot be trusted. A corrupt trust axis
+    ///   fails closed via [`claim_axes_from_row`] rather than degrading to an
+    ///   unlabelled claim, for the same reason it does on every other read path:
+    ///   dropping it would turn *"something is wrong"* into *"no trust
+    ///   recorded"*.
+    ///
+    /// # NOT a domain query
+    ///
+    /// No subject filter, no predicate, no time argument, no ordering, no page.
+    /// It takes a coordinate the caller already holds — from a provenance node —
+    /// and hands back the one row at it. It cannot be used to ASK anything: you
+    /// cannot reach a generation with it that you did not already have. That is
+    /// deliberate, so it does not become a way around the typed engine and the
+    /// Tier 3 answer boundary; a consumer wanting to know something about a
+    /// subject still goes through `QueryEngine`.
+    ///
+    /// # Known gap, recorded rather than hidden
+    ///
+    /// `claim_status` is deliberately NOT filtered, so a retained CANDIDATE
+    /// event (ADR-0040: what an LLM may write) is returned like any other. That
+    /// is the honest choice — filtering to `confirmed` would make a retained
+    /// candidate indistinguishable from a deleted one, reintroducing the exact
+    /// lie this method exists to prevent. But [`ProjectedClaim`] carries no
+    /// status field, so a caller that must distinguish proposed evidence from
+    /// confirmed evidence cannot do it from this return value alone. A renderer
+    /// that would present the two differently must establish the difference
+    /// another way.
+    ///
+    /// # Errors
+    ///
+    /// [`StoreError::Sqlite`] if the store cannot be read, or a conversion
+    /// failure if the retained row does not decode.
+    pub fn claim_at_generation(
+        &self,
+        generation: i64,
+    ) -> Result<Option<ProjectedClaim>, StoreError> {
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT {CLAIM_COLUMNS} FROM world_events WHERE generation = ?1"
+        ))?;
+        // `query_row` + QueryReturnedNoRows is the point-read idiom here: the
+        // generation is the PRIMARY KEY, so there is at most one row and no
+        // ordering to state.
+        match stmt.query_row(params![generation], claim_from_row) {
+            Ok(claim) => Ok(Some(claim)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(e.into()),
+        }
+    }
+
     /// # Errors
     ///
     /// [`StoreError::ProvenanceIndexIncomplete`] when the root is at or below
@@ -3015,6 +3095,9 @@ impl WorldStore {
             // without it must break the chain, which is what proves the column
             // cannot be stored-but-unhashed.
             "subject_kind",
+            // 4c. So the axis CHECK's refusal of a PARTIAL set is asserted at
+            // the storage layer, not the allowlist. tests/claim_at_generation.rs.
+            "origin",
         ];
         if !TAMPERABLE.contains(&column) {
             return Err(StoreError::CorruptRow {
