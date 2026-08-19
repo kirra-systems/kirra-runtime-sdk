@@ -1,0 +1,41 @@
+# crates/kirra-world-retention-service/Cargo.toml
+#
+# Tier 5 box 5b — the World-side process that RUNS retention.
+#
+# ONE JOB, and the name says which. Not `kirra-world-maintenance`: a container
+# name creates gravitational pull, and once "maintenance" exists every
+# World-side chore wants to move in until the crate's authority is whatever
+# accumulated there. Folding, backfills and censuses are all plausibly
+# "maintenance" — each should have to justify its own process rather than
+# inherit this one's clearance to DELETE.
+#
+# It is deliberately NOT hosted in `kirra-world-explain-service`, whose own
+# documentation says it owns a process boundary, is read-only, and "must not
+# change what it is describing in the course of describing it". A background
+# thread that compacts the log is exactly the clearance that crate declined.
+#
+# THE `kirra-world-` PREFIX IS LOAD-BEARING: `is_world_package` in
+# ci/check_kirra_world_bidirectional_fence.py is name-prefixed, so this crate
+# falls under Fence A by CONSTRUCTION. Renaming it out of the namespace would
+# silently remove the fence.
+#
+# May depend on:  kirra-world-store, kirra-world
+# May NOT depend on: the verifier or anything in the safety closure (Fence B —
+#                    that is the whole reason the sweeper is not a verifier
+#                    monitor), Mick, ROS/DDS/serial, checker/governor types.
+[package]
+name = "kirra-world-retention-service"
+version = "0.1.0"
+edition = "2021"
+rust-version.workspace = true
+description = "The World-side process that runs the retention policy on a schedule. ADR-0040's Tier 1 exit criterion, actually started."
+repository = "https://github.com/kirra-systems/kirra-runtime-sdk"
+license-file = "../../COPYRIGHT"
+publish = false  # proprietary (see COPYRIGHT) — not for crates.io
+
+[dependencies]
+# The sweeper (scheduling) and the driver (survey -> decide -> act) both live
+# here. Nothing else is needed: the policy comes through kirra-world's re-export.
+kirra-world-store = { path = "../kirra-world-store" }
+# RetentionPolicy::oq2 and the horizons OQ2 ruled.
+kirra-world = { path = "../kirra-world" }

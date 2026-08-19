@@ -46,13 +46,14 @@
 //! into stopping the sweeper, because retention failing is not a reason to stop
 //! trying to bound the disk.
 
+use crate::retention_driver::RetentionPassReport;
 use crate::{StoreError, WorldStore};
 use kirra_world::observation::{ClockDomain, DomainInstant};
 use kirra_world::retention::RetentionPolicy;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError, Sender};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 /// How often a running sweeper takes a pass, unless told otherwise.
@@ -113,6 +114,7 @@ impl SweepCounters {
 pub struct RetentionSweeper {
     _shutdown: Sender<()>,
     counters: Arc<SweepCounters>,
+    last: Arc<Mutex<Option<RetentionPassReport>>>,
 }
 
 impl RetentionSweeper {
@@ -120,6 +122,28 @@ impl RetentionSweeper {
     #[must_use]
     pub fn counters(&self) -> &Arc<SweepCounters> {
         &self.counters
+    }
+
+    /// The most recent pass's full report, or `None` before the first pass.
+    ///
+    /// [`SweepCounters`] keeps the three OUTCOMES apart, which is what makes
+    /// `pinned` climbing while `compacted` stays flat visible. What it cannot
+    /// carry is **why** — the [`RetentionDecision`](kirra_world::retention::RetentionDecision)
+    /// that produced the outcome, and which blocker stopped a prefix. That
+    /// distinction is the whole reason the decision has four variants and
+    /// `RetentionPassReport` carries it rather than a bare count, and throwing
+    /// it away at the sweeper boundary would undo that one layer up.
+    ///
+    /// So an operator asking *"retention has done nothing for six hours, what
+    /// is holding it?"* gets an answer instead of a number. Returns a CLONE:
+    /// the lock is held only for the copy, so a reader can never stall a pass.
+    ///
+    /// `None` is also returned if the sweeper thread panicked while holding the
+    /// lock — reporting "no report" rather than propagating a poisoned lock into
+    /// a monitoring path, which must not be able to take a process down.
+    #[must_use]
+    pub fn last_report(&self) -> Option<RetentionPassReport> {
+        self.last.lock().ok().and_then(|slot| slot.clone())
     }
 
     /// Start sweeping `path` on `interval`.
@@ -147,6 +171,8 @@ impl RetentionSweeper {
         let (tx, rx) = mpsc::channel::<()>();
         let counters = Arc::new(SweepCounters::default());
         let thread_counters = Arc::clone(&counters);
+        let last: Arc<Mutex<Option<RetentionPassReport>>> = Arc::new(Mutex::new(None));
+        let thread_last = Arc::clone(&last);
 
         std::thread::Builder::new()
             .name("kirra-world-retention".into())
@@ -171,14 +197,20 @@ impl RetentionSweeper {
                     };
                     thread_counters.passes.fetch_add(1, Ordering::Relaxed);
                     match store.run_retention_pass(&policy, now) {
-                        Ok(report) if report.compacted.is_some() => {
-                            thread_counters.compacted.fetch_add(1, Ordering::Relaxed);
+                        Ok(report) => {
+                            if report.compacted.is_some() {
+                                thread_counters.compacted.fetch_add(1, Ordering::Relaxed);
+                            } else if report.is_pinned() {
+                                thread_counters.pinned.fetch_add(1, Ordering::Relaxed);
+                            }
+                            // Nothing old enough is the ordinary state and stays
+                            // uncounted — but it is still RECORDED, because
+                            // "nothing to do" and "blocked by a pin" are the two
+                            // answers an operator needs told apart.
+                            if let Ok(mut slot) = thread_last.lock() {
+                                *slot = Some(report);
+                            }
                         }
-                        Ok(report) if report.is_pinned() => {
-                            thread_counters.pinned.fetch_add(1, Ordering::Relaxed);
-                        }
-                        // Nothing old enough — the ordinary state, not counted.
-                        Ok(_) => {}
                         Err(_) => {
                             // Counted and skipped. A failing pass is not a
                             // reason to stop trying to bound the disk, and a
@@ -197,6 +229,7 @@ impl RetentionSweeper {
         Ok(Self {
             _shutdown: tx,
             counters,
+            last,
         })
     }
 }
