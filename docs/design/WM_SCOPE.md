@@ -2825,6 +2825,100 @@ to `NeverVisible`), but it touches the pinned region and the `CitationLookup`
 seam, and folding that into the round that found it is how a small fix becomes an
 unreviewed one.
 
+#### Residual 2 — the explanation transport — SCOPED, NOT STARTED
+
+4c.1 projects and 4c.2 renders. Nothing carries an artifact between them, which
+is why `kirra_world_service::explain` and `kirra_mick::explain_render` are both
+orphan-baselined. This box connects those two exact production endpoints.
+
+**Ruling:** the transport MOVES an already-computed `ExplanationArtifact`. It does
+not compute provenance, does not re-query Kirra World, and does not render
+language. The contract lives on the neutral crate so neither side gains a
+dependency on the other subsystem — the transport choice follows the type
+boundary, it does not define it.
+
+```text
+kirra-world-service ──builds──▶ ExplanationArtifact ──▶ transport ──▶ kirra-mick renders
+```
+
+##### The blocking finding: Kirra World has no process
+
+**No binary in the workspace links `kirra_world_service`** — checked across every
+`src/bin/` and the root. `kirra-world`, `kirra-world-store`, `kirra-world-service`
+and `kirra-mission-orchestrator` are library-only, and the verifier — the one real
+HTTP service — does NOT depend on `kirra-world-service` (its `[dependencies]`
+carry 12 `kirra-*` crates, all safety/persistence/policy).
+
+So this box cannot be "connect two running endpoints": one end has no process.
+Since `KIRRA-WM-EXPLAIN-PLACEMENT-001` places 4c behind a PROCESS boundary, an
+in-process seam would contradict the ruling. **Standing up the World-side producer
+process is part of this box**, not a precondition someone else satisfied.
+
+##### Verified structural constraints
+
+Established before design, because each could have invalidated the shape:
+
+| Constraint | Consequence |
+|---|---|
+| `kirra-sidecars` already depends on `kirra-mick` | the World producer may NOT live there — one crate would then depend on both `kirra-mick` and `kirra-world-service`, recreating the coupling the ruling prevents, one level up |
+| `is_world_package` is name-prefixed | a crate named `kirra-world-*` is automatically under Fence A — the producer is structurally unable to act, by construction rather than by review |
+| Fence A check 2 is a DENYLIST (`ACTUATION_PACKAGES` / `ACTUATION_EXTERNAL` = ROS/DDS/serial/CAN/GPIO) | HTTP is not actuation transport; serde is not either. Neither trips the fence |
+| existing sidecars serve HTTP on std `TcpListener` + `kirra_sidecars::http` | the producer needs NO new external dependency — but that helper is inside the `kirra-mick`-depending crate, so it must be duplicated or extracted to a neutral crate |
+| `kirra-mick` already carries `reqwest` + `serde` | the consumer side needs no new dependency and no new bus |
+
+##### The pattern reused rather than invented
+
+`mick_service` already relays the verifier's auditor-tier `GET /system/verdicts/last`
+into `GET /narration/last`, gated on `KIRRA_VERIFIER_URL` + `KIRRA_MICK_AUDITOR_TOKEN`,
+**503-ing when unconfigured**. That is structurally the transport this box needs,
+including the failure semantics: unavailable is explicit, never fabricated.
+
+##### Two decisions, and why
+
+**The wire contract goes on `kirra-explain-types` with serde** — reversing the
+tidier-looking alternative. A sibling wire crate would keep that manifest at zero
+dependencies, but serde's derive must sit on the type DEFINITION: a separate crate
+forces `#[serde(remote)]` mirrors or a duplicate DTO, and **a mirror that drifts
+from the real type drifts silently** — this tier's whole defect class. Serde on the
+definition cannot drift.
+
+The manifest's stated rule — *"NO dependencies at all"* — is therefore amended to
+say what it actually protects: no `kirra-world*`, nothing that could carry a query
+handle, which is precisely what `ci/check_explain_artifact_neutral.py` enforces.
+**A rule that overstates itself and is then quietly broken is worth less than a
+narrower rule that is mechanically checked.**
+
+**The producer is a new `kirra-world-*` crate**, not the verifier and not deferred.
+The verifier would pull the entire World stack into the binary holding the actuator
+gate and the release-token path, against ADR-0042 condition 1. Deferring would stand
+up a World process with no consumer — itself a new unwired core, the same problem one
+level up, while both orphan baselines keep standing.
+
+##### Definition of done — all of it, or the box is not closed
+
+1. `kirra_world_service::explain` has a real production CONSUMER through the transport.
+2. `kirra_mick::explain_render` has a real production PRODUCER feeding it.
+3. **Both orphan-baseline entries retire in the same PR.**
+4. Removing either side breaks a NAMED integration test or the orphan gate.
+5. No World query handles, generations, cursors, store types or checker-bound types
+   cross the wire (`check_explain_artifact_neutral` already asserts the type half).
+6. Mick cannot use the transport to ask follow-up World questions.
+7. Historical / degraded / dangling / plural / cycle / truncated semantics survive
+   serialization unchanged.
+8. A transport failure produces an explicit unavailable/error result, never a
+   fabricated explanation.
+
+##### The non-vacuity control
+
+The load-bearing test runs **real producer → encode → decode → real renderer**:
+`project_explanation` over a real `ProvenanceTree`, across the wire codec, into
+`render_explanation`, asserting the phrase constants for each preserved semantic.
+
+A test that round-trips a hand-built DTO proves serde works and proves nothing
+about the two modules being connected — **it would stay green with either endpoint
+deleted**, which is exactly what obligation 4 forbids. Same lesson as the span
+bound: the control has to observe the thing that is actually claimed.
+
 #### Residual 1 — the span enumeration, bounded (#1449)
 
 `compacted_spans` is now `WHERE lo_generation <= ?1 ORDER BY lo_generation ASC
