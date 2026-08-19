@@ -3245,18 +3245,151 @@ camera observation X"* because X became resolvable later.
 
 ## 8. Tier 5 — Surfaces
 
-- [ ] Semantic projections beyond `world_current` — relationships, capabilities,
-      map layers
-- [ ] **Retention policy driver** — the horizons OQ2 ruled are still applied by
-      hand. Its precondition is already recorded in ADR-0041's WM-2 milestone:
-      *the first doer-side consumer wired to the store ends the deferral.*
-      **Superseded in part:** ADR-0040 promoted this to a **Tier 1 exit
-      criterion** (§4), so it no longer waits on that precondition, and its
-      *deciding* half landed 2026-08-06 as `kirra_world::retention`. This entry
-      now covers only the scheduled driver, tracked at §4.
-- [ ] `kirra-world-service` as real CQRS — 9 commands, 8 queries, 10 emitted
-      events — still inside Fence A
-- [ ] Operator teaching surface (§17): `AssertEntity`, corrections
+**Entry condition met.** Tiers 0–4 are closed, the first real consumer exists,
+the explanation path is wired end to end (#1457), and — the last piece — the
+orphan detector is trustworthy enough to say whether Tier 5 code is actually
+CONSUMED rather than merely present (#1458–#1460). That last one is a
+precondition, not a nicety: Tier 5 is the tier that adds surfaces, and a
+surface nobody calls is the exact thing a credit-by-textual-reachability gate
+could not tell from a wired one.
+
+### The four rules Tier 5 inherits
+
+Carried forward from Tiers 3 and 4, where each was learned the expensive way:
+
+1. **Every new declaration needs a production consumer.** Not a test — a
+   caller. `ci/check_orphan_cores.py` now enforces this with crate attribution
+   and whole-`pub use` skipping, so "wired" is a checkable claim.
+2. **Every claimed invariant needs a control that can actually distinguish
+   it.** A test that passes against the mutant is not a control. This has now
+   caught itself twice — the 3b corpus and the rule-B fixture — and both times
+   the survival of a mutation was the only evidence.
+3. **Boundedness must be structural**, not "bounded after fetching". The
+   answer being bounded while the work is not is invisible to every behavioural
+   test; `ci/check_query_boundedness.py` rules 4 and 6 exist because of it.
+4. **Nothing crossing from World toward Mick or mission logic may touch the
+   authority boundary.** World may shape PROPOSALS and EXPLANATIONS. It may
+   never shape checker bounds.
+
+### The scope audit — §8 as written, against the merged tree
+
+Run 2026-08-19 at `95e9eda3`, before any Tier 5 code. Evidence, not
+recollection:
+
+| §8 obligation | Verdict | Evidence |
+|---|---|---|
+| Semantic projections — relationships, capabilities, map layers | **missing**, with an unwired predecessor | `Related` / `Capabilities` / `ImportMapLayer` / `MapVersionActivated`: 0 hits. Identity relations exist (Tier 2 `same_as_*`) but `kirra_world::same_as_adjudication` is *itself* still a baselined orphan awaiting 2c |
+| Retention policy driver | **partially built** — §8's residual scope is accurate | `kirra_world::retention` (deciding) LIVE; `retention_driver` + `retention_sweeper` exist but are BOTH baselined orphans, referenced only by their own `pub mod` lines. Nothing schedules a pass |
+| CQRS — 9 commands | **missing as a surface** | No command dispatch anywhere. `MergeEntities`/`SplitEntity`/`ForgetEntity` match 10–13 files each, but they are Tier 2 DOMAIN types in `kirra_world::adjudication`, not commands. The other six absent |
+| CQRS — 8 queries | **partially built** | 6 typed requests live (`Ask`, `AskAsOf`, `History`, `SubjectSummary`, `Lineage`, `ReplayAnswer`). `Explain` is live but NOT through `QueryEngine`. `ChangesSince`/`Freshness`/`Resolve` exist as store or module capabilities, not typed queries. `WhatIsAt`/`Related`/`Capabilities` absent |
+| CQRS — 10 emitted events | **prose only** | All ten appear exclusively in doc comments. There is **no emission mechanism anywhere** in `kirra-world*` |
+| Operator teaching surface | **missing, and the citation was wrong** | `AssertEntity`: 0 hits. §8 cited "§17" — **this document has no §17**; the teaching surface is `WORLD_MODEL_ARCHITECTURE.md` §17, with the command in its §14.1 and the operator row in its §15 |
+
+### KIRRA-WM-TIER5-CQRS-001 — the CQRS bullet is re-scoped, not inherited
+
+The original bullet bundles three things that are not alike:
+
+* **commands into World** — designable against the same admission and
+  adjudication rules queries already answer to;
+* **queries out of World** — already governed, by `QueryEngine` plus rule 5;
+* **events out of World** — a NEW OUTBOUND AUTHORITY SURFACE.
+
+The third is different in kind, and "10 emitted events" as a checklist count is
+precisely the pressure that makes someone invent a bus to discharge it. A number
+inherited from a blueprint written before Fence A and rule 5 existed is not a
+requirement; it is a note about what an older design expected.
+
+**The ruling:**
+
+> Complete the CQRS **command/query** model first. **Event emission remains a
+> separately ruled capability** and may not be introduced until its consumers,
+> authority, transport, retention, replay and fencing semantics are defined.
+
+So bullet 3 splits:
+
+- [ ] **5c.1 — Commands.** Define the sanctioned command surface over the
+      EXISTING domain operations. **No new semantics hidden inside command
+      wrappers**: a command that quietly decides something the domain layer does
+      not is a second adjudication path, and the tier that discovers it will be
+      paying Tier 2's bill again.
+- [ ] **5c.2 — Queries.** Complete the missing typed families through
+      `QueryEngine` — the boundedness and freshness rules apply unchanged, and
+      rule 5 already refuses any route around the engine.
+- [ ] **5c.3 — Events. BLOCKED ON RULING.** No event code before the following
+      are decided:
+      1. who may subscribe;
+      2. whether events are evidence, notifications, or derived signals;
+      3. whether they are replayable;
+      4. whether they are durable;
+      5. whether they may influence proposal generation;
+      6. whether any may reach checker inputs;
+      7. what transport is permitted;
+      8. whether ordering is generation-based;
+      9. what happens to an event under compaction;
+      10. **what gate prevents a new outbound route from quietly acquiring
+          authority** — the question rule 5 answers for queries and nothing
+          currently answers for events.
+
+### 5d — Operator teaching: BLOCKED ON RULING
+
+`AssertEntity` and corrections stay blocked, and not merely on effort. **A human
+write into World is not automatically equivalent to a confirmed observation.**
+Before any code:
+
+* what **writer class** an operator assertion carries;
+* what **provenance** it records — an assertion cites a person, not a sensor;
+* its **admissibility path** — ADR-0040 constrains an LLM to writing candidates;
+  an operator is not an LLM, and the difference has to be stated rather than
+  assumed;
+* its **adjudication semantics** — whether an assertion can outrank sensed
+  evidence, and what happens when it contradicts it.
+
+### The Tier 5 order
+
+1. ~~Fix the bad §17 reference.~~ **done** — corrected in the audit table above
+   and at the bullet itself.
+2. ~~Record the CQRS split and the two rulings.~~ **done** — this section.
+3. **Wire the retention scheduler** — the first Tier 5 implementation.
+4. Revisit semantic projections, **based on a real consumer**.
+5. Design commands (5c.1).
+6. Complete the missing typed queries (5c.2).
+7. Rule event emission — before any event code (5c.3).
+8. Rule operator teaching — before `AssertEntity` exists (5d).
+
+### Why the retention scheduler is the opener
+
+Because its non-vacuity witness already exists, mechanically, in CI:
+
+```text
+today                          after real scheduling
+  retention_driver   orphan      both consumed
+  retention_sweeper  orphan      both baseline entries retire
+```
+
+That is a check the repository already runs, not a claim to be constructed
+alongside the work. It also needs no authority ruling (World-internal), its
+bound is structural (`retention_survey` asks four bounded questions and
+`compact_range` acts, rather than filtering after a fetch), and a mutation that
+disables the schedule is observable as the store growing past its horizon.
+
+Starting instead with another projection nobody calls would repeat the pattern
+Tiers 2 and 4 spent their residuals removing.
+
+### The remaining §8 boxes, restated
+
+- [ ] **5a — Semantic projections** beyond `world_current`: relationships,
+      capabilities, map layers. Gated on a real consumer per rule 1, and note
+      the identity-relations predecessor (`same_as_adjudication`) is still
+      awaiting box 2c.
+- [ ] **5b — Retention policy driver.** The horizons OQ2 ruled are still applied
+      by hand. ADR-0040 promoted this to a **Tier 1 exit criterion** (§4), so it
+      no longer waits on ADR-0041's WM-2 precondition, and its *deciding* half
+      landed 2026-08-06 as `kirra_world::retention`. **This entry now covers only
+      the scheduled driver** — the acting half (`retention_driver`,
+      `retention_sweeper`) is written and unwired.
+- [ ] **5c.1 / 5c.2 / 5c.3** — as ruled above; 5c.3 blocked.
+- [ ] **5d — Operator teaching surface** (`WORLD_MODEL_ARCHITECTURE.md` §17;
+      command in its §14.1): `AssertEntity`, corrections. **Blocked on ruling.**
 
 ---
 
