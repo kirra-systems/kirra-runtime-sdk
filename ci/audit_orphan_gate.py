@@ -11,9 +11,20 @@
     Report: docs/design/ORPHAN_GATE_FALLOUT.md
 
 
-Changes NOTHING about what CI rejects. It replicates `check_orphan_cores.is_consumed`
-exactly, but RECORDS the evidence instead of short-circuiting on the first hit, then
-asks one question the gate never asks:
+Changes NOTHING about what CI rejects.
+
+    HISTORICAL BASELINE, deliberately frozen. This reproduces the matching the gate
+    used BEFORE rules A and B, so the fallout report stays reproducible — its
+    numbers are the "before" measurement, not a live verdict. Since those rules
+    landed, the real gate ALREADY applies the crate-attribution and whole-`use`
+    tests, so this instrument reporting "3 hidden orphans" describes the state that
+    motivated them, not a gate that is still blind.
+
+    Re-point it at the current gate only if a NEW rule needs measuring, and say so
+    here when you do.
+
+It records the evidence instead of short-circuiting on the first hit, then asks
+the question the pre-rule gate never asked:
 
     could the crediting file possibly name this module at all?
 

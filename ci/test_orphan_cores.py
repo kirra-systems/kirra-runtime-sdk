@@ -47,15 +47,29 @@ def load_gate():
 G = load_gate()
 
 
-def build(root: Path, crates: dict[str, dict[str, str]]) -> None:
-    """`{crate: {"lib.rs": src, "mod_name.rs": src, ...}}`."""
+def build(
+    root: Path,
+    crates: dict[str, dict[str, str]],
+    deps: dict[str, list[str]] | None = None,
+) -> None:
+    """`{crate: {"lib.rs": src, "mod_name.rs": src, ...}}`, plus optional deps.
+
+    `deps` writes a real `[dependencies]` table, because rule A reads the Cargo
+    graph: without it every fixture crate is an island and every cross-crate
+    reference is refuted, which would make the rule-A cases pass for the wrong
+    reason.
+    """
+    deps = deps or {}
     for crate, files in crates.items():
         d = root / "crates" / crate / "src"
         d.mkdir(parents=True, exist_ok=True)
         # The gate reads the lib name from the manifest, so a fixture needs one.
-        (d.parent / "Cargo.toml").write_text(
-            f'[package]\nname = "{crate}"\n', encoding="utf-8"
-        )
+        manifest = f'[package]\nname = "{crate}"\n'
+        if deps.get(crate):
+            manifest += "\n[dependencies]\n" + "".join(
+                f'{dep} = {{ path = "../{dep}" }}\n' for dep in deps[crate]
+            )
+        (d.parent / "Cargo.toml").write_text(manifest, encoding="utf-8")
         for name, src in files.items():
             (d / name).write_text(src, encoding="utf-8")
 
@@ -79,10 +93,10 @@ def orphans(root: Path) -> set[str]:
         G.REPO = real_repo
 
 
-def case(name: str, crates: dict, expected: set[str]) -> bool:
+def case(name: str, crates: dict, expected: set[str], deps: dict | None = None) -> bool:
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp)
-        build(root, crates)
+        build(root, crates, deps)
         got = orphans(root)
     ok = got == expected
     print(f"  {'PASS' if ok else 'FAIL'}  {name}")
@@ -238,8 +252,163 @@ def strip_keep_strings_is_opt_in_and_faithful() -> bool:
     return ok
 
 
+
+
+# ---------------------------------------------------------------------------
+# Rules A and B — fixtures taken from the MEASURED cases, not invented ones
+# ---------------------------------------------------------------------------
+#
+# docs/design/ORPHAN_GATE_FALLOUT.md measured the whole tree before either rule
+# landed and found exactly three affected modules. Each case below is the shape
+# of one of them, so the rules are anchored on defects that really happened:
+#
+#   parko_ros2::pointcloud2_shim   rule A   `INT8` matched from a crate that
+#                                           does not depend on parko-ros2
+#   parko_core::backend_selector   rule B   item names on the wrapped
+#                                           continuation lines of its own
+#                                           `pub use`
+#   kirra_planner::lanemap         deleted  must not come back
+#
+# Each carries a POSITIVE control, because a rule that refuses everything
+# reports every module as an orphan and would pass the negative half alone.
+
+
+def rule_a_cases() -> list[bool]:
+    """A reference only counts from a crate that can NAME the module's crate."""
+    out = []
+    # The measured shape: `beta` writes `Widget::INT8` — its OWN enum variant —
+    # and `alpha` happens to export a constant of the same name. No dependency
+    # edge exists, so nothing beta writes can be consuming alpha's module.
+    out.append(
+        case(
+            "rule A: a colliding name in an unrelated crate is not consumption",
+            {
+                "alpha": {"lib.rs": "pub mod shimmer;\n", "shimmer.rs": "pub const INT8: u8 = 1;\n"},
+                "beta": {
+                    "lib.rs": "pub enum Widget { INT8 }\npub fn go() { let _ = Widget::INT8; }\n"
+                },
+            },
+            {"alpha::shimmer"},
+        )
+    )
+    # POSITIVE CONTROL: identical source, one dependency edge added. Now beta
+    # CAN name alpha, so the reference counts and the module is consumed.
+    # Without this, a rule A that refused every cross-crate reference would
+    # still pass the case above.
+    out.append(
+        case(
+            "rule A: the same reference DOES count once the dependency exists",
+            {
+                "alpha": {"lib.rs": "pub mod shimmer;\n", "shimmer.rs": "pub const INT8: u8 = 1;\n"},
+                "beta": {"lib.rs": "pub fn go() { let _ = alpha::shimmer::INT8; }\n"},
+            },
+            set(),
+            deps={"beta": ["alpha"]},
+        )
+    )
+    return out
+
+
+def rule_b_cases() -> list[bool]:
+    """A `pub use` is a shelf however rustfmt wrapped it."""
+    out = []
+    # The measured shape: the module's item names appear ONLY on the
+    # continuation lines of its own crate's wrapped `pub use`. The old
+    # line-anchored skip caught line 1 and credited lines 2-3.
+    out.append(
+        case(
+            "rule B: a WRAPPED `pub use` is still a shelf",
+            {
+                "alpha": {
+                    "lib.rs": (
+                        "pub mod selector;\n"
+                        "pub use selector::{\n"
+                        "    register_backend, BackendChooser,\n"
+                        "};\n"
+                    ),
+                    "selector.rs": "pub fn register_backend() {}\npub struct BackendChooser;\n",
+                }
+            },
+            {"alpha::selector"},
+        )
+    )
+    # POSITIVE CONTROL: a plain (non-pub) wrapped `use` is an IMPORT, and an
+    # import IS consumption. Rule B must not swallow it — that would trade the
+    # false negative for a false positive across every multi-line import in the
+    # tree, which is most of them.
+    #
+    # THE MODULE NAME APPEARS ONLY ON THE CONTINUATION LINE, and the body
+    # mentions nothing the module owns. That isolation is the whole control, and
+    # it was missing at first: the original fixture put `BackendChooser` in the
+    # function signature too, so a rule B that wrongly swallowed plain `use`
+    # continuations still found evidence on the signature line and the mutation
+    # SURVIVED. The control existed and observed nothing — the same shape as the
+    # defects this gate exists to catch, one level up.
+    out.append(
+        case(
+            "rule B: a wrapped plain `use` is an import, and still counts",
+            {
+                "alpha": {"lib.rs": "pub mod selector;\n", "selector.rs": "pub struct BackendChooser;\n"},
+                "beta": {
+                    "lib.rs": (
+                        "use alpha::{\n"
+                        "    selector::BackendChooser,\n"
+                        "};\n"
+                        "pub fn go(_c: Unrelated) {}\n"
+                    )
+                },
+            },
+            set(),
+            deps={"beta": ["alpha"]},
+        )
+    )
+    return out
+
+
+def lanemap_stays_deleted() -> bool:
+    """`kirra_planner::lanemap` was removed; it must not be re-declared.
+
+    The third measured case, and the only one that cannot be checked by
+    classification — a deleted module has nothing to classify. Re-adding the
+    six-line `pub use kirra_map::lanemap::*;` shim would restore a public path
+    with no importer, so the regression guard is that the declaration is absent
+    from the REAL tree.
+    """
+    mods = {f"{c}::{n}" for c, n, _ in G.declared_pub_mods()}
+    ok = "kirra_planner::lanemap" not in mods
+    print(f"  {'PASS' if ok else 'FAIL'}  the deleted lanemap shim has not come back")
+    if not ok:
+        print("        kirra_planner::lanemap is declared again — it was removed")
+        print("        as a measured compatibility removal (ORPHAN_GATE_FALLOUT.md)")
+    return ok
+
+
+def measured_cases_are_still_orphans() -> bool:
+    """The two retained cases must be reported as orphans by the REAL gate.
+
+    Fixtures prove the rules work on shapes; this proves they work on the tree
+    they were measured against. Without it, a rule could be correct in miniature
+    and still not fire on the module that motivated it.
+    """
+    ok = True
+    orphs = set(G.find_orphans())
+    for mod, rule in (
+        ("parko_ros2::pointcloud2_shim", "A"),
+        ("parko_core::backend_selector", "B"),
+    ):
+        hit = mod in orphs
+        print(f"  {'PASS' if hit else 'FAIL'}  {mod} is an orphan (rule {rule})")
+        ok = ok and hit
+    return ok
+
+
 def main() -> int:
     results = []
+
+    results.extend(rule_a_cases())
+    results.extend(rule_b_cases())
+    results.append(lanemap_stays_deleted())
+    results.append(measured_cases_are_still_orphans())
 
     results.append(
         case(

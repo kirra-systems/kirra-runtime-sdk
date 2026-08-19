@@ -36,6 +36,7 @@ from __future__ import annotations
 import json
 import re
 import sys
+import tomllib
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
@@ -401,6 +402,181 @@ def stripped_lines(path: Path) -> list[str]:
     return hit
 
 
+# ===========================================================================
+# Rule A — a reference only counts from a crate that could NAME the module
+# ===========================================================================
+#
+# The `path` and `item` scans below match an identifier anywhere in the tree.
+# That is not a consumer test, and the audit measured what it costs: 680 lines
+# of `parko_ros2::pointcloud2_shim` read as consumed because it exports `INT8`
+# and parko-core writes `PrecisionMode::INT8` — an unrelated enum variant, in a
+# crate that does not depend on parko-ros2 at all.
+#
+# `ambiguous_item_names` cannot reach that case: it discounts names owned by two
+# scanned MODULES, and this collision is with an enum variant. Patching the name
+# heuristic again would have been the third such patch. So the question becomes
+# structural instead:
+#
+#     could the crediting file's crate NAME this module's crate?
+#
+# Same crate, or a Cargo dependency path to it. Otherwise the reference cannot
+# be consuming this module — not as a judgement call, as a fact about the Cargo
+# graph. Measured fallout before landing: 1 module (see
+# docs/design/ORPHAN_GATE_FALLOUT.md), already baselined.
+
+_CRATE_DIRS: dict[str, Path] | None = None
+_REACHABLE: dict[str, set[str]] | None = None
+_FILE_CRATE: dict[Path, str | None] = {}
+_PUB_USE_LINES: dict[Path, set[int]] = {}
+
+#: Manifest globs. `parko/Cargo.toml` is a VIRTUAL workspace root with no
+#: `[package]`, and the repo root is both a workspace root AND the
+#: `kirra-verifier` package — longest-prefix matching in `file_crate` keeps a
+#: `crates/*` file from attributing to the root.
+MANIFEST_GLOBS = ["Cargo.toml", "crates/*/Cargo.toml", "parko/crates/*/Cargo.toml"]
+
+#: Dependency tables that let one crate name another. `dev-dependencies` is
+#: included because `examples/` COUNT as consumers here and examples link
+#: dev-deps; excluding them would invent orphans.
+DEP_TABLES = ("dependencies", "dev-dependencies", "build-dependencies")
+
+
+def _ident(name: str) -> str:
+    return name.replace("-", "_")
+
+
+def crate_dirs() -> dict[str, Path]:
+    """Crate ident -> crate directory, for EVERY crate, lib or bin-only.
+
+    Read from manifests rather than from `lib.rs`: keying off lib targets drops
+    bin-only crates, and their files then attribute to whatever directory
+    happens to be their longest prefix. The audit hit exactly that and reported
+    `kirra-wcet-bench`'s ordinary `kirra_timing::evt::estimate_pwcet(..)` call
+    as unattributable.
+    """
+    global _CRATE_DIRS
+    if _CRATE_DIRS is None:
+        out: dict[str, Path] = {}
+        for glob in MANIFEST_GLOBS:
+            for man in sorted(REPO.glob(glob)):
+                try:
+                    data = tomllib.loads(man.read_text(encoding="utf-8"))
+                except (tomllib.TOMLDecodeError, OSError):
+                    continue
+                name = data.get("package", {}).get("name")
+                if name:
+                    out[_ident(name)] = man.parent
+        _CRATE_DIRS = out
+    return _CRATE_DIRS
+
+
+def _direct_deps(crate_dir: Path) -> set[str]:
+    try:
+        data = tomllib.loads((crate_dir / "Cargo.toml").read_text(encoding="utf-8"))
+    except (tomllib.TOMLDecodeError, OSError):
+        return set()
+    names: set[str] = set()
+    for table in DEP_TABLES:
+        names |= set(data.get(table, {}).keys())
+    for target in data.get("target", {}).values():
+        for table in DEP_TABLES:
+            names |= set(target.get(table, {}).keys())
+    return {_ident(n) for n in names}
+
+
+def reachable_crates() -> dict[str, set[str]]:
+    """Crate -> every crate it can name, transitively, including itself."""
+    global _REACHABLE
+    if _REACHABLE is None:
+        dirs = crate_dirs()
+        direct = {c: _direct_deps(d) & set(dirs) for c, d in dirs.items()}
+        out: dict[str, set[str]] = {}
+        for c in dirs:
+            seen, stack = {c}, [c]
+            while stack:
+                for nxt in direct.get(stack.pop(), ()):
+                    if nxt not in seen:
+                        seen.add(nxt)
+                        stack.append(nxt)
+            out[c] = seen
+        _REACHABLE = out
+    return _REACHABLE
+
+
+def file_crate(path: Path) -> str | None:
+    """Which crate a consumer file belongs to — longest matching directory."""
+    hit = _FILE_CRATE.get(path)
+    if hit is None and path not in _FILE_CRATE:
+        best, best_len = None, -1
+        s = str(path)
+        for name, d in crate_dirs().items():
+            prefix = str(d.resolve())
+            if s.startswith(prefix + "/") and len(prefix) > best_len:
+                best, best_len = name, len(prefix)
+        _FILE_CRATE[path] = best
+        return best
+    return hit
+
+
+def can_name(consumer_file: Path, module_crate: str) -> bool:
+    """May a reference in this file be consuming `module_crate`'s module?
+
+    Fail-closed on an unattributable file: reporting an orphan that is not one
+    is visible and arguable, while crediting a module nothing consumes hides the
+    exact defect this gate exists to catch. Every consumer glob currently lives
+    under a crate directory, so this branch is unreached today.
+    """
+    owner = file_crate(consumer_file)
+    if owner is None:
+        return False
+    return module_crate in reachable_crates().get(owner, {owner})
+
+
+# ===========================================================================
+# Rule B — skip the whole `pub use` STATEMENT, not just its first line
+# ===========================================================================
+
+
+_USE_START = re.compile(r"^\s*(pub\s+)?use\b")
+
+
+def pub_use_lines(path: Path) -> set[int]:
+    """1-indexed lines belonging to a `pub use` statement in this file.
+
+    `REEXPORT_RE` is line-anchored, so it skips `pub use backend_selector::{`
+    and then credits the item names rustfmt wrapped onto the next two lines.
+    `parko_core::backend_selector` was credited by nothing else in the tree —
+    the "shelf with a label" this gate excludes, admitted through its own front
+    door.
+
+    A re-export is a re-export however it is formatted. A plain `use`
+    continuation is deliberately NOT skipped: importing IS consumption, and only
+    the `pub` form is a shelf.
+    """
+    hit = _PUB_USE_LINES.get(path)
+    if hit is None:
+        lines = stripped_lines(path)
+        out: set[int] = set()
+        i, n = 0, len(lines)
+        while i < n:
+            m = _USE_START.match(lines[i])
+            if not m:
+                i += 1
+                continue
+            is_pub, depth, j = bool(m.group(1)), 0, i
+            while j < n:
+                depth += lines[j].count("{") - lines[j].count("}")
+                if is_pub:
+                    out.add(j + 1)
+                if ";" in lines[j] and depth <= 0:
+                    break
+                j += 1
+            i = j + 1
+        _PUB_USE_LINES[path] = out
+        hit = out
+    return hit
+
+
 def is_consumed(
     crate: str,
     mod_name: str,
@@ -422,11 +598,16 @@ def is_consumed(
     for f in files:
         if f in own:
             continue
+        # RULE A: a file whose crate cannot name this module's crate cannot be
+        # consuming it, whatever its identifiers happen to spell.
+        if not can_name(f, crate):
+            continue
+        skip_lines = pub_use_lines(f)  # RULE B
         # Comments and string literals are blanked BEFORE any matching: a name
         # in prose or an error message is not a caller.
-        for line in stripped_lines(f):
-            if REEXPORT_RE.match(line):
-                continue  # re-exports label the shelf
+        for line_no, line in enumerate(stripped_lines(f), start=1):
+            if REEXPORT_RE.match(line) or line_no in skip_lines:
+                continue  # re-exports label the shelf, however they are wrapped
             if qualified_re.search(line) or path_re.search(line):
                 return True
             if use_re.match(line) and not REEXPORT_RE.match(line):
@@ -448,6 +629,13 @@ def find_orphans() -> list[str]:
     """
     _STRIPPED.clear()
     _PUB_ITEMS.clear()  # a fresh run may point at a different tree (the fixtures do)
+    # Rule A/B caches, same reason. Missing these made every fixture see the
+    # REAL repo's crate graph and pass for the wrong reason.
+    global _CRATE_DIRS, _REACHABLE
+    _CRATE_DIRS = None
+    _REACHABLE = None
+    _FILE_CRATE.clear()
+    _PUB_USE_LINES.clear()
     files = consumer_files()
     mods = declared_pub_mods()
     ambiguous = ambiguous_item_names(mods)
