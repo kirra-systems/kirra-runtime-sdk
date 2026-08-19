@@ -189,6 +189,65 @@ def page_bound_violation(signature: str, body: str) -> bool:
     return "LIMIT" not in code
 
 
+ANY_IMPL_RE = r"^impl(?:<[^>]*>)? .*\{"
+CEILING_RE = re.compile(r"\bMAX_[A-Z0-9_]+\b")
+# Every visibility and qualifier an impl method can carry, not just the two that
+# happened to matter first. `pub(crate) fn` is the one that caught this out in
+# review: the scan claimed to see EVERY impl method while matching only bare `fn`
+# and `pub fn`, so a restricted-visibility query would have been invisible to
+# rule 6 with the docstring insisting otherwise.
+FN_ANY_RE = re.compile(
+    r"\n    (?:pub(?:\s*\([^)]*\))?\s+)?(?:const\s+|async\s+|unsafe\s+)*"
+    r"fn ([a-z_0-9]+)\s*(?:<[^>]*>)?\s*\("
+)
+
+
+def _any_fn_bodies(impl_body: str) -> list[tuple[str, str, str]]:
+    """Like [`_fn_bodies`], but also sees methods that are not `pub`.
+
+    Trait-impl methods carry no `pub`, and restricted ones carry `pub(crate)`, so
+    a `pub fn` scan walked straight past both. That is not a hypothetical gap: `CitationLookup for
+    WorldStore` is where the provenance walk gets ALL of its SQL, and the whole
+    impl block was invisible to this gate — its block matched and it yielded
+    zero functions, which reads identically to "nothing to flag".
+    """
+    out = []
+    for m in FN_ANY_RE.finditer(impl_body):
+        i = impl_body.find("{", m.end())
+        if i < 0:
+            continue
+        j, depth = i + 1, 1
+        while j < len(impl_body) and depth > 0:
+            if impl_body[j] == "{":
+                depth += 1
+            elif impl_body[j] == "}":
+                depth -= 1
+            j += 1
+        out.append((m.group(1), impl_body[m.start() : i], impl_body[i:j]))
+    return out
+
+
+def ceiling_bound_violation(body: str) -> bool:
+    """True when a method knows a `MAX_*` ceiling but its SQL does not.
+
+    Rule 4 asks whether a bound the CALLER passed reached the query. This asks
+    the same question of a bound the method holds itself, which rule 4 cannot
+    see because there is no page parameter to notice — the ceiling is a
+    constant.
+
+    It is the same defect in the same place: fetch everything, truncate in Rust,
+    return an answer that is byte-identical to the bounded one. No behavioural
+    test can tell the two apart, because the only difference is how much work
+    the database did.
+    """
+    code = strip_comments(body)
+    if not SELECT_RE.search(code):
+        return False
+    if not CEILING_RE.search(code):
+        return False
+    return "LIMIT" not in code
+
+
 def public_methods(path: Path, header_re: str) -> set[str]:
     """The public method names declared in the matching impl blocks."""
     text = path.read_text()
@@ -397,6 +456,31 @@ def run(verbose: bool = False) -> list[str]:
                             f"    The bound has to reach the query."
                         )
 
+    # ---- Rule 6: a ceiling the METHOD holds must reach the query too --------
+    #
+    # Rule 4 covers a bound the caller passes. A method can equally hold its own
+    # ceiling as a constant — `MAX_COMPACTED_SPANS`, `MAX_CARRIERS` — and then
+    # apply it in Rust after selecting the world. Same defect, same invisibility
+    # to any behavioural test, and rule 4 cannot see it because there is no page
+    # parameter to trigger on.
+    #
+    # Scans EVERY impl block, not just the two named surfaces, and sees non-`pub`
+    # methods: the provenance walk's SQL all lives in a trait impl, which the
+    # `pub fn` scan skipped silently.
+    for path in sorted(STORE_SRC.rglob("*.rs")):
+        text = path.read_text()
+        for body in _impl_bodies(text, ANY_IMPL_RE):
+            for fn_name, _sig, fn_body in _any_fn_bodies(body):
+                if ceiling_bound_violation(fn_body):
+                    failures.append(
+                        f"{fn_name} ({path.name}) applies a MAX_* ceiling to a "
+                        f"SELECT that has no LIMIT.\n"
+                        f"    Truncating in Rust after an unbounded scan returns "
+                        f"the same answer while doing work proportional to the "
+                        f"store — the difference no test can observe.\n"
+                        f"    Push the ceiling into the query."
+                    )
+
     # 5. A DOMAIN QUERY MUST GO THROUGH THE TYPED ENGINE.
     #
     # Rules 1-4 make a query bounded. They do not make the query the only way to
@@ -589,6 +673,93 @@ def self_test() -> int:
         failed = 1
     else:
         print("self-test: comments neither arm nor disarm rule 4")
+
+    # -- rule 6: a ceiling the method holds must reach the query --------------
+    #
+    # The positive fixture is `compacted_spans` as it shipped on #1448: a real
+    # ceiling, applied in Rust, over a SELECT with no LIMIT. It is the shape the
+    # provenance walk actually had, not an invented one.
+    unbounded_ceiling = """
+        let mut stmt = self.conn.prepare(
+            "SELECT lo_generation, hi_generation FROM compaction_citations")?;
+        let mut spans = Vec::new();
+        for row in mapped { spans.push(row?); }
+        let truncated = spans.len() > provenance_graph::MAX_COMPACTED_SPANS;
+        spans.truncate(provenance_graph::MAX_COMPACTED_SPANS);
+    """
+    if not ceiling_bound_violation(unbounded_ceiling):
+        print("SELF-TEST FAIL: a MAX_* ceiling applied over a LIMIT-less SELECT "
+              "was NOT caught — rule 6 is vacuous.")
+        return 1
+    print("self-test: ceiling applied in Rust over an unbounded SELECT → caught")
+
+    bounded_ceiling = unbounded_ceiling.replace(
+        'FROM compaction_citations")?;',
+        'FROM compaction_citations WHERE lo_generation <= ?1 LIMIT ?2")?;')
+    if ceiling_bound_violation(bounded_ceiling):
+        print("SELF-TEST FAIL: rule 6 fired on a query that DOES carry a LIMIT.")
+        return 1
+    print("self-test: ceiling pushed into the query → not flagged")
+
+    # A comment may not disarm it, for rule 4's reason: a structural rule that
+    # prose can switch off is prose.
+    commented = unbounded_ceiling.replace(
+        "let mut spans = Vec::new();",
+        "// bounded by LIMIT elsewhere\n        let mut spans = Vec::new();")
+    if not ceiling_bound_violation(commented):
+        print("SELF-TEST FAIL: a COMMENT mentioning LIMIT disarmed rule 6.")
+        return 1
+    print("self-test: comments cannot disarm rule 6")
+
+    # And the gap that hid it: trait-impl methods carry no `pub`.
+    trait_impl = """
+impl provenance_graph::CitationLookup for WorldStore {
+    fn compacted_spans(&self) -> Result<Vec<(i64, i64)>, Self::Error> {
+        let mut stmt = self.conn.prepare("SELECT lo_generation FROM t")?;
+        spans.truncate(provenance_graph::MAX_COMPACTED_SPANS);
+    }
+}
+"""
+    seen = [f for b in _impl_bodies(trait_impl, ANY_IMPL_RE) for f, _, _ in _any_fn_bodies(b)]
+    if "compacted_spans" not in seen:
+        print("SELF-TEST FAIL: a non-`pub` trait-impl method is still invisible "
+              "to the scan — rule 6 would report green on an unscanned surface.")
+        return 1
+    print("self-test: trait-impl methods are visible to the ceiling scan")
+
+    # ...and so is every other visibility an impl method can carry. Raised in
+    # review of #1450: the scan matched only `fn` and `pub fn` while its own
+    # docstring claimed it saw every impl method, which is the same shape of
+    # false completeness rule 6 exists to catch.
+    visibilities = """
+impl Store {
+    pub(crate) fn restricted(&self) -> Result<(), E> {
+        let mut stmt = self.conn.prepare("SELECT a FROM t")?;
+        rows.truncate(MAX_THING);
+    }
+    pub(super) fn super_scoped(&self) -> Result<(), E> { let _ = 1; }
+    async fn asynchronous(&self) -> Result<(), E> { let _ = 1; }
+    pub const fn constant(&self) -> usize { 1 }
+    unsafe fn unsafely(&self) -> usize { 1 }
+}
+"""
+    found = [f for b in _impl_bodies(visibilities, ANY_IMPL_RE) for f, _, _ in _any_fn_bodies(b)]
+    for expected in ("restricted", "super_scoped", "asynchronous", "constant", "unsafely"):
+        if expected not in found:
+            print(f"SELF-TEST FAIL: `{expected}` is invisible to the method scan, "
+                  f"so rule 6 would report green on an unscanned method. Saw: {found}")
+            return 1
+    print(f"self-test: all {len(found)} impl-method visibilities are scanned")
+
+    # Non-vacuity: the restricted one must not merely be SEEN, it must be JUDGED.
+    restricted_body = next(
+        body for b in _impl_bodies(visibilities, ANY_IMPL_RE)
+        for name, _, body in _any_fn_bodies(b) if name == "restricted")
+    if not ceiling_bound_violation(restricted_body):
+        print("SELF-TEST FAIL: a `pub(crate)` method with a MAX_* ceiling over a "
+              "LIMIT-less SELECT was discovered but NOT flagged.")
+        return 1
+    print("self-test: a restricted-visibility ceiling violation is flagged, not just seen")
 
     # (h) RULE 5, THE HISTORICAL ROUTE: `mission_context` as it actually shipped
     #     before the query engine existed. Copied from the commit that this box

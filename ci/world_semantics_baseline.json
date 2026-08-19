@@ -49,6 +49,11 @@
         "version": 1,
         "corpus_digest": "d74f62272fc120646d699e587bfd181e55aa00b00e57b7e23542245fb6f65b4a",
         "source_pin": "ee863d52f132a5f8671ee60ab01cc9c84d9062296ccd65641ed70934de460428"
+      },
+      {
+        "version": 2,
+        "corpus_digest": "d74f62272fc120646d699e587bfd181e55aa00b00e57b7e23542245fb6f65b4a",
+        "source_pin": "07e6d2b8b7d86207a61231c7dfa1e4df46be0240632bba3d15e171e42a5d7b4b"
       }
     ]
   }

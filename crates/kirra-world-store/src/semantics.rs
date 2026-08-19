@@ -222,11 +222,28 @@ pub const SEMANTICS: &[RuleSpec] = &[
         source_file: "crates/kirra-world-store/src/lineage.rs",
         span: "lineage_selection",
     },
+    // v2 (#1449): the compacted-span enumeration became bounded, and
+    // `DanglingReason::PossiblyCompacted` gained the `truncated` flag that says
+    // so. The bump is on KIRRA-WM-REDUCER-VERSION-001's own test — *can this
+    // alter a derived answer* — and it can: on a store with more qualifying
+    // spans than the ceiling admits, v2 names some of them and says so where v1
+    // named all of them.
+    //
+    // HONEST LIMIT, recorded rather than left for someone to discover: the
+    // corpus digest did NOT move, because reaching a 256-span ceiling needs a
+    // fixture of 257 contrived spans and the corpus is a small realistic log.
+    // So the corpus does not distinguish v1 from v2 — verified, not assumed, by
+    // deleting the `+more` from the rendering and watching all 29 corpus tests
+    // stay green. What carries this behaviour instead is named in
+    // `provenance_graph`'s own tests and the store-level cap test, plus rule 6
+    // of `ci/check_query_boundedness.py` for the query bound. A version whose
+    // corpus cannot see it is exactly the under-specification the topology bug
+    // taught us to write down.
     RuleSpec {
         rule: RuleId::CitationResolution,
-        version: 1,
+        version: 2,
         corpus_digest: "d74f62272fc120646d699e587bfd181e55aa00b00e57b7e23542245fb6f65b4a",
-        source_pin: "ee863d52f132a5f8671ee60ab01cc9c84d9062296ccd65641ed70934de460428",
+        source_pin: "07e6d2b8b7d86207a61231c7dfa1e4df46be0240632bba3d15e171e42a5d7b4b",
         source_file: "crates/kirra-world-store/src/provenance_graph.rs",
         span: "citation_resolution",
     },
@@ -716,9 +733,18 @@ pub fn render_provenance(tree: &crate::provenance_graph::ProvenanceTree) -> Stri
                         }
                         CitationResolution::Dangling { reason } => match reason {
                             DanglingReason::NeverVisible => out.push_str("dangling(never)"),
-                            DanglingReason::PossiblyCompacted { spans } => {
+                            DanglingReason::PossiblyCompacted { spans, truncated } => {
                                 let ids: Vec<String> = spans.iter().map(i64::to_string).collect();
-                                out.push_str(&format!("dangling(compacted:{})", ids.join("+")));
+                                // `+more` mirrors the Plural arm: a rendering that
+                                // dropped the flag would let a capped span list and
+                                // a complete one digest identically, which is how a
+                                // rule ends up pinned against a behaviour it does
+                                // not specify.
+                                out.push_str(&format!(
+                                    "dangling(compacted:{}{})",
+                                    ids.join("+"),
+                                    if *truncated { "+more" } else { "" }
+                                ));
                             }
                         },
                     }

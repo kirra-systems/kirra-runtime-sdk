@@ -2825,6 +2825,54 @@ to `NeverVisible`), but it touches the pinned region and the `CitationLookup`
 seam, and folding that into the round that found it is how a small fix becomes an
 unreviewed one.
 
+#### Residual 1 — the span enumeration, bounded (#1449)
+
+`compacted_spans` is now `WHERE lo_generation <= ?1 ORDER BY lo_generation ASC
+LIMIT ?2`, read once per walk. `PossiblyCompacted` carries `truncated`, and the
+qualification is stated so a cap can never reverse it: `NeverVisible` requires
+**both** that no span qualifies **and** that the store is holding none back.
+
+The change is small. Establishing that anything could *see* it was not, and that
+is the part worth recording.
+
+**The first mutation came back green.** Deleting `LIMIT` from the SQL left the
+store-level cap test passing — because the walk re-caps the list afterwards, so
+the assertions still held on an unbounded scan. The test observed the **answer**
+being bounded; the whole point of the change was bounding the **work**. Fetching
+everything and truncating in Rust returns a byte-identical answer, so no
+behavioural test can distinguish the two — which is precisely what
+`ci/check_query_boundedness.py` already says about the defect that produced
+#1440 and #1441.
+
+That gate is the right observation point, and it could not see this method
+either. Two reasons, both silent: its rule fires only when a method accepts a
+**page parameter**, and this method's bound is a constant ceiling; and its scan
+walks `pub fn`, while every line of the provenance walk's SQL lives in a
+**trait impl**, whose methods carry no `pub`. The impl block matched and yielded
+zero functions — which reads exactly like nothing to flag.
+
+So rule 6: *a method that applies a `MAX_*` ceiling to a `SELECT` must carry a
+`LIMIT`*. Fallout measured before changing what CI rejects, as the tier-order
+ruling requires — 52 SELECT-issuing methods across every impl in the store, zero
+violations, so the rule is a no-op today and fires only on the mutation that
+escaped. Its self-tests use `compacted_spans` as it shipped, and one of them
+asserts the trait-impl scan is non-empty, so the blindness cannot come back
+quietly.
+
+**The version bump, and what the corpus cannot say.** `citation_resolution` is
+v2: on a store with more qualifying spans than the ceiling admits, v2 names some
+and says so where v1 named all, and that can alter a derived answer. The corpus
+digest did **not** move, because reaching a 256-span ceiling needs 257 contrived
+spans and the corpus is a small realistic log. Verified rather than assumed —
+deleting `+more` from the rendering left all 29 corpus tests green. The
+behaviour is carried by the resolver tests, the store-level cap test and rule 6
+instead, and the gap is written into the declaration itself.
+
+Three of this change's checks were themselves vacuous before they were fixed: a
+fallout measurement that scanned zero functions, a mutation run whose test target
+matched no test, and a corpus suite that had stopped compiling. Each looked like
+a pass.
+
 **The lesson this one adds:** the other four were controls that did not measure
 what they claimed. This was a property **no control claimed at all** — the suite
 asserted what the tree *said* and never that the tree *held together*. Structural
