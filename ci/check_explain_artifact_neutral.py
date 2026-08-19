@@ -77,13 +77,85 @@ from pathlib import Path
 # same affordance `check_proposal_context_symbolic.py` provides.
 GUARDED_CRATES = ("crates/kirra-explain-types",)
 
-# The crate must have no dependency on Kirra World. Checked HERE, directly,
-# rather than left to Fence B: Fence B would catch a `kirra-world*` dependency
-# added below, but only transitively, through `kirra-sidecars`' CorridorSource
-# impl and the closure walk. That is a chain of other facts continuing to hold.
-# The invariant `KIRRA-WM-EXPLAIN-PLACEMENT-001` actually needs is direct, so it
-# is asserted directly.
-WORLD_PACKAGE_PREFIX = "kirra-world"
+# ---------------------------------------------------------------------------
+# The dependency half of the rule
+# ---------------------------------------------------------------------------
+#
+# The property is NOT "this manifest is empty". It used to be stated that way,
+# and the manifest said so too, which was a stronger sentence than the invariant
+# it was protecting. `serde` had to go in the moment these types became the wire
+# contract (the derive must sit on the type DEFINITION -- a `#[serde(remote)]`
+# mirror in a sibling crate drifts silently, which is the defect class this tier
+# exists to close). A rule that overstates itself is broken the first time it is
+# inconvenient, and then it protects nothing.
+#
+# So the rule is the narrower, checkable one:
+#
+#     These presentation types stay NEUTRAL. They may not acquire a dependency
+#     on Kirra World, on Mick, on the doer (planner/map/perception), on the
+#     checker/governor, or on anything carrying actuation authority.
+#
+# That is strictly stronger than emptiness was in practice, because emptiness
+# was an accident that no check could distinguish from a deliberate boundary.
+#
+# WHY THE FAMILIES ARE IMPORTED, NOT RETYPED
+# ------------------------------------------
+# `check_kirra_world_bidirectional_fence` already classifies the actuation
+# family, and `kirra-explain-types` is already inside its FENCE_A_EXTRA_PACKAGES,
+# so Fence A check 2 walks this crate's CLOSURE against those names -- a
+# strictly stronger check than the direct one below. Retyping the list here
+# would create two statements of one classification, and the one that stops
+# being updated is the one that silently stops matching. That is the same
+# failure mode as the serde mirror, one level up. So they are IMPORTED: a crate
+# added to the fence's actuation set is forbidden here the same day.
+#
+# The direct check is kept anyway, for the reason the World ban was always
+# direct: `KIRRA-WM-EXPLAIN-PLACEMENT-001` is an invariant about THIS manifest,
+# and an invariant that holds only through a chain of other facts is an
+# invariant one refactor away from being false. A direct hit also names the
+# offending line instead of a closure path.
+_CI_DIR = Path(__file__).resolve().parent
+if str(_CI_DIR) not in sys.path:
+    sys.path.insert(0, str(_CI_DIR))
+
+from check_kirra_world_bidirectional_fence import (  # noqa: E402
+    ACTUATION_EXTERNAL,
+    ACTUATION_PACKAGES,
+    WORLD_PACKAGE_EXACT,
+    WORLD_PACKAGE_PREFIX,
+)
+
+# Families the FENCE does not classify, named here because this seam is where
+# they matter. Each entry is the reason the dependency would break the ruling,
+# printed verbatim when the gate fires.
+FORBIDDEN_PACKAGES: dict[str, str] = {
+    "kirra-mick": (
+        "the renderer -- an arrow from the shared contract INTO Mick makes "
+        "kirra-world-service depend on Mick transitively, which is the coupling "
+        "the placement ruling exists to prevent, reversed"
+    ),
+    "kirra-sidecars": (
+        "depends on kirra-mick, so it reconstructs the Mick edge one hop out"
+    ),
+    "kirra-planner": "the doer -- a planner type here would make the artifact plan-shaped",
+    "kirra-map": "doer-side lane graph; carries World-adjacent coordinates",
+    "kirra-taj": "doer-side perception",
+    "kirra-core": "the checker's home (KirraKernelGovernor, the frozen kinematics talisman)",
+    "kirra-trajectory": "the checker (validate_trajectory_slow)",
+    "kirra-safety-authority": "the posture DAG -- safety authority",
+    "kirra-policy-types": "command classification -- authorization, not presentation",
+    "kirra-persistence": "the store; a persistence type on this wire is a coordinate by another name",
+    "kirra-proposal-context": "the SANCTIONED answer boundary -- it depends on kirra-world-service",
+    "kirra-mission-orchestrator": "sits above kirra-proposal-context, same reach",
+}
+
+FORBIDDEN_PREFIXES: tuple[tuple[str, str], ...] = (
+    (
+        WORLD_PACKAGE_PREFIX,
+        "Kirra World itself -- the artifact would carry the store it is meant to "
+        "stand in for",
+    ),
+)
 
 # The integer widths a Kirra World coordinate is. `generation` is `i64` in
 # `world_events` (it is the table's INTEGER PRIMARY KEY), and every bitemporal
@@ -217,18 +289,59 @@ def violations_in(text: str) -> list[str]:
     return found
 
 
-def check_no_world_dependency(root: Path, crate: str) -> list[str]:
-    """The direct half: the guarded crate must not depend on `kirra-world*`."""
+def declared_dependencies(manifest_text: str) -> list[str]:
+    """Every package name declared as a dependency, comments stripped.
+
+    Deliberately not `kirra-`-scoped: an external actuation transport
+    (`r2r`, `serialport`, ...) is exactly as disqualifying as an internal one,
+    and scoping the regex to `kirra-` was how the previous version could only
+    ever have caught half the rule.
+    """
+    text = strip_comments_toml(manifest_text)
+    return sorted(set(re.findall(r"^\s*([A-Za-z][\w-]*)\s*=", text, re.M)))
+
+
+def forbidden_dependencies(manifest_text: str) -> list[str]:
+    """The pure half: which declared dependencies break neutrality, and why.
+
+    Pure and text-level ON PURPOSE. The path-reading wrapper below cannot be
+    handed a crafted manifest, so a self-test written against it could only
+    assert that the real crate passes -- which is true of a function that
+    returns the empty list unconditionally. Taking text means the self-test can
+    feed it a forbidden dependency and assert the gate FLAGS it.
+    """
+    problems: list[str] = []
+    for dep in declared_dependencies(manifest_text):
+        if dep in FORBIDDEN_PACKAGES:
+            problems.append(f"`{dep}` — {FORBIDDEN_PACKAGES[dep]}")
+        elif dep in WORLD_PACKAGE_EXACT:
+            problems.append(f"`{dep}` — Kirra World itself")
+        elif dep in ACTUATION_PACKAGES:
+            problems.append(
+                f"`{dep}` — {ACTUATION_PACKAGES[dep]}; actuation authority never "
+                "rides a presentation type"
+            )
+        elif dep in ACTUATION_EXTERNAL:
+            problems.append(
+                f"`{dep}` — an actuator transport; a renderer inheriting it could "
+                "reach a wheel from an explanation"
+            )
+        else:
+            for prefix, why in FORBIDDEN_PREFIXES:
+                if dep.startswith(prefix):
+                    problems.append(f"`{dep}` — {why}")
+                    break
+    return problems
+
+
+def check_dependency_neutrality(root: Path, crate: str) -> list[str]:
+    """The direct half: the guarded crate's manifest must stay neutral."""
     manifest = root / crate / "Cargo.toml"
     if not manifest.is_file():
         raise GateError(f"guarded crate has no manifest: {crate}")
-    text = strip_comments_toml(manifest.read_text(encoding="utf-8"))
-    hits = sorted(set(re.findall(r"^\s*(kirra-[\w-]+)\s*=", text, re.M)))
     return [
-        f"{crate} depends on `{dep}` — the whole placement ruling rests on this "
-        "crate carrying no Kirra World into Mick"
-        for dep in hits
-        if dep.startswith(WORLD_PACKAGE_PREFIX)
+        f"{crate}/Cargo.toml depends on {p}"
+        for p in forbidden_dependencies(manifest.read_text(encoding="utf-8"))
     ]
 
 
@@ -242,7 +355,7 @@ def main() -> int:
     checked = 0
 
     for crate in GUARDED_CRATES:
-        problems += check_no_world_dependency(root, crate)
+        problems += check_dependency_neutrality(root, crate)
         src_dir = root / crate / "src"
         if not src_dir.is_dir():
             raise GateError(f"guarded crate has no src/: {crate}")
@@ -265,10 +378,16 @@ def main() -> int:
             print(f"  - {p}", file=sys.stderr)
         print(
             "\nAn explanation crosses a process boundary to a renderer that must "
-            "not query\nKirra World. A coordinate here is the argument it would "
-            "need to do so.\nCarry a DisplayLabel or an EvidenceDigest instead, "
-            "or justify the field in\nALLOWLIST if it genuinely cannot address "
-            "the store.",
+            "not query\nKirra World.\n"
+            "\n  A CARRIED FIELD: a coordinate is the argument that query would "
+            "need. Carry a\n  DisplayLabel or an EvidenceDigest instead, or "
+            "justify the field in ALLOWLIST if\n  it genuinely cannot address "
+            "the store.\n"
+            "\n  A DEPENDENCY: these types are shared by both sides, so anything "
+            "they depend on,\n  both sides inherit. Neutrality is the rule — not "
+            "an empty manifest. An\n  authority-free crate (serde and its like) "
+            "is fine; World, Mick, the doer, the\n  checker and actuation are "
+            "not, and no allowlist admits them.",
             file=sys.stderr,
         )
         return 1
@@ -331,11 +450,69 @@ def _self_test() -> int:
                 path.read_text(encoding="utf-8")
             ), f"{path} violates its own gate"
 
+    # --- the dependency half -------------------------------------------------
+    #
+    # These are the non-vacuity controls for the rule that changed. Each one
+    # feeds a CRAFTED manifest and asserts the gate FLAGS it. The distinction
+    # matters: a test that only ran the real manifest through and found nothing
+    # would pass identically against a function that returns [] unconditionally,
+    # which is how a widened rule can be shipped without ever being exercised.
+
+    def t_a_world_dependency_is_flagged():
+        src = '[dependencies]\nkirra-world-store = { path = "../kirra-world-store" }\n'
+        assert forbidden_dependencies(src), "a kirra-world* dependency was admitted"
+
+    def t_a_mick_dependency_is_flagged():
+        src = '[dependencies]\nkirra-mick = { path = "../kirra-mick" }\n'
+        assert forbidden_dependencies(src), "the renderer edge was admitted"
+
+    def t_a_checker_dependency_is_flagged():
+        src = '[dependencies]\nkirra-core = { path = "../kirra-core" }\n'
+        assert forbidden_dependencies(src), "a checker dependency was admitted"
+
+    def t_a_doer_dependency_is_flagged():
+        src = '[dependencies]\nkirra-planner = { path = "../kirra-planner" }\n'
+        assert forbidden_dependencies(src), "a planner dependency was admitted"
+
+    def t_an_actuation_dependency_is_flagged():
+        # Imported from the fence, so this also proves the import is live: if
+        # the constant were renamed away, this case fails rather than the gate
+        # silently checking an empty set.
+        src = '[dependencies]\nkirra-release-token = { path = "../kirra-release-token" }\n'
+        assert forbidden_dependencies(src), "an actuation dependency was admitted"
+
+    def t_an_external_actuator_transport_is_flagged():
+        # The old regex was scoped to `kirra-`, so this whole family was
+        # invisible to it -- a serial port is not a kirra crate.
+        src = '[dependencies]\nserialport = "4"\n'
+        assert forbidden_dependencies(src), "an external actuator transport was admitted"
+
+    def t_serde_is_admitted():
+        # The rule is neutrality, not emptiness. If this ever fails, the gate
+        # has drifted back to counting entries.
+        src = '[dependencies]\nserde = { version = "1", features = ["derive"] }\n'
+        assert not forbidden_dependencies(src), "serde was rejected by a neutrality rule"
+
+    def t_a_commented_out_dependency_is_not_a_violation():
+        src = '[dependencies]\n# kirra-mick = { path = "../kirra-mick" }\nserde = "1"\n'
+        assert not forbidden_dependencies(src), "a commented-out dep was read as real"
+
+    def t_the_real_manifest_is_neutral():
+        root = Path(__file__).resolve().parent.parent
+        text = (root / GUARDED_CRATES[0] / "Cargo.toml").read_text(encoding="utf-8")
+        assert not forbidden_dependencies(text), "the guarded crate breaks its own rule"
+        # ...and non-vacuously: it must actually be declaring something, or the
+        # case above passes because the parser found nothing at all.
+        assert "serde" in declared_dependencies(text), (
+            "no serde in the guarded manifest — either the parser is broken or "
+            "the wire contract lost its derive"
+        )
+
     cases = [(n, f) for n, f in sorted(locals().items()) if n.startswith("t_") and callable(f)]
     for name, fn in cases:
         case(name, fn)
 
-    expected = 10
+    expected = 19
     if len(cases) != expected:
         print(
             f"SELF-TEST HARNESS: discovered {len(cases)} cases, expected {expected}.",
