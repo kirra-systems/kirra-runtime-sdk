@@ -135,25 +135,58 @@ fn the_last_report_carries_why_not_just_how_many() {
     let path = tmp("report");
     {
         let mut s = WorldStore::open(&path).expect("open");
-        append_old(&mut s, "solo");
+        // FOUR, not one. A single event is also the projection head, so the
+        // prefix is fully blocked and no ACTING decision ever exists to observe
+        // — the fixture would starve the assertion rather than test it. Found by
+        // the tightened wait failing on a clean tree, which is the failure mode
+        // a fixture bug should have.
+        for i in 0..4 {
+            append_old(&mut s, &format!("rep{i}"));
+        }
         s.fold().expect("fold");
     }
     let sweeper = start_retention(&path, Duration::from_millis(50)).expect("start");
 
+    // Wait for a report carrying an ACTING decision, not merely any report.
+    //
+    // The sweeper overwrites `last` every pass, and once the fixture is
+    // compacted every later pass reports `NothingOldEnough` — whose range is
+    // `None`, making the agreement assertion below `None == None` and therefore
+    // hollow. That is how the first version of this test survived a mutation
+    // that decoupled the two fields: it was checking the wrong pass.
     let deadline = Instant::now() + Duration::from_secs(20);
-    while Instant::now() < deadline && sweeper.last_report().is_none() {
-        std::thread::sleep(Duration::from_millis(50));
+    let mut acting = None;
+    while Instant::now() < deadline && acting.is_none() {
+        acting = sweeper
+            .last_report()
+            .filter(|r| r.decision.range().is_some());
+        if acting.is_none() {
+            std::thread::sleep(Duration::from_millis(10));
+        }
     }
+    let report = acting.expect("a compacting pass should have reported by now");
 
-    let report = sweeper
-        .last_report()
-        .expect("a pass should have reported by now");
-    // The decision is what an operator needs when nothing happened; asserting
-    // it is present rather than asserting a specific variant keeps this a test
-    // of the SEAM, not a restatement of the policy's own exhaustive tests.
-    assert!(
-        format!("{:?}", report.decision).len() > 1,
-        "the report must carry the decision that produced it: {report:?}"
+    // THE DECISION AND THE ACTION MUST AGREE.
+    //
+    // The first version of this assertion was `format!("{:?}", decision).len() >
+    // 1`, which cannot fail — `RetentionDecision` derives `Debug`. A vacuous
+    // assertion inside the test whose whole purpose is non-vacuity, caught in
+    // review. Recorded rather than quietly swapped, because it is the same
+    // defect this suite exists to prevent, written by the person warning about
+    // it.
+    //
+    // What is checked instead is falsifiable and is the property that matters:
+    // `run_retention_pass` derives `compacted` FROM `decision.range()`, so a
+    // report claiming a range it did not remove — or removing one it did not
+    // decide — is a report that lies about what happened. Flattening the
+    // decision to a flag fails this; so does decoupling the two fields.
+    assert_eq!(
+        report
+            .decision
+            .range()
+            .map(|(lo, hi)| (lo as i64, hi as i64)),
+        report.compacted,
+        "the decision and the range actually removed disagree: {report:?}"
     );
 }
 

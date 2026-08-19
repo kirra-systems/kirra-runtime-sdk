@@ -124,7 +124,17 @@ impl RetentionSweeper {
         &self.counters
     }
 
-    /// The most recent pass's full report, or `None` before the first pass.
+    /// The most recent **successful** pass's full report, or `None` before the
+    /// first one.
+    ///
+    /// A FAILED pass does not clear this, and the distinction is deliberate
+    /// rather than an oversight: `run_retention_pass` errors *before* producing
+    /// a decision, so there is no report to store — overwriting with `None`
+    /// would destroy the last known diagnosis exactly when something has started
+    /// going wrong. Read it alongside [`SweepCounters::failed`], which is what
+    /// says whether the picture is current: `failed` climbing while this stays
+    /// put means the last thing retention managed to conclude is what is shown
+    /// here, and it is now stale.
     ///
     /// [`SweepCounters`] keeps the three OUTCOMES apart, which is what makes
     /// `pinned` climbing while `compacted` stays flat visible. What it cannot
