@@ -86,7 +86,9 @@ pub const EXPLANATION_ARTIFACT_VERSION: u32 = 1;
 /// it. That is what keeps the semantics on the World side of the boundary — a
 /// label that Mick took apart and reinterpreted would be Mick resolving
 /// provenance, which is exactly what the placement ruling forbids.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
+)]
 pub struct DisplayLabel(String);
 
 impl DisplayLabel {
@@ -116,7 +118,9 @@ impl std::fmt::Display for DisplayLabel {
 /// matches. Mick cannot: a digest is not an argument to any query this system
 /// offers, which is precisely why it is admissible here where a generation is
 /// not.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
+)]
 pub struct EvidenceDigest(String);
 
 impl std::fmt::Display for EvidenceDigest {
@@ -146,7 +150,7 @@ impl EvidenceDigest {
 /// current one, and a renderer with no tense marker will narrate it in the
 /// present. A historical answer says what was knowable **then**, and the tense
 /// is not decoration on that — it is the claim.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Tense {
     /// Pinned to a past coordinate. `pinned_at` is a rendered instant, not the
     /// coordinate itself: the projection converts, and that conversion is the
@@ -165,7 +169,7 @@ pub enum Tense {
 /// carried across the boundary WITHOUT their coordinates. `Plural` keeps its
 /// cardinality because that is the fact — *"several, and Kirra cannot say
 /// which"* — and loses the generations because those are query handles.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum BranchState {
     /// Exactly one recorded event carried the cited evidence.
     Resolved {
@@ -201,7 +205,7 @@ pub enum BranchState {
 /// *Never recorded* and *deleted* are different facts about the world, and a
 /// renderer that collapses them tells an investigator nothing was there when the
 /// truth may be that it was removed.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum DanglingReason {
     /// No compacted window could have held it.
     NeverRecorded,
@@ -211,7 +215,7 @@ pub enum DanglingReason {
 }
 
 /// Whether an explanation continues below a branch, and if not, why.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum BranchContinuation {
     /// The cited evidence's own provenance is in this artifact.
     Expanded {
@@ -230,7 +234,7 @@ pub enum BranchContinuation {
 /// are the ones the ruling names as never interchangeable: a bound being reached
 /// invites *"there is more"*, and a cycle must not, because raising a limit
 /// cannot help circular evidence.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum StopReason {
     /// The citation dangles — there is nothing below it.
     NothingToFollow,
@@ -245,7 +249,7 @@ pub enum StopReason {
 }
 
 /// One recorded citation, as presented.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ExplanationBranch {
     /// What it resolved to.
     pub state: BranchState,
@@ -254,7 +258,7 @@ pub struct ExplanationBranch {
 }
 
 /// What is known about one claim's own citations.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum NodeEvidence {
     /// The claim is recorded and its citations are known.
     Recorded {
@@ -274,7 +278,7 @@ pub enum NodeEvidence {
 }
 
 /// One claim in the explanation.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ExplanationNode {
     /// Distance from the root, which is 0. Indentation, not a coordinate.
     pub depth: u16,
@@ -291,7 +295,7 @@ pub struct ExplanationNode {
 /// Independent flags rather than one enum, mirroring the tree they come from: an
 /// explanation can be truncated AND circular AND degraded at once, and a shape
 /// that forces a precedence hides whichever loses.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub struct Completeness {
     /// A legitimate bound was reached; more evidence exists.
     pub truncated: bool,
@@ -326,7 +330,7 @@ impl Completeness {
 ///
 /// Immutable and self-contained: everything a renderer needs is here, and
 /// nothing here can be used to ask for more.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ExplanationArtifact {
     /// The contract version this artifact was built to.
     pub version: u32,
@@ -386,6 +390,96 @@ mod tests {
             cited: DisplayLabel::new("an unrecorded scan"),
             reason: DanglingReason::PossiblyDeleted,
         };
+    }
+
+    /// Every semantic this artifact distinguishes survives a real codec.
+    ///
+    /// SCOPE, stated so it is not mistaken for more than it is: this proves
+    /// SERIALIZATION. It does not prove the World-side producer and the
+    /// Mick-side renderer are connected — a hand-built value round-tripping
+    /// would stay green with either endpoint deleted. That control belongs to
+    /// the transport box, and runs the real projection through the wire into
+    /// the real renderer.
+    ///
+    /// What it does buy is that the transport box never has to wonder whether a
+    /// missing caveat came from the wire: the states that oblige a caveat are
+    /// checked here, at the type, where the failure would be cheapest to find.
+    #[test]
+    fn every_distinguishable_state_survives_a_round_trip() {
+        let artifact = ExplanationArtifact {
+            version: EXPLANATION_ARTIFACT_VERSION,
+            tense: Tense::Historical {
+                pinned_at: DisplayLabel::new("last Tuesday"),
+            },
+            nodes: vec![
+                ExplanationNode {
+                    depth: 0,
+                    parent: None,
+                    claim: DisplayLabel::new("package 17 was last seen at dock A"),
+                    evidence: NodeEvidence::Recorded {
+                        branches: vec![
+                            ExplanationBranch {
+                                state: BranchState::Resolved {
+                                    evidence: DisplayLabel::new("a dock-A scan"),
+                                    digest: EvidenceDigest::new("9f86d081"),
+                                },
+                                continuation: BranchContinuation::Expanded { node: 1 },
+                            },
+                            ExplanationBranch {
+                                state: BranchState::Plural {
+                                    cited: DisplayLabel::new("a dock-A scan"),
+                                    carriers: 3,
+                                    more_than_counted: true,
+                                },
+                                continuation: BranchContinuation::Stopped(StopReason::Ambiguous),
+                            },
+                            ExplanationBranch {
+                                state: BranchState::Dangling {
+                                    cited: DisplayLabel::new("an unrecorded scan"),
+                                    reason: DanglingReason::PossiblyDeleted,
+                                },
+                                continuation: BranchContinuation::Stopped(StopReason::Cycle),
+                            },
+                        ],
+                        more_citations: true,
+                    },
+                },
+                ExplanationNode {
+                    depth: 1,
+                    parent: Some(0),
+                    claim: DisplayLabel::new("the scan was recorded by the dock reader"),
+                    evidence: NodeEvidence::DeletedByCompaction,
+                },
+                ExplanationNode {
+                    depth: 1,
+                    parent: Some(0),
+                    claim: DisplayLabel::new("the reader was calibrated"),
+                    evidence: NodeEvidence::NotIndexed,
+                },
+            ],
+            completeness: Completeness {
+                truncated: true,
+                cycle_detected: true,
+                degraded: true,
+                coverage_limited: true,
+            },
+        };
+
+        // Non-vacuity: a fixture that had quietly lost its distinguishing
+        // states would round-trip perfectly and prove nothing.
+        assert!(matches!(artifact.tense, Tense::Historical { .. }));
+        assert!(artifact.completeness.requires_disclosure());
+        assert_eq!(artifact.nodes.len(), 3);
+
+        let wire = serde_json::to_string(&artifact).expect("artifact must serialize");
+        let back: ExplanationArtifact =
+            serde_json::from_str(&wire).expect("artifact must deserialize");
+
+        assert_eq!(
+            back, artifact,
+            "a semantic changed across the wire — the renderer would narrate a \
+             different answer from the one Kirra World projected"
+        );
     }
 
     #[test]
