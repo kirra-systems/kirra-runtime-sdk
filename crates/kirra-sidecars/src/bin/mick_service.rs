@@ -53,7 +53,7 @@ use kirra_mick::OllamaClient;
 use kirra_planner::LlmBrain;
 use kirra_sidecars::destination::resolver_from_env;
 use kirra_sidecars::destination_service::{DestinationRequest, DestinationService};
-use kirra_sidecars::explainer::{explain_reply, not_configured_reply};
+use kirra_sidecars::explainer::{explain_reply, not_configured_reply, ExplainRequest};
 use kirra_sidecars::http::{read_request, respond, respond_error};
 use kirra_sidecars::mick::{IntentOutcome, IntentRequest, IntentService};
 use kirra_sidecars::narrator::{fetch_last_verdict, NarratorConfig};
@@ -181,18 +181,6 @@ fn serve(
             "{\"error\":\"unknown route\"}",
         ),
     }
-}
-
-/// The sidecar's own request shape for `POST /explain`.
-///
-/// Deliberately NOT `kirra_explain_types::ExplainCurrentSubject` re-served: this
-/// is Mick's inbound surface, and the producer's contract is what Mick SENDS.
-/// Keeping them as separate types means a future field on the inbound side
-/// (a persona, a verbosity) cannot become a field on the wire to Kirra World by
-/// accident.
-#[derive(serde::Deserialize)]
-struct ExplainRequest {
-    subject_id: String,
 }
 
 fn main() {

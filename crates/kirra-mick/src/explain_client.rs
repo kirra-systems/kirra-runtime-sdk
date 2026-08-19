@@ -65,7 +65,19 @@ pub const EXPLAIN_URL_ENV: &str = "KIRRA_WORLD_EXPLAIN_URL";
 /// Fetch timeout. An explanation is narration: a slow producer must not wedge
 /// the caller's loop, and a timeout is an honest `Unavailable` rather than a
 /// stall.
-const FETCH_TIMEOUT: Duration = Duration::from_secs(3);
+///
+/// Applied in TWO places, and the redundancy is the point. Setting it on the
+/// client alone leaves the guarantee resting on `Client::builder().build()`
+/// having succeeded — and the fallback for a failed build,
+/// `reqwest::blocking::Client::new()`, carries **no timeout at all**. So a
+/// builder failure would silently trade a bounded fetch for an unbounded one,
+/// and `mick_service`'s single-threaded serve loop would wedge on a producer
+/// that accepted the connection and never answered.
+///
+/// Setting it per REQUEST as well removes the possibility rather than trading
+/// it for a startup abort: every request is bounded whichever client is
+/// holding it, and the constructor stays infallible.
+pub const FETCH_TIMEOUT: Duration = Duration::from_secs(3);
 
 /// A client for the one explanation operation.
 pub struct ExplainClient {
@@ -122,7 +134,15 @@ impl ExplainClient {
         let request = ExplainCurrentSubject {
             subject_id: subject_id.to_string(),
         };
-        let response = match self.http.post(&url).json(&request).send() {
+        // The per-request timeout, for the reason FETCH_TIMEOUT documents: the
+        // bound must not depend on the client builder having succeeded.
+        let response = match self
+            .http
+            .post(&url)
+            .timeout(FETCH_TIMEOUT)
+            .json(&request)
+            .send()
+        {
             Ok(r) => r,
             Err(_) => return ExplainOutcome::unavailable("the explanation service is unreachable"),
         };
@@ -225,6 +245,38 @@ mod tests {
             empty.text(),
             crate::explain_render::PHRASE_NOTHING_TO_EXPLAIN
         );
+    }
+
+    /// **A producer that accepts and never answers does not wedge the caller.**
+    ///
+    /// The unreachable test above proves the CONNECT failure path; this proves
+    /// the one that actually threatens a single-threaded serve loop — a socket
+    /// that accepts, holds, and sends nothing. Uses the real `new()`, so it
+    /// observes the shipped timeout rather than an injected one.
+    #[test]
+    fn a_producer_that_accepts_and_never_answers_times_out_rather_than_hanging() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        // Accept and hold. The listener is moved in, so it lives as long as the
+        // thread and the connection is never closed from this end.
+        let holder = std::thread::spawn(move || {
+            let _held = listener.accept();
+            std::thread::sleep(FETCH_TIMEOUT * 3);
+        });
+
+        let started = std::time::Instant::now();
+        let outcome = ExplainClient::new(format!("http://{addr}")).explain("package_17");
+        let elapsed = started.elapsed();
+
+        assert!(
+            matches!(outcome, ExplainOutcome::Unavailable { .. }),
+            "a silent producer must fail closed, not return an explanation: {outcome:?}"
+        );
+        assert!(
+            elapsed < FETCH_TIMEOUT * 2,
+            "the fetch must be bounded by FETCH_TIMEOUT ({FETCH_TIMEOUT:?}), took {elapsed:?}"
+        );
+        drop(holder);
     }
 
     /// A URL is normalised once, so a trailing slash in configuration does not

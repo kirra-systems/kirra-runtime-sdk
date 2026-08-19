@@ -52,6 +52,27 @@ pub fn explainer_from_env() -> Option<ExplainClient> {
     ExplainClient::from_env()
 }
 
+/// The sidecar's own inbound shape for `POST /explain`.
+///
+/// Deliberately NOT `kirra_explain_types::ExplainCurrentSubject` re-served: that
+/// type is what Mick SENDS, and keeping the two apart means a future field on
+/// this inbound surface — a persona, a verbosity — cannot become a field on the
+/// wire to Kirra World by accident.
+///
+/// `deny_unknown_fields` for the same reason the producer's request carries it,
+/// and review was right that the separation argument did not cover this. The
+/// whole seam's claim is that a steering parameter is REFUSED rather than
+/// silently ignored; an inbound door that accepted `{"subject_id":"x",
+/// "depth":9}` with a 200 would teach callers the opposite at the first hop,
+/// and the fact that the field never reached the producer would not make the
+/// lesson any less learned.
+#[derive(Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExplainRequest {
+    /// The subject to explain. The only thing a caller chooses.
+    pub subject_id: String,
+}
+
 /// Render one explanation request as the sidecar's JSON body.
 ///
 /// Sentences, not one blob: Rabbit's TTS path reads a line at a time, and
@@ -107,6 +128,29 @@ mod tests {
             v["sentences"].as_array().map(Vec::len).unwrap_or(0) >= 2,
             "the reason must survive as its own sentence: {body}"
         );
+    }
+
+    /// A caller that tries to steer the query is REFUSED at the inbound door
+    /// too, not only at the producer's.
+    ///
+    /// Carries a positive control first, so a type that refused everything
+    /// could not pass this.
+    #[test]
+    fn the_inbound_request_refuses_a_steering_parameter() {
+        let ok: ExplainRequest = serde_json::from_str(r#"{"subject_id":"package_17"}"#)
+            .expect("the plain shape decodes");
+        assert_eq!(ok.subject_id, "package_17");
+        for body in [
+            r#"{"subject_id":"p","depth":9}"#,
+            r#"{"subject_id":"p","cursor":"c"}"#,
+            r#"{"subject_id":"p","generation":42}"#,
+            r#"{"subject_id":"p","freshness":"stale_ok"}"#,
+        ] {
+            assert!(
+                serde_json::from_str::<ExplainRequest>(body).is_err(),
+                "`{body}` must be refused, not served with the field ignored"
+            );
+        }
     }
 
     /// The unconfigured reply names the variable to set, so an operator is not
