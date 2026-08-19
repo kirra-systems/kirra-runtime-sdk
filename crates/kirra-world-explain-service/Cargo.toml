@@ -38,5 +38,25 @@ publish = false  # proprietary (see COPYRIGHT) — not for crates.io
 # and the core lived in this crate; they left with them, and review caught that
 # the manifest had not caught up with a comment already claiming they had.
 #
-# Box 3b re-adds exactly what the transport needs and no more.
+# Box 3b re-added exactly what the transport needs and no more:
+#
+#   kirra-world-service  the explanation SEMANTICS, behind the typed boundary.
+#   kirra-world-store    the CONSTRUCTOR only. This crate calls `WorldStore::open`
+#                        and passes the reference along; every read that returns
+#                        domain content happens on the far side of
+#                        `explain_current_subject`. `open` is classified
+#                        `operational` in ci/store_boundedness_baseline.json, and
+#                        rule 5 of ci/check_query_boundedness.py is what keeps a
+#                        domain read from appearing here later.
+#   kirra-explain-types  the neutral wire contract, shared with Mick.
+#   serde_json           the codec. No serde derive: this crate defines no wire
+#                        type of its own, which is the property that keeps the
+#                        contract single-sourced in the guarded crate.
+#
+# Still ABSENT, and deliberately: any HTTP framework, any async runtime, and
+# `kirra-sidecars` — see the note in src/http.rs on why the plumbing is copied
+# rather than shared.
 kirra-world-service = { path = "../kirra-world-service" }
+kirra-world-store = { path = "../kirra-world-store" }
+kirra-explain-types = { path = "../kirra-explain-types" }
+serde_json = "1"
