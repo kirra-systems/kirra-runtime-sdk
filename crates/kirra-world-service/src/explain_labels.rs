@@ -2,7 +2,23 @@
 //!
 //! Tier 4 box 3a. This is the one place in the explanation path where World
 //! facts become words, so it is the place where the honesty of an explanation is
-//! decided. Everything downstream — the projection, the wire, Mick's renderer —
+//! decided.
+//!
+//! # Why it lives HERE and not in the explanation service
+//!
+//! It was written in `kirra-world-explain-service` first, and
+//! `check_query_boundedness` rule 5 refused it: that crate is a CONSUMER by the
+//! gate's own definition, and a consumer may not call a bounded store read
+//! directly. The reflex fix — reclassifying `claim_at_generation` as
+//! `operational` — would have been false, since `operational` means folding,
+//! verification and migration, not reads that return domain content.
+//!
+//! The gate was right, and moving the code is what it was pointing at. This is
+//! the World-side ADAPTER that turns retained evidence into explanation labels,
+//! so it belongs beside the trait it implements and beside
+//! `project_explanation`, which already lives here. The explanation service owns
+//! the process boundary and the transport endpoint; it does not own the
+//! explanation semantics. Everything downstream — the projection, the wire, Mick's renderer —
 //! can only preserve or lose what this produces.
 //!
 //! # The rule these labels are written to
@@ -35,11 +51,11 @@
 //! provenance node, and the artifact would have said "deleted" about evidence
 //! sitting in the log, with every gate green.
 //!
-//! [`project_explanation`]: kirra_world_service::explain::project_explanation
+//! [`project_explanation`]: crate::explain::project_explanation
 //! [`WorldStore::claim_at_generation`]: kirra_world_store::WorldStore::claim_at_generation
 
+use crate::explain::ClaimLabels;
 use kirra_explain_types::{DisplayLabel, EvidenceDigest};
-use kirra_world_service::explain::ClaimLabels;
 use kirra_world_store::{projection::ProjectedClaim, StoreError, WorldStore};
 
 /// Labels rendered from the event log of one store.

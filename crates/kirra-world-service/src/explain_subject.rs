@@ -4,6 +4,13 @@
 //! [`ExplanationArtifact`]. No HTTP, no Mick, and no `AnswerRef` leaves this
 //! module: the transport (3b) wraps this, it does not reach past it.
 //!
+//! It lives in the World service, beside the query engine it uses and the
+//! projection it feeds, because `check_query_boundedness` rule 5 refused it in
+//! the explanation-service crate — a consumer may not reach past the engine to
+//! the store, and this calls `provenance_tree` directly. Keeping ALL World-aware
+//! interpretation behind the typed boundary is what leaves the explanation
+//! service as boring transport infrastructure.
+//!
 //! # The two steps, named for what they are
 //!
 //! This is NOT `Ask → Explain`, and calling it that would misdescribe the code.
@@ -34,16 +41,16 @@
 //!
 //! [`WorldAnswer`]: kirra_world_service::read_view::WorldAnswer
 
+use crate::explain::project_explanation;
+use crate::freshness::FreshnessSource;
+use crate::lineage::LineageRef;
+use crate::query::{Lineage, QueryEngine};
+use crate::read_view::AskError;
 use kirra_explain_types::ExplanationArtifact;
-use kirra_world_service::explain::project_explanation;
-use kirra_world_service::freshness::FreshnessSource;
-use kirra_world_service::lineage::LineageRef;
-use kirra_world_service::query::{Lineage, QueryEngine};
-use kirra_world_service::read_view::AskError;
 use kirra_world_store::provenance_graph::{GraphSpec, GraphSpecError};
 use kirra_world_store::{StoreError, WorldStore};
 
-use crate::labels::StoreLabels;
+use crate::explain_labels::StoreLabels;
 
 /// How many lineage entries the root-selection step reads.
 ///

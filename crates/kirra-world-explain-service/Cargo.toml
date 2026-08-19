@@ -30,13 +30,12 @@ publish = false  # proprietary (see COPYRIGHT) — not for crates.io
 
 [dependencies]
 kirra-world-service = { path = "../kirra-world-service" }
-# The ruling's "may depend on" list named kirra-world-service and
-# kirra-explain-types. The store is a THIRD World dependency and is stated here
-# rather than slipped in: the labels are generation-addressed, so they need
-# `WorldStore::claim_at_generation` directly, and the service needs
-# `WorldStore::open` to have a store at all. It stays inside the World boundary
-# — a kirra-world-* crate under the same Fence A — so it widens nothing the
-# ruling was protecting, which was Mick, the doer, the checker and actuation.
+# The store dependency was here while the labels lived in this crate, and went
+# away with them. That is the ruling working: this crate owns the PROCESS
+# BOUNDARY, not the explanation semantics, so it has no business reading the
+# store. `check_query_boundedness` rule 5 is what made the difference visible —
+# a consumer reaching past the query engine — and the answer was to move the
+# code rather than to reclassify the read.
 kirra-world-store = { path = "../kirra-world-store" }
 kirra-explain-types = { path = "../kirra-explain-types" }
 serde = { version = "1", features = ["derive"] }

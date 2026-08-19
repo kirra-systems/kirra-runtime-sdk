@@ -14,8 +14,9 @@
 //! log.
 
 use kirra_explain_types::{BranchState, ExplanationArtifact, NodeEvidence};
-use kirra_world_explain_service::{explain_current_subject, ExplainError, StoreLabels};
 use kirra_world_service::explain::ClaimLabels;
+use kirra_world_service::explain_labels::StoreLabels;
+use kirra_world_service::explain_subject::{explain_current_subject, ExplainError};
 use kirra_world_store::{ClaimStatus, EventId, NewEvent, ObservationId, WorldStore, WriterClass};
 
 const T0: i64 = 1_700_000_000_000;
@@ -269,7 +270,7 @@ fn an_empty_store_is_nothing_recorded() {
 
 #[test]
 fn the_walk_is_bounded_by_this_crates_constants_not_by_the_data() {
-    use kirra_world_explain_service::explain::EXPLAIN_NODES;
+    use kirra_world_service::explain_subject::EXPLAIN_NODES;
 
     let (mut s, p) = store("bounded");
     let mut prev: Option<String> = None;
