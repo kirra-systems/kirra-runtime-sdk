@@ -1,7 +1,7 @@
 # Orphan-gate consumer-attribution audit — the fallout report
 
-**Status: MEASUREMENT ONLY. No gate behaviour changes in this document or the
-commit that adds it.**
+**Status: measurement complete; dispositions LANDED. The gate's own logic is
+still untouched — rules A and B are the next step, not this one.**
 
 `ci/check_orphan_cores.py` is the wire-or-delete guard: a `pub mod` at a crate
 root must gain a non-test consumer, or be listed in
@@ -108,12 +108,29 @@ something this audit covered.
 |---|---|---|
 | `parko_ros2::pointcloud2_shim` | **genuinely orphaned** | Baseline it. Its three siblings — `image_shim`, `odometry_shim`, `radar_shim` — are *already* baselined with the identical justification (awaiting the sensor integration, external track MGA G-4). It escaped only via the `INT8` collision. |
 | `parko_core::backend_selector` | **genuinely orphaned** | Baseline it. The backend registry awaits a backend crate calling `register_backend_factory`; none does. Same family as the already-baselined `parko_core::detector`. Heals when a backend registers. |
-| `kirra_planner::lanemap` | **intentionally standalone** | A 6-line back-compat re-export shim (`pub use kirra_map::lanemap::*;`, de-monolith Stage 6b). Author's call: baseline as an intentional shim, or delete. Note its stated purpose — keeping `crate::lanemap::*` paths working inside `kirra-planner` — is not currently exercised by any file. |
+| `kirra_planner::lanemap` | **intentionally standalone → DELETED** | Was a 6-line back-compat re-export shim (`pub use kirra_map::lanemap::*;`, de-monolith Stage 6b). Removed as a measured compatibility removal, not cleanup-by-taste — see the compile-surface check below. The crate-root API is unchanged: the same eight names are now re-exported straight from `kirra_map::lanemap`. |
 | — | **false positive** | None. No currently-credited module was found to be wrongly *reported*; the errors all run the other way, toward hiding orphans. |
 | — | **consumed, detected only textually** | Not measurable by this instrument — see class C. |
 
 The 19 modules the gate reports as orphans today are all baselined with
 justifications and were re-confirmed to carry zero evidence. No change.
+
+### The compile-surface check that authorised the deletion
+
+Required before removing a public path, and run over the whole repository rather
+than inferred from the audit's own hit count (the audit measures module CREDIT,
+not every spelling a caller could use):
+
+| Spelling | Hits |
+|---|---|
+| `kirra_planner::lanemap` (any file type) | **0 code** — 2 prose mentions in `docs/COMPETITIVE_PLANNER_ANALYSIS.md` |
+| `crate::lanemap` / `self::lanemap` / `super::lanemap` inside `kirra-planner` | **0** — 1 hit, inside the shim's own doc comment |
+| bare `lanemap::` inside `kirra-planner` | only the `pub mod` declaration and the crate-root re-export, both removed or repointed |
+
+The crate-root API is byte-for-byte the same set of names — `JunctionContext`,
+`Lane`, `LaneControl`, `LaneCorridor`, `LaneEdge`, `LaneGraph`, `Occluder`,
+`MAX_ROUTE_LANES` — now re-exported directly from `kirra_map::lanemap`. Workspace
+builds clean and every dependent suite passes.
 
 ### A cross-gate scope gap, noticed in passing
 
@@ -146,12 +163,38 @@ is what the existing `is_code_shaped` was already reaching for, one level up.
 
 ## Sequencing
 
-1. **This report.** No gate change. ← you are here
-2. Land the disposition: baseline the two genuinely-orphaned modules with
-   justifications, decide `lanemap`.
-3. Only then implement rules A and B, with the self-tests carrying the three
-   measured cases as fixtures, so the gate's non-vacuity is anchored on real
-   defects rather than invented ones.
+1. ~~This report. No gate change.~~ **done**
+2. ~~Land the dispositions.~~ **done** — `lanemap` deleted; the other two
+   baselined with explicit rationale. ← you are here
+3. Implement rules A and B, with the self-tests carrying the measured cases as
+   fixtures, so the gate's non-vacuity is anchored on real defects rather than
+   invented ones.
+
+### Why the baselines landed BEFORE the rules
+
+The two entries are for modules the CURRENT gate still credits, so it reports
+them `[HEALED]` and advises removing them — the false credit each entry
+documents is exactly the credit the gate still counts. That warning is expected,
+non-fatal, and written into the justification strings so nobody acts on it.
+
+Landing them first is deliberate: when rules A and B arrive, the two modules are
+already dispositioned, so the stronger detector lands with **zero new red**
+rather than a wall someone has to classify under time pressure. That is the same
+property the boundedness gate's rollout had, and the reason for this ordering.
+
+### The fixture set the stronger detector must classify
+
+After the dispositions, the audit re-measures at 257 modules with the remaining
+two mapping one-to-one onto the rules:
+
+| Case | Must be classified as | By |
+|---|---|---|
+| `parko_ros2::pointcloud2_shim` | orphan (baselined) | rule A alone |
+| `parko_core::backend_selector` | orphan (baselined) | rule B alone |
+| `kirra_planner::lanemap` | **gone** — cannot regress | deletion |
+
+A detector that merely "finds more things" fails this set: it has to get all
+three right, and one of them no longer exists to be found.
 
 ---
 
