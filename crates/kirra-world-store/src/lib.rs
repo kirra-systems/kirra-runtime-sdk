@@ -2031,18 +2031,6 @@ impl WorldStore {
         Ok(provenance_edges::CitationPage { edges, truncated })
     }
 
-    /// **Explain one event's provenance at a historical coordinate** — Tier 4
-    /// box 4b.
-    ///
-    /// Walks the citation index from `root_generation`, resolving each cited
-    /// observation id against the events visible **at `at_generation`** into
-    /// [`provenance_graph::CitationResolution`]. Two pins over the same root are
-    /// two different and equally correct trees; that is the property the whole
-    /// box exists to have, and the reason resolution is not a stored column.
-    ///
-    /// Bounded in three dimensions — depth, node count, and citations per node —
-    /// which is why `spec` is a validated type rather than a pair of numbers.
-    ///
     /// **The retained event at exactly `generation`, decoded — an EVIDENCE
     /// lookup primitive, not a query family.**
     ///
@@ -2075,7 +2063,7 @@ impl WorldStore {
     ///   state, no nearest-neighbour, and no inference beyond the exact
     ///   coordinate. An absent generation is absent.
     /// - `Err` — a row is there and cannot be trusted. A corrupt trust axis
-    ///   fails closed via [`claim_axes_from_row`] rather than degrading to an
+    ///   fails closed in the shared claim decoder rather than degrading to an
     ///   unlabelled claim, for the same reason it does on every other read path:
     ///   dropping it would turn *"something is wrong"* into *"no trust
     ///   recorded"*.
@@ -2123,6 +2111,18 @@ impl WorldStore {
         }
     }
 
+    /// **Explain one event's provenance at a historical coordinate** — Tier 4
+    /// box 4b.
+    ///
+    /// Walks the citation index from `root_generation`, resolving each cited
+    /// observation id against the events visible **at `at_generation`** into
+    /// [`provenance_graph::CitationResolution`]. Two pins over the same root are
+    /// two different and equally correct trees; that is the property the whole
+    /// box exists to have, and the reason resolution is not a stored column.
+    ///
+    /// Bounded in three dimensions — depth, node count, and citations per node —
+    /// which is why `spec` is a validated type rather than a pair of numbers.
+    ///
     /// # Errors
     ///
     /// [`StoreError::ProvenanceIndexIncomplete`] when the root is at or below
