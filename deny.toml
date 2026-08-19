@@ -102,9 +102,38 @@ ignore = [
     { id = "RUSTSEC-2025-0134", reason = "unmaintained; no drop-in upgrade; parses operator-supplied PEM only" },
     # paste is unmaintained (advisory is unmaintained-class only, no known
     # vulnerability). It is a COMPILE-TIME proc-macro (token pasting) with
-    # zero runtime footprint, pinned by the r2r 0.9.5 ROS bindings chain —
-    # surfaced only now that the policy graph covers the ros2 feature tree
-    # (#797 F3). Not bumpable from this repo. Remove when r2r moves off
-    # paste (track r2r releases > 0.9.5).
-    { id = "RUSTSEC-2024-0436", reason = "unmaintained; compile-time-only proc-macro; pinned by r2r 0.9.5; remove on r2r upgrade" },
+    # zero runtime footprint. Not bumpable from this repo.
+    #
+    # RE-AUDITED 2026-08-19 (#1451), and the previous removal condition was
+    # WRONG. It read "remove when r2r moves off paste", which names ONE of the
+    # paths. `cargo tree --workspace --all-features --invert paste` finds FOUR
+    # in the root workspace:
+    #
+    #     paste v1.0.15 (proc-macro)
+    #     ├── mcap        → kirra-collector
+    #     ├── parquet     → kirra-collector
+    #     ├── r2r_rcl     → r2r → kirra-ros2-adapter
+    #     └── token-cell  → zenoh-keyexpr → zenoh
+    #
+    # plus r2r_rcl → r2r → parko-ros2 in the parko workspace. So an r2r upgrade
+    # alone would NOT make this entry dead, and acting on the old condition
+    # would have deleted a suppression three other paths still need. The
+    # correct condition is below, and it is a conjunction.
+    #
+    # REMOVE ONLY WHEN the reverse-tree above is EMPTY in BOTH workspaces —
+    # i.e. mcap, parquet, r2r_rcl and token-cell have all moved off paste.
+    # Re-run that command; do not infer it from any single dependency bump, and
+    # do not infer it from cargo-deny reporting the entry as unused (see below).
+    #
+    # NOTE, unresolved: cargo-deny emits `advisory-not-detected` ("no crate
+    # matched advisory criteria") for this entry even though the paths above are
+    # live, while the rustls-pemfile entry — a DIRECT dependency of
+    # kirra-verifier — is reported as used. cargo audit, which scans the
+    # lockfile flat, still reports paste 1.0.15 against this advisory. The
+    # asymmetry is a cargo-deny graph/severity question, NOT evidence that the
+    # crate left the tree, and it is deliberately not acted on here: the
+    # warning does not fail the gate (main passed with it on 2026-08-17), and
+    # making cargo-deny quiet by deleting a live suppression would be a green
+    # signal for the wrong property.
+    { id = "RUSTSEC-2024-0436", reason = "unmaintained; compile-time-only proc-macro; four live paths (mcap/parquet/r2r_rcl/token-cell) re-verified 2026-08-19; remove only when ALL are off paste" },
 ]
