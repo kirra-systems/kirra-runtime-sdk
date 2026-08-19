@@ -2962,6 +2962,72 @@ explain_render
    a generic World API and the placement problem reopens under a different name,
    with every gate still green because each individual endpoint looks presentational.
 
+##### The wire request — RULED, and the ruling is narrower than "opaque reference"
+
+The scope above said Mick asks *"by opaque explanation reference"*. Investigating
+what that reference would BE turned up a finding that changes the shape.
+
+**`AnswerRef` already exists, and it is precisely what must not cross.** It is
+`kirra_world_service::answer_ref::AnswerRef`, and its fields are
+
+```rust
+kind, subject, now_ms, staleness_budget_ms,
+generation,            // its own doc: "the snapshot coordinate to re-execute at"
+semantics
+```
+
+That is a re-executable query handle by construction — which is its virtue on the
+World side and disqualifying on Mick's. Serialising it would hand Mick a
+`generation`, the exact argument `provenance_tree(root, at, spec)` takes. The
+neutrality gate would flag those fields on the artifact; putting them in the
+REQUEST instead would bypass the property at the wire rather than the manifest,
+one morning after that rule was tightened.
+
+**And a producer-issued opaque token is not the answer either** — not now. A token
+Mick holds presupposes a first leg that handed it over, and no such flow exists:
+`kirra-mick` depends on `kirra-explain-types`, `kirra-planner`, `kirra-trajectory`,
+`kirra-core`, `kirra-taj`, `kirra-capture-schema` — nothing that produces a World
+answer. `AnswerRef::current_subject` is constructed only in `kirra-world-service`'s
+own tests, and `AnswerRef::resolve` is `pub(crate)`. Building the token route now
+would mean inventing a second architecture just to carry the first.
+
+**The ruling:**
+
+> Mick may request a bounded explanation of a NAMED SUBJECT. The World-side
+> service chooses and pins the answer internally. Re-executable answer references
+> and all historical/query coordinates remain inside the World boundary.
+
+One bounded operation — *"explain the current answer about this subject"* — not
+"query World by subject". The request carries a subject identifier; the SERVER owns
+everything that could steer retrieval:
+
+```text
+Mick
+  ↓  ExplainCurrentSubject { subject_id }
+kirra-world-explain-service
+  ↓  WorldView / AnswerRef minted INTERNALLY
+  ↓  bounded provenance tree
+  ↓  ExplanationArtifact
+Mick renderer
+```
+
+Prohibited on the wire, explicitly, so a later reader does not have to infer it:
+
+| Forbidden | Why |
+|---|---|
+| `AnswerRef` in any encoding | a re-executable handle; the whole point of the boundary |
+| `generation` / cursor / depth / staleness from Mick | each one steers retrieval; the server picks or there is no boundary |
+| arbitrary predicate or query-family selection | that is "ask World", not "explain an answer" |
+| a generic `ask` endpoint | same, with the name filed off |
+| raw World rows or query handles in the response | the artifact is the only thing that crosses |
+
+**Capability-specific BY CONSTRUCTION.** If the only public request type is
+`ExplainCurrentSubject`, widening the surface requires a new request variant, which
+is a diff a reviewer sees. A request struct with optional steering fields would let
+the surface widen by someone setting a field — the same difference as between a
+closed enum and a free-form string, which is why `QueryKind` is an enum with one
+variant today.
+
 ##### HTTP-helper extraction is NOT a prerequisite
 
 The explanation service starts with the **smallest local HTTP implementation** that
