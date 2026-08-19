@@ -1,0 +1,50 @@
+{
+  "outcome": "explained",
+  "explanation": {
+    "version": 1,
+    "tense": {
+      "Historical": {
+        "pinned_at": "2023-11-14 22:13:20 UTC"
+      }
+    },
+    "nodes": [
+      {
+        "depth": 0,
+        "parent": null,
+        "claim": "package_17 last_seen_at dock_a",
+        "evidence": {
+          "Recorded": {
+            "branches": [
+              {
+                "state": {
+                  "Resolved": {
+                    "evidence": "package_17 last_seen_at dock_a — recorded by warehouse-scanner as event ev-a",
+                    "digest": "c3a98c7f6df7bdd05559bc31acd2a0fb5a85a82fce7d6c37c854fe2e56c07df7"
+                  }
+                },
+                "continuation": {
+                  "Expanded": {
+                    "node": 1
+                  }
+                }
+              }
+            ],
+            "more_citations": false
+          }
+        }
+      },
+      {
+        "depth": 1,
+        "parent": 0,
+        "claim": "package_17 last_seen_at dock_a",
+        "evidence": "DeletedByCompaction"
+      }
+    ],
+    "completeness": {
+      "truncated": false,
+      "cycle_detected": false,
+      "degraded": true,
+      "coverage_limited": false
+    }
+  }
+}

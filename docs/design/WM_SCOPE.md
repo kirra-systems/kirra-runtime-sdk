@@ -2825,7 +2825,7 @@ to `NeverVisible`), but it touches the pinned region and the `CitationLookup`
 seam, and folding that into the round that found it is how a small fix becomes an
 unreviewed one.
 
-#### Residual 2 — the explanation transport — SCOPED, NOT STARTED
+#### Residual 2 — the explanation transport — DONE (#1456, 3b)
 
 4c.1 projects and 4c.2 renders. Nothing carries an artifact between them, which
 is why `kirra_world_service::explain` and `kirra_mick::explain_render` are both
@@ -3061,6 +3061,116 @@ A test that round-trips a hand-built DTO proves serde works and proves nothing
 about the two modules being connected — **it would stay green with either endpoint
 deleted**, which is exactly what obligation 4 forbids. Same lesson as the span
 bound: the control has to observe the thing that is actually claimed.
+
+##### What was built, and the two things worth keeping
+
+**3a — the World-side core.** `explain_current_subject(store, subject)`: a
+bounded lineage query picks the newest retained generation for the subject, a
+bounded provenance walk runs at the folded projection coordinate, and
+`project_explanation` labels it through `StoreLabels`, which reads the event log
+by `claim_at_generation` (#1455) so a `None` label means the event is *genuinely
+absent* rather than *not in this subject's slice*.
+
+Rule 5 relocated it. The first shape put the labels and the core in
+`kirra-world-explain-service`, and `check_query_boundedness` refused four hits:
+`WORLD_CRATES` is `{kirra-world, kirra-world-store, kirra-world-service}`, so the
+new crate is a CONSUMER, and a consumer may not call a bounded store read
+directly. The one-word fix — reclassify `claim_at_generation` as `operational` —
+was false, because `operational` means reads that return no domain content and
+this returns a subject, a predicate and an object. So the code moved instead, and
+the gate turned out to have located the line between *owns the transport* and
+*owns the semantics* more precisely than the original ruling did.
+
+**3b — the transport.** One binary, one domain route, and a wire contract that
+lives in `kirra-explain-types` rather than on either side.
+
+```text
+POST /explain/current-subject   {"subject_id": "..."}   -> ExplainOutcome
+GET  /health                                            -> liveness + contract
+everything else                                         -> 404
+```
+
+**Keeper 1 — capability-specificity is enforced by WHERE the request type
+lives.** `ci/check_explain_artifact_neutral.py` guards `kirra-explain-types` and
+nothing else. Putting `ExplainCurrentSubject` there means the request cannot grow
+a `generation`, a `cursor`, an `as_of` (the NAME check) or a `depth`, a `page`, a
+`max_nodes` — any numeric knob at all (the WIDTH check) — without redding a gate
+whose only purpose is to say no. Verified by mutation both ways. `deny_unknown_fields`
+is the runtime half: a client sending a steering parameter is REFUSED rather than
+served with the field ignored, so an attempt to widen the contract fails at the
+first request instead of after callers have started depending on it.
+
+**Keeper 2 — the end-to-end control is a corpus, not a link-time test.** The
+obligation was *real producer → encode → decode → real renderer, spanning every
+distinguishable semantic*. Nothing may link both ends: the producer may not
+depend on `kirra-mick`, Mick may not depend on `kirra-world*`, and the fence
+states the reason for refusing even a dev edge — *"a dev edge does not ship, but
+it is how a normal edge gets argued for later."*
+
+So `crates/kirra-explain-types/wire_corpus/` holds one JSON file per state, and
+two suites meet on it: the producer's asserts the bytes are what it emits, Mick's
+asserts the real renderer handles all of them. Composed, that is the property.
+The corpus is also the better artifact — a reviewer can open the files and see
+exactly what crosses, and confirm no coordinate is in it.
+
+Its span is mechanical rather than eyeballed. `ExplainOutcome::semantics()` is
+built from EXHAUSTIVE matches, so a new artifact state is a compile error in the
+census rather than a silent hole; both suites assert coverage against the same
+`ALL_SEMANTICS`; Mick's suite reads the DIRECTORY rather than a file list, so a
+new case is rendered the moment it exists and a removed one fails by name. That
+is the dotted-key lesson applied: the control has to span the input space it
+claims to cover, not merely exist.
+
+##### Mutations — six, each observed by name
+
+| Mutation | Died on |
+|---|---|
+| request grows `generation: String` / `depth: u8` | `check_explain_artifact_neutral` (name check / width check) |
+| a cycle narrated as ordinary truncation | `each_state_...carries_its_obligation`, `a_bound_and_a_malformed_graph...` |
+| confident attribution on a DANGLING branch | `confident_attribution_appears_only_where_the_evidence_resolved` |
+| unavailable narrated as "nothing recorded" | that name on all three of: corpus suite, client unit test, sidecar unit test |
+| the producer's label text changes | `the_corpus_is_what_the_producer_actually_emits` (named the stale entry) |
+| a corpus case deleted | BOTH suites — the consumer named the two semantics that went untested |
+| the producer's one route removed | 4 of 7 route-table tests |
+| the whole sidecar capability removed | `check_orphan_cores` — `explain_client` is a NEW orphan again |
+
+The last is what makes the baseline retirements earned rather than declared: the
+chain `mick_service` → `explain_client` → `explain_render` is live production
+code, and cutting it puts the orphan back.
+
+##### Two findings recorded rather than smoothed over
+
+**An unfolded store answers `NothingRecorded`, not a refusal.** Appended-but-not-
+folded events are invisible to the projection coordinate the explanation pins to,
+so *"nothing is recorded about that subject"* is what comes back — literally true
+at that coordinate, and still capable of surprising an operator who just wrote the
+event. Pinned as a corpus case (`unfolded_store.json`) so changing it has to be
+deliberate; not changed here, because 3a's pin semantics are not a transport
+question.
+
+**The `Unavailable` case is built from the real error, not from a provoked store
+failure.** Clobbering the SQLite file underneath an open handle was tried, and the
+page cache served the request anyway — a "corrupted store" fixture would have
+asserted that corruption is undetectable rather than that failure is reported. So
+the corpus entry goes through `ExplainOutcome::unavailable(ExplainError::…)`,
+which is the exact expression the service's error arm evaluates; what is not
+proven there is the arm's SELECTION. That half is covered where it can be
+provoked for real — `kirra_mick::explain_client` fails an unreachable producer
+closed to this same variant, with nothing listening on port 1.
+
+##### Step 8 — the HTTP plumbing is duplicated, deliberately, for now
+
+`kirra-world-explain-service/src/http.rs` is a second copy of
+`kirra_sidecars::http`. Depending on the original was the obvious move and the
+wrong one: `kirra-sidecars` depends on `kirra-mick`, so a World crate taking that
+dependency would put the renderer's whole tree into the producer's build — the
+process boundary would survive on the wire and disappear from the Cargo graph.
+
+The alternatives are a shared crate neither side owns, or a copy. The copy is the
+smaller commitment and the reversible one: extracting later is mechanical,
+un-picking a shipped dependency is not. **Two callers do not justify the
+extraction; the answer changes at three**, and this is written down so the third
+caller is a decision rather than a third copy.
 
 #### Residual 1 — the span enumeration, bounded (#1449)
 
