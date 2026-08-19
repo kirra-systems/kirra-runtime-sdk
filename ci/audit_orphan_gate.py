@@ -57,7 +57,7 @@ def crate_manifests() -> dict[str, Path]:
             + list(REPO.glob("crates/*/Cargo.toml")) + list(REPO.glob("parko/crates/*/Cargo.toml")) \
             + list(REPO.glob("parko/Cargo.toml")):
         try:
-            data = tomllib.loads(man.read_text())
+            data = tomllib.loads(man.read_text(encoding="utf-8"))
         except Exception:
             continue
         name = data.get("package", {}).get("name")
@@ -70,7 +70,7 @@ def dep_edges(crate_dir: Path) -> set[str]:
     """Direct dependency lib-idents declared by this crate (all tables)."""
     man = crate_dir / "Cargo.toml"
     try:
-        data = tomllib.loads(man.read_text())
+        data = tomllib.loads(man.read_text(encoding="utf-8"))
     except Exception:
         return set()
     names: set[str] = set()
@@ -231,7 +231,7 @@ def main() -> int:
             "evidence": hits[:12],
         })
     out = Path(os.environ.get("ORPHAN_AUDIT_OUT", "/tmp/orphan_audit.json"))
-    out.write_text(json.dumps(report, indent=1))
+    out.write_text(json.dumps(report, indent=1), encoding="utf-8")
 
     total = len(report)
     consumed = [r for r in report if r["consumed_by_gate"]]
