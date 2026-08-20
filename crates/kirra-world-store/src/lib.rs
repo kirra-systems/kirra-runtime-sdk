@@ -1834,11 +1834,31 @@ impl WorldStore {
         let row = self
             .conn
             .query_row(
+                // An ObservationId can have MORE THAN ONE carrier event:
+                // `reference.rs` is explicit that an observation may be
+                // re-attributed, and each such record is its own event. So
+                // "the row with this observation id" is not well defined, and
+                // taking the earliest would decode a re-attribution and report
+                // "not a candidate" while the candidate row sat right there.
+                //
+                // The ordering therefore prefers a CANDIDATE-SHAPED carrier,
+                // newest first, and falls back to any carrier. The fallback is
+                // deliberate rather than an omission: it is what still produces
+                // the intended decode ERROR when the id exists but names
+                // something that is not a matcher's proposal -- which must stay
+                // distinguishable from `Ok(None)`.
                 "SELECT writer_class, claim_status, kind, predicate, subject, object,
                         payload, payload_schema, provenance
                  FROM world_events WHERE observation_id = ?1
-                 ORDER BY generation ASC LIMIT 1",
-                params![observation_id],
+                 ORDER BY (writer_class = ?2 AND claim_status = ?3 AND predicate = ?4) DESC,
+                          generation DESC
+                 LIMIT 1",
+                params![
+                    observation_id,
+                    candidate_record::DERIVATION_TOKEN,
+                    candidate_record::CANDIDATE_STATUS_TOKEN,
+                    candidate_record::CANDIDATE_PREDICATE_TOKEN
+                ],
                 |r| {
                     Ok(StoredCandidateColumns {
                         writer_class: r.get(0)?,
@@ -1964,7 +1984,18 @@ impl WorldStore {
         high: &str,
         matcher_version: &str,
     ) -> Result<bool, StoreError> {
-        let needle = format!("\"version\":\"{matcher_version}\"");
+        // Built with the JSON encoder, not with `format!`. A version containing
+        // a quote or a newline is stored ESCAPED, and a hand-spelled needle
+        // would then match nothing -- so the idempotence check would silently
+        // answer "no" every pass and the log would grow by the whole proposal
+        // set each time. Encoding the value the same way the payload did is the
+        // only spelling that cannot drift from it.
+        let needle = format!(
+            "\"version\":{}",
+            serde_json::to_string(matcher_version).map_err(|e| StoreError::Sqlite(
+                rusqlite::Error::ToSqlConversionFailure(Box::new(e))
+            ))?
+        );
         let found: Option<i64> = self
             .conn
             .query_row(

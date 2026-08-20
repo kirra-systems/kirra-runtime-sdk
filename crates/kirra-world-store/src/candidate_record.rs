@@ -118,8 +118,11 @@ pub enum CandidateDecodeError {
     },
     /// The payload's schema version is not one this build can read.
     ///
-    /// Fail-closed on a **newer** payload for the same reason
-    /// `assert_schema_not_future` refuses a newer database.
+    /// Fail-closed on a newer payload for the same reason
+    /// `assert_schema_not_future` refuses a newer database — and equally on an
+    /// OLDER or nonsensical one, which is the half a `>` comparison misses. A
+    /// row stamped `0` is not a v1 payload, and reading it as one would be
+    /// interpreting bytes under a contract they were never written to.
     UnsupportedSchema {
         /// The version the row carries.
         found: i64,
@@ -377,7 +380,15 @@ pub fn decode_candidate(
             ),
         });
     }
-    if payload_schema > CANDIDATE_PAYLOAD_SCHEMA {
+    // ANY version other than the supported one, not merely a newer one. An
+    // older or nonsensical `payload_schema` (0, -1, a v0 draft) is not a v1
+    // payload either, and decoding it AS v1 would be interpreting bytes under a
+    // contract they were never written to -- the same fail-open a newer version
+    // would be, minus the excuse that the future is unknowable.
+    //
+    // When a v2 encoding lands this becomes membership in a supported SET, so
+    // v1 rows keep decoding. It is `!=` today because that set has one member.
+    if payload_schema != CANDIDATE_PAYLOAD_SCHEMA {
         return Err(CandidateDecodeError::UnsupportedSchema {
             found: payload_schema,
             supported: CANDIDATE_PAYLOAD_SCHEMA,

@@ -367,3 +367,163 @@ fn one_subject_stating_a_value_twice_is_not_a_pair() {
         .expect("propose");
     assert!(out.candidates.is_empty(), "a subject cannot match itself");
 }
+
+// ---------------------------------------------------------------------------
+// Review findings on #1465 — each with the control that would have caught it
+// ---------------------------------------------------------------------------
+
+/// **A matcher version needing JSON escaping does not break idempotence.**
+///
+/// The stored payload escapes a quote; a hand-spelled `format!` needle does not,
+/// so the two never matched and `same_as_candidate_exists` answered "no" every
+/// pass — appending the whole proposal set again each time. The failure mode was
+/// silent growth, which is the kind a happy-path fixture never shows because its
+/// versions are all `1.0.0`.
+#[test]
+fn a_version_needing_json_escaping_still_dedupes() {
+    let path = tmp("escaped-version");
+    let mut store = WorldStore::open(&path).expect("open");
+    observe(&mut store, "a", "track-a", "SN-1");
+    observe(&mut store, "b", "track-b", "SN-1");
+
+    // A quote and a backslash: both are escaped by the JSON encoder and neither
+    // is escaped by string interpolation.
+    let quirky = ExactIdentifierRule::new(
+        "serial_number",
+        MatcherIdentity::new("world-ingest", "exact-identifier", r#"1.0"beta\x"#).expect("matcher"),
+    )
+    .expect("rule");
+
+    let mut n = 0;
+    let mut mint = move || {
+        n += 1;
+        (
+            EventId::new(format!("q-ev-{n}")).expect("id"),
+            ObservationId::new(format!("q-obs-{n}")).expect("id"),
+        )
+    };
+    let first = run_ingest_pass(&mut store, &quirky, T0, SURVEY_LIMIT, &mut mint).expect("first");
+    let second = run_ingest_pass(&mut store, &quirky, T0, SURVEY_LIMIT, &mut mint).expect("second");
+
+    assert_eq!(first.proposed, 1);
+    assert_eq!(
+        second.proposed, 0,
+        "an escaped version must still match its own stored payload"
+    );
+    assert_eq!(second.already_proposed, 1);
+}
+
+/// **An older or nonsensical payload schema is refused, not read as v1.**
+///
+/// `>` caught only the future. A row stamped `0` is not a v1 payload either, and
+/// decoding it as one interprets bytes under a contract they were never written
+/// to.
+#[test]
+fn a_payload_schema_that_is_not_the_supported_one_is_refused() {
+    use kirra_world_store::candidate_record::{
+        decode_candidate, CandidateDecodeError, StoredCandidateRow, CANDIDATE_KIND,
+        CANDIDATE_PAYLOAD_SCHEMA, CANDIDATE_PREDICATE_TOKEN, CANDIDATE_STATUS_TOKEN,
+        DERIVATION_TOKEN,
+    };
+    let payload = r#"{"matcher":{"producer":"p","model_or_rule":"m","version":"1"},
+                      "confidence":{"score":null,"basis":"unspecified","calibration":null}}"#;
+    let row = |schema| StoredCandidateRow {
+        writer_class: DERIVATION_TOKEN,
+        claim_status: CANDIDATE_STATUS_TOKEN,
+        kind: CANDIDATE_KIND,
+        predicate: Some(CANDIDATE_PREDICATE_TOKEN),
+        subject: "a",
+        object_id: Some("b"),
+        payload,
+        payload_schema: schema,
+    };
+
+    for bad in [0, -1, CANDIDATE_PAYLOAD_SCHEMA + 1] {
+        assert!(
+            matches!(
+                decode_candidate(&row(bad), &["obs-1".to_owned()]),
+                Err(CandidateDecodeError::UnsupportedSchema { .. })
+            ),
+            "schema {bad} must be refused"
+        );
+    }
+    // Non-vacuity: the supported version still decodes, so the check above is
+    // rejecting the VERSION and not the fixture.
+    decode_candidate(&row(CANDIDATE_PAYLOAD_SCHEMA), &["obs-1".to_owned()])
+        .expect("the supported schema still decodes");
+}
+
+/// **An observation with more than one carrier resolves to the candidate.**
+///
+/// `reference.rs` is explicit that an observation may be re-attributed and that
+/// each such record is its own event — so an observation id can name several
+/// rows. Taking the earliest decoded a re-attribution and reported "not a
+/// candidate" while the candidate row sat right beside it.
+#[test]
+fn a_reattributed_observation_still_loads_its_candidate() {
+    let path = tmp("reattributed");
+    let mut store = WorldStore::open(&path).expect("open");
+    observe(&mut store, "a", "track-a", "SN-1");
+    observe(&mut store, "b", "track-b", "SN-1");
+
+    // An EARLIER carrier of the id the candidate will use, which is not a
+    // candidate. Appended first, so an ASC ordering would find this one.
+    store
+        .append(&NewEvent {
+            event_id: &EventId::new("earlier-carrier").expect("id"),
+            observation_id: &ObservationId::new("cand-obs-1").expect("id"),
+            txn_time_ms: T0,
+            valid_from_ms: T0,
+            valid_to_ms: None,
+            source: "some-other-writer",
+            source_version: "1.0.0",
+            writer_class: WriterClass::Sensor,
+            claim_status: ClaimStatus::Confirmed,
+            provenance: &[],
+            frame_id: None,
+            map_id: None,
+            kind: "observation",
+            subject: "track-a",
+            subject_ref: None,
+            predicate: Some("colour"),
+            object: Some("red"),
+            payload: "{}",
+            payload_schema: 1,
+            retention_class: "raw",
+            trust: None,
+        })
+        .expect("append the re-attribution");
+
+    run_ingest_pass(&mut store, &rule(), T0, SURVEY_LIMIT, minter()).expect("pass");
+
+    let loaded = store
+        .load_same_as_candidate("cand-obs-1")
+        .expect("load must find the candidate carrier, not the earlier one")
+        .expect("the candidate is there");
+    assert_eq!(loaded.pair().low().as_str(), "track-a");
+    assert_eq!(loaded.pair().high().as_str(), "track-b");
+}
+
+/// **An id that names only non-candidate rows is an ERROR, not `None`.**
+///
+/// The fallback in the ordering exists to keep this distinguishable: "that is
+/// not evidence" and "there is no evidence" mean different things to an
+/// adjudicator, and preferring candidate-shaped rows must not collapse them.
+#[test]
+fn an_observation_that_is_not_a_candidate_errors_rather_than_reporting_absence() {
+    let path = tmp("not-a-candidate");
+    let mut store = WorldStore::open(&path).expect("open");
+    observe(&mut store, "a", "track-a", "SN-1");
+
+    assert!(
+        store.load_same_as_candidate("obs-a").is_err(),
+        "a real row that is not a candidate must not read as absence"
+    );
+    assert!(
+        store
+            .load_same_as_candidate("no-such-observation")
+            .expect("absence is not an error")
+            .is_none(),
+        "and a genuinely absent id must read as absence"
+    );
+}
