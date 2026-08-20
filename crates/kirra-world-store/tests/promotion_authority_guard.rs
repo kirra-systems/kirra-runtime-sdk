@@ -138,7 +138,7 @@ fn neither_unauthorized_class_can_self_confirm_through_raw_sql() {
         let err = raw_insert(&store, "conf", class, "confirmed")
             .expect_err(&format!("{class} + confirmed must be refused by the store"));
         assert!(
-            format!("{err:?}").contains("Sqlite"),
+            matches!(err, StoreError::Sqlite(_)),
             "{class} must be refused at the SQL layer, not by a Rust guard: {err:?}"
         );
     }

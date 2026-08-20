@@ -34,6 +34,11 @@
       "kind": "spatial",
       "predicate": "located_in",
       "why": "A containment relation from the SD-4 frame fixtures. Whether containment ages depends on whether the container moves, which the class alone does not say."
+    },
+    {
+      "kind": "observation",
+      "predicate": "same_as",
+      "why": "The co-reference claim shape KIRRA-WM-CLUSTERING-001 rules in, appearing here as the fixture the schema-v8 promotion guard is tested against. Knowingly unruled, and deliberately not ruled by this PR: whether a same_as claim ages is a question about how long two references stay co-referent, which is Tier 2's (2a/2b) to answer alongside the matcher and the adjudicator. Ruling it inside a schema-guard change would be exactly the smuggled semantics that tier keeps out. Unruled means queries for it REFUSE, which is the safe direction while the ruling is open. Moves into RULED when 2a/2b land."
     }
   ]
 }
