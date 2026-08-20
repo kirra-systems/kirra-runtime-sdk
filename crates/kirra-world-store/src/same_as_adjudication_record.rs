@@ -249,3 +249,333 @@ pub fn adjudication_columns(pair: &CandidatePair) -> (String, String) {
         pair.high().as_str().to_owned(),
     )
 }
+
+// ---------------------------------------------------------------------------
+// Reading a stored adjudication back — Tier 5 box 5a.
+// ---------------------------------------------------------------------------
+
+/// A stored adjudication row's columns, as the decoder needs them.
+#[derive(Debug, Clone, Copy)]
+pub struct StoredAdjudicationRow<'a> {
+    /// `world_events.writer_class`.
+    pub writer_class: &'a str,
+    /// `world_events.claim_status`.
+    pub claim_status: &'a str,
+    /// `world_events.kind`.
+    pub kind: &'a str,
+    /// `world_events.predicate`.
+    pub predicate: Option<&'a str>,
+    /// `world_events.subject` — the pair's low entity.
+    pub subject: &'a str,
+    /// `world_events.object` — the pair's high entity.
+    pub object: Option<&'a str>,
+    /// `world_events.payload`.
+    pub payload: &'a str,
+    /// `world_events.payload_schema`.
+    pub payload_schema: i64,
+}
+
+/// What a stored `same_as` adjudication says, read back from its row.
+///
+/// # Why this is not a [`SameAsAdjudication`]
+///
+/// It would be one field short of honest. [`same_as_adjudication_provenance`]
+/// writes the judged candidate first and then `cited`, **deduplicated**, into
+/// one flat column — so a caller who also named the candidate in `cited` and one
+/// who did not produce the identical row. Reconstructing `SameAsAdjudication`
+/// would have to invent a `cited` list, and the only available guess (the whole
+/// provenance column) attributes a citation the writer may never have made.
+///
+/// So this carries exactly the fields the row records unambiguously, and the
+/// projection that consumes it needs none of the rest. A decoder that returned
+/// a richer type than the row supports would be manufacturing the difference.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoredAdjudication {
+    /// The pair decided about, in canonical order.
+    pub pair: CandidatePair,
+    /// What was decided.
+    pub outcome: Outcome,
+    /// The persisted candidate this decision judged.
+    pub candidate_observation_id: String,
+    /// Who decided.
+    pub adjudicator: String,
+    /// When they decided, on a named clock.
+    pub decided_at: kirra_world::observation::DomainInstant,
+}
+
+/// Why a stored adjudication row could not be read back.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AdjudicationDecodeError {
+    /// The row's columns do not describe an authorized `same_as` decision.
+    NotAnAdjudicationRow {
+        /// What disagreed.
+        detail: String,
+    },
+    /// The payload was written under an encoding this build does not have.
+    UnsupportedSchema {
+        /// The row's `payload_schema`.
+        found: i64,
+        /// The one this build reads.
+        supported: i64,
+    },
+    /// The payload is not the JSON object this encoding writes.
+    Malformed {
+        /// The parse failure.
+        detail: String,
+    },
+    /// A payload field is absent or the wrong shape.
+    Field {
+        /// Which field.
+        key: &'static str,
+        /// How it disagreed.
+        detail: String,
+    },
+    /// The domain refused a value the row carried.
+    Domain {
+        /// The domain's own message.
+        detail: String,
+    },
+}
+
+impl std::fmt::Display for AdjudicationDecodeError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NotAnAdjudicationRow { detail } => {
+                write!(f, "not a same_as adjudication row: {detail}")
+            }
+            Self::UnsupportedSchema { found, supported } => {
+                write!(f, "payload_schema {found} is not the supported {supported}")
+            }
+            Self::Malformed { detail } => write!(f, "malformed adjudication payload: {detail}"),
+            Self::Field { key, detail } => write!(f, "field `{key}`: {detail}"),
+            Self::Domain { detail } => write!(f, "{detail}"),
+        }
+    }
+}
+
+impl std::error::Error for AdjudicationDecodeError {}
+
+fn payload_object(
+    v: &serde_json::Value,
+) -> Result<&serde_json::Map<String, serde_json::Value>, AdjudicationDecodeError> {
+    v.as_object()
+        .ok_or_else(|| AdjudicationDecodeError::Malformed {
+            detail: "payload is not a JSON object".to_owned(),
+        })
+}
+
+fn string_field<'a>(
+    obj: &'a serde_json::Map<String, serde_json::Value>,
+    key: &'static str,
+) -> Result<&'a str, AdjudicationDecodeError> {
+    match obj.get(key) {
+        None => Err(AdjudicationDecodeError::Field {
+            key,
+            detail: "absent".to_owned(),
+        }),
+        Some(v) => v.as_str().ok_or(AdjudicationDecodeError::Field {
+            key,
+            detail: "not a string".to_owned(),
+        }),
+    }
+}
+
+/// **Read a stored adjudication row back, fail-closed.**
+///
+/// Every column the write door pins is checked on the way out, for the reason
+/// [`crate::candidate_record::decode_candidate`] records: the door governs what
+/// *this crate* writes, and a decoder that trusted the door would be trusting
+/// the one thing a row from anywhere else could differ in.
+///
+/// # The pair's order is checked, not repaired
+///
+/// [`CandidatePair::new`] canonicalizes, so handing it a row whose `subject` and
+/// `object` were stored the wrong way round would return a correct-looking pair
+/// and silently hide that the row disagrees with the writer's own convention.
+/// The order is therefore asserted after construction: `subject` must be the
+/// low entity. A projection keyed on the pair cannot afford a repair it never
+/// reported, because the repaired and unrepaired rows would collide on one key
+/// while claiming different provenance.
+///
+/// # Errors
+///
+/// [`AdjudicationDecodeError`], per variant.
+pub fn decode_same_as_adjudication(
+    row: &StoredAdjudicationRow<'_>,
+) -> Result<StoredAdjudication, AdjudicationDecodeError> {
+    let StoredAdjudicationRow {
+        writer_class,
+        claim_status,
+        kind,
+        predicate,
+        subject,
+        object,
+        payload,
+        payload_schema,
+    } = *row;
+
+    let authorized_class =
+        source_class_token(kirra_world::same_as_adjudication::AUTHORIZED_ADJUDICATOR_CLASS);
+    if writer_class != authorized_class {
+        return Err(AdjudicationDecodeError::NotAnAdjudicationRow {
+            detail: format!(
+                "writer_class is `{writer_class}`, expected `{authorized_class}` \
+                 (KIRRA-WM-PROMOTION-001 admits one adjudicating class)"
+            ),
+        });
+    }
+    if claim_status != crate::ClaimStatus::Confirmed.as_str() {
+        return Err(AdjudicationDecodeError::NotAnAdjudicationRow {
+            detail: format!("claim_status is `{claim_status}`, expected `confirmed`"),
+        });
+    }
+    if kind != SAME_AS_ADJUDICATION_KIND {
+        return Err(AdjudicationDecodeError::NotAnAdjudicationRow {
+            detail: format!("kind is `{kind}`, expected `{SAME_AS_ADJUDICATION_KIND}`"),
+        });
+    }
+    match predicate {
+        Some(p) if p == ADJUDICATION_PREDICATE_TOKEN => {}
+        Some(p) => {
+            return Err(AdjudicationDecodeError::NotAnAdjudicationRow {
+                detail: format!("predicate is `{p}`, expected `{ADJUDICATION_PREDICATE_TOKEN}`"),
+            })
+        }
+        None => {
+            return Err(AdjudicationDecodeError::NotAnAdjudicationRow {
+                detail: "no predicate".to_owned(),
+            })
+        }
+    }
+    // ANY other version, not merely a newer one -- `decode_candidate`'s reason.
+    if payload_schema != SAME_AS_ADJUDICATION_PAYLOAD_SCHEMA {
+        return Err(AdjudicationDecodeError::UnsupportedSchema {
+            found: payload_schema,
+            supported: SAME_AS_ADJUDICATION_PAYLOAD_SCHEMA,
+        });
+    }
+    let Some(high) = object else {
+        return Err(AdjudicationDecodeError::NotAnAdjudicationRow {
+            detail: "no object: a same_as decision names two entities".to_owned(),
+        });
+    };
+
+    let low_id = kirra_world::reference::EntityId::new(subject).map_err(|e| {
+        AdjudicationDecodeError::Domain {
+            detail: format!("subject: {e}"),
+        }
+    })?;
+    let high_id = kirra_world::reference::EntityId::new(high).map_err(|e| {
+        AdjudicationDecodeError::Domain {
+            detail: format!("object: {e}"),
+        }
+    })?;
+    let pair =
+        CandidatePair::new(low_id, high_id).map_err(|e| AdjudicationDecodeError::Domain {
+            detail: e.to_string(),
+        })?;
+    if pair.low().as_str() != subject {
+        return Err(AdjudicationDecodeError::NotAnAdjudicationRow {
+            detail: format!(
+                "the stored pair is not in canonical order: subject `{subject}` is not the low \
+                 entity of ({}, {})",
+                pair.low().as_str(),
+                pair.high().as_str()
+            ),
+        });
+    }
+
+    let parsed: serde_json::Value =
+        serde_json::from_str(payload).map_err(|e| AdjudicationDecodeError::Malformed {
+            detail: e.to_string(),
+        })?;
+    let root = payload_object(&parsed)?;
+
+    let outcome_str = string_field(root, "outcome")?;
+    let outcome =
+        outcome_from_token(outcome_str).ok_or_else(|| AdjudicationDecodeError::Field {
+            key: "outcome",
+            detail: format!("`{outcome_str}` is not a decision this build knows"),
+        })?;
+
+    let candidate_observation_id = string_field(root, "candidate_observation_id")?.to_owned();
+    // Parsed, not merely copied: this id is the citation a reader follows back
+    // to the judged proposal, and one that is not an admissible ObservationId
+    // resolves to nothing while looking like evidence.
+    ObservationId::new(candidate_observation_id.as_str()).map_err(|e| {
+        AdjudicationDecodeError::Field {
+            key: "candidate_observation_id",
+            detail: e.to_string(),
+        }
+    })?;
+
+    let authority = root
+        .get("authority")
+        .ok_or(AdjudicationDecodeError::Field {
+            key: "authority",
+            detail: "absent".to_owned(),
+        })?;
+    let authority = payload_object(authority)?;
+    let payload_class = string_field(authority, "source_class")?;
+    // The payload's own record of the class, checked against the column. They
+    // are written from one value, so a row where they disagree was not written
+    // by this door -- and taking either one as the truth would pick a winner.
+    if payload_class != authorized_class {
+        return Err(AdjudicationDecodeError::NotAnAdjudicationRow {
+            detail: format!(
+                "payload authority.source_class is `{payload_class}`, expected \
+                 `{authorized_class}`"
+            ),
+        });
+    }
+    let adjudicator = string_field(authority, "identity")?.to_owned();
+    // Through the domain constructor rather than trusted: an empty adjudicator
+    // is a decision nobody signed, which `AdjudicationAuthority::new` refuses at
+    // write time and a reader must refuse at read time for the same reason.
+    AdjudicationAuthority::new(
+        kirra_world::same_as_adjudication::AUTHORIZED_ADJUDICATOR_CLASS,
+        adjudicator.clone(),
+    )
+    .map_err(|e| AdjudicationDecodeError::Domain {
+        detail: e.to_string(),
+    })?;
+
+    let decided = root
+        .get("decided_at")
+        .ok_or(AdjudicationDecodeError::Field {
+            key: "decided_at",
+            detail: "absent".to_owned(),
+        })?;
+    let decided = payload_object(decided)?;
+    // `as_u64`, matching `DomainInstant::ms`. A negative JSON number is not a
+    // reading on any clock, and coercing one would put an instant before the
+    // epoch into a field nothing else in the store can express.
+    let ms = decided
+        .get("ms")
+        .and_then(serde_json::Value::as_u64)
+        .ok_or(AdjudicationDecodeError::Field {
+            key: "decided_at.ms",
+            detail: "absent, negative, or not an integer".to_owned(),
+        })?;
+    let domain = match string_field(decided, "domain")? {
+        "boundary" => kirra_world::observation::ClockDomain::Boundary,
+        "system" => kirra_world::observation::ClockDomain::System,
+        other => {
+            return Err(AdjudicationDecodeError::Field {
+                key: "decided_at.domain",
+                detail: format!(
+                    "`{other}` is not a clock this build knows — \
+                     AOU-TIMESYNC-001 forbids guessing a domain"
+                ),
+            })
+        }
+    };
+
+    Ok(StoredAdjudication {
+        pair,
+        outcome,
+        candidate_observation_id,
+        adjudicator,
+        decided_at: kirra_world::observation::DomainInstant { ms, domain },
+    })
+}

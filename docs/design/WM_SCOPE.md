@@ -1102,6 +1102,86 @@ does not describe is how a residue disappears.
       because whether a matcher's PROPOSAL goes stale is a separate question this
       ruling does not answer.
 
+- [x] **5a — The relationship projection. DONE 2026-08-20.**
+      `kirra_world_store::relationship_projection` + `relationships_projection`,
+      folding **confirmed `same_as` adjudications** into the relationships that
+      currently hold. This is the far end of the chain the pre-5a audit traced:
+      real producer → sanctioned candidate write (2a) → persisted candidate →
+      authorized adjudication (2b) → confirmed event → **projection**. Its whole
+      test suite lives in `kirra-world-ingest`, so every relationship it asserts
+      about was proposed by the real matcher and promoted by a real
+      `AdjudicationAuthority`; nothing is hand-appended except where a test is
+      deliberately forging a row the production doors refuse to write.
+
+      **The scope it was built to**, recorded because it separates two things
+      that are easy to fuse:
+
+      > The relationship projection is authoritative over promoted identity
+      > decisions, not over continued retention of the candidate evidence that
+      > motivated them. If cited candidate evidence is compacted, the
+      > relationship remains valid as adjudicated, while its explanatory
+      > provenance may degrade.
+
+      That is `KIRRA-WM-IDENTITY-FRESHNESS-001` carried into storage. The row
+      cites `candidate_observation_id` and carries **no** "fully evidenced"
+      flag — there is no field that could be left reading `true` after the
+      candidate was compacted. Whether the citation still resolves is asked
+      through `relationship_provenance`, which returns box 4b's
+      `CitationResolution`, whose `Resolved` variant cannot be constructed
+      without a visible carrier.
+
+      **Operator-authored promotions are the only production input today.**
+      `KIRRA-WM-PROMOTION-001` v1 authorizes `SourceClass::Operator` and nothing
+      else, so every row traces to a human decision. An automated adjudicator is
+      unruled, not merely unimplemented.
+
+      **Decisions this box made, each with a control:**
+
+      | Decision | Control |
+      |---|---|
+      | A later non-promotion WITHDRAWS a standing promotion | `a_later_rejection_withdraws_a_standing_promotion` |
+      | `Unresolved` withdraws rather than abstains | `a_later_unresolved_withdraws_a_standing_promotion`, plus the `unresolved_abstains` corpus variant |
+      | No transitive closure (`KIRRA-WM-TRANSITIVITY-001`) | `promotion_never_synthesises_a_transitive_relation`, plus the `transitive_closure` corpus variant |
+      | Provenance is pinned at the DECIDING generation, not the head | `a_later_carrier_of_the_same_id_does_not_resurrect_compacted_evidence` |
+      | A relationship survives compaction of its candidate | `a_promoted_relationship_survives_compaction_of_its_candidate` |
+      | Rebuild-from-zero equals an incremental fold | `incremental_folding_equals_rebuild_from_zero` |
+
+      The reducer is versioned as `RuleId::RelationshipFold` v1 with three
+      sensitivity controls, so changing the withdrawal policy moves a digest
+      rather than a paragraph.
+
+      **Two things this box got wrong and the gates caught**, recorded because
+      both are the same defect class this file keeps finding — a claim outrunning
+      its evidence:
+
+      1. The comment justifying seeding the fold from stored rows named the
+         WRONG failure. Mutating the seed to empty left all thirteen tests green,
+         because every pair in the determinism test was touched by the tail. The
+         real failure is that the withdrawal sweep DELETES a relationship
+         promoted below the checkpoint and untouched since — silent data loss on
+         an ordinary fold, opposite in direction to the stale row the comment
+         predicted. `a_relationship_promoted_below_the_checkpoint_survives_a_later_unrelated_fold`
+         now names it.
+      2. `relationship_provenance` answered a one-pair question by loading the
+         whole projection — defect #1441's exact shape, behind a point-read
+         signature. The query-boundedness gate found it, not review. It is now
+         the `relationship` point read on `PRIMARY KEY (low, high)`.
+
+      **OPEN, and stated rather than implied: this projection has no domain
+      consumer yet.** Rule 1 ("every new declaration needs a production
+      consumer") is not satisfied by 5a alone; it is satisfied by the sequence
+      5a → typed `Related` query through `QueryEngine` → a real consumer, of
+      which this is the first step. If that sequence stalls, this table and its
+      fold are the thing to delete, not to document.
+
+      **FOLLOW-UP RULING owed:** does promotion PROTECT the supporting candidate
+      evidence from compaction, or is *protected adjudication + degradable
+      provenance* the intended model? 5a inherits the second honestly (the
+      candidate is `retention_class = "raw"`, the decision is `"adjudication"`
+      and protected) and does not decide it. The measurement the ruling needs now
+      exists: `a_promoted_relationship_survives_compaction_of_its_candidate`
+      shows exactly what the projection inherits when the evidence goes.
+
 - [x] **2c — Deterministic resolution over promoted identity. DONE 2026-08-20.**
       `kirra_world::adjudication::promote_confirmed_same_as` is the join: it asks
       `confirmed_relations` WHICH pairs are confirmed and turns each into a
@@ -3522,7 +3602,11 @@ Before any code:
    `kirra_world_store::retention_driver` and `::retention_sweeper` HEALED and
    their baseline entries retired in the same PR, which is the witness this box
    was chosen for.
-4. Revisit semantic projections, **based on a real consumer**.
+4. ~~Revisit semantic projections.~~ **relationships half done 2026-08-20** —
+   `relationship_projection`, over the real 2a/2b/2c chain. The **consumer**
+   half of rule 1 is NOT yet paid: the next two steps are the typed `Related`
+   query through `QueryEngine` and then a consumer that asks it. Capabilities
+   and map layers remain unstarted and still gated on a consumer.
 5. Design commands (5c.1).
 6. Complete the missing typed queries (5c.2).
 7. Rule event emission — before any event code (5c.3).
@@ -3549,10 +3633,14 @@ Tiers 2 and 4 spent their residuals removing.
 
 ### The remaining §8 boxes, restated
 
-- [ ] **5a — Semantic projections** beyond `world_current`: relationships,
-      capabilities, map layers. Gated on a real consumer per rule 1, and note
-      the identity-relations predecessor (`same_as_adjudication`) is still
-      awaiting box 2c.
+- [~] **5a — Semantic projections** beyond `world_current`. The
+      **relationships** half is DONE 2026-08-20 (see the box above):
+      `relationships_projection` folds confirmed `same_as` adjudications, over
+      the completed 2a → 2b → 2c chain rather than over fixtures. Capabilities
+      and map layers are NOT started and stay gated on a real consumer per rule
+      1. The relationships half is deliberately ahead of its consumer by two
+      boxes — the typed `Related` query and then the consumer — and that debt is
+      recorded at the box rather than treated as paid.
 - [x] **5b — Retention policy driver. DONE 2026-08-19.** ADR-0040 promoted this
       to a **Tier 1 exit criterion** (§4); the *deciding* half landed 2026-08-06
       as `kirra_world::retention`, the *acting* half as

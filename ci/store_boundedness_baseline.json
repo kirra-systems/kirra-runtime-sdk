@@ -136,6 +136,10 @@
       "class": "operational",
       "why": "Projection fold."
     },
+    "fold_relationship_projection": {
+      "class": "operational",
+      "why": "Projection fold."
+    },
     "fold_subject_summary": {
       "class": "operational",
       "why": "Projection fold."
@@ -149,6 +153,10 @@
       "why": "Existence probe."
     },
     "has_projections": {
+      "class": "operational",
+      "why": "Existence probe."
+    },
+    "has_relationship_projection": {
       "class": "operational",
       "why": "Existence probe."
     },
@@ -172,9 +180,33 @@
       "class": "operational",
       "why": "Box 2a's producer-side EVIDENCE SURVEY, not a domain question -- classified with fold and the backfills rather than with the query families, because no caller is asking Kirra World what is true; a matcher is reading the log it will propose from. Bounded regardless: the caller's limit is pushed into the statement as LIMIT ?2, so the ceiling is SQLite's and a full page means truncation, never completeness."
     },
+    "load_relationship_projection": {
+      "class": "operational",
+      "why": "The fold's own loader. Whole-table by construction -- `fold_relationship_range` seeds its accumulator from it, and a paged seed would fold against a partial prior state. Not a consumer road: the one-pair question has its own point read, `relationship`, because answering it from here was the #1441 shape and this gate is what found it."
+    },
     "load_same_as_candidate": {
       "class": "bounded",
       "why": "A point read keyed on observation_id with LIMIT 1 in the statement -- at most one row by construction, not a set trimmed after fetching. Bounded rather than operational because it answers a question ABOUT a claim (is this observation a derivation-class same_as candidate, and what does it propose), which is what box 2b's adjudicator will ask before it may judge."
+    },
+    "rebuild_relationship_projection": {
+      "class": "operational",
+      "why": "Projection rebuild."
+    },
+    "relationship": {
+      "class": "bounded",
+      "why": "Tier 5 box 5a. A POINT READ by primary key: `WHERE low = ?1 AND high = ?2` on `relationships_projection`, whose PRIMARY KEY is `(low, high)`, so the result is at most one row regardless of how many relationships the fleet has accumulated. STRUCTURALLY bounded in the same sense as `current` -- there is no page and no cursor because there is no growth dimension. It takes a canonical pair the caller already holds and returns the row at it."
+    },
+    "relationship_projection_generation": {
+      "class": "operational",
+      "why": "Checkpoint metadata."
+    },
+    "relationship_projection_state_digest": {
+      "class": "operational",
+      "why": "Checkpoint metadata."
+    },
+    "relationship_provenance": {
+      "class": "bounded",
+      "why": "Tier 5 box 5a. Three bounded steps and no scan: the point read above, then `carriers` (capped at MAX_CARRIERS + a truncation flag) and `compacted_spans` (capped at MAX_COMPACTED_SPANS), both of which box 4b already bounds and classifies. Answers whether ONE relationship's cited candidate is still visible; it cannot be used to enumerate anything."
     },
     "same_as_candidate_exists": {
       "class": "operational",
