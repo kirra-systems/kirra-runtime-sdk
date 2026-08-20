@@ -429,9 +429,21 @@ is **self-releasing and already released** (ADR-0042 Decision 5, recorded
       decision, not a column choice: retention bounds disk and disk grows on
       insertion, whereas ageing on valid time would delete a backdated import on
       arrival and never age out a future-dated claim.
-      **SWEEPER DONE 2026-08-06**, `crates/kirra-world-store/src/retention_sweeper.rs`,
-      3 tests — **something now empties the store without being asked**, which
-      is what this exit criterion asked for.
+      **SWEEPER WRITTEN 2026-08-06**, `crates/kirra-world-store/src/retention_sweeper.rs`,
+      3 tests. **This entry read "SWEEPER DONE — something now empties the store
+      without being asked" for two weeks, and that was FALSE**: the sweeper could
+      empty the store, and nothing started it. Both store-side retention modules
+      sat in `ci/orphan_cores_baseline.json` the whole time, referenced only by
+      their own `pub mod` lines.
+      The claim survived because "the code exists" and "the code runs" look
+      identical in a scope document, and the detector that should have told them
+      apart could be satisfied by a textual mention until #1458–#1460. Same
+      defect class as Tier 4's residual 2, one level up — an integration gate
+      crediting reachability is not proving integration.
+      **STARTED 2026-08-19** by Tier 5 box 5b: `kirra-world-retention-service`,
+      the World-side process that holds the sweeper handle. The sentence is true
+      now, and `the_store_empties_without_anyone_asking` is what makes it
+      checkable — it starts the entry point and then asks for nothing.
       **It is NOT in the verifier, and that is the load-bearing part.**
       `src/campaign_monitor.rs` and `src/cert_expiry_monitor.rs` are the obvious
       precedent, but they live in the root crate, which is **inside the safety
@@ -3349,7 +3361,11 @@ Before any code:
 1. ~~Fix the bad §17 reference.~~ **done** — corrected in the audit table above
    and at the bullet itself.
 2. ~~Record the CQRS split and the two rulings.~~ **done** — this section.
-3. **Wire the retention scheduler** — the first Tier 5 implementation.
+3. ~~Wire the retention scheduler.~~ **done** — `kirra-world-retention-service`,
+   the World-side process that starts the sweeper. Both
+   `kirra_world_store::retention_driver` and `::retention_sweeper` HEALED and
+   their baseline entries retired in the same PR, which is the witness this box
+   was chosen for.
 4. Revisit semantic projections, **based on a real consumer**.
 5. Design commands (5c.1).
 6. Complete the missing typed queries (5c.2).
@@ -3381,12 +3397,18 @@ Tiers 2 and 4 spent their residuals removing.
       capabilities, map layers. Gated on a real consumer per rule 1, and note
       the identity-relations predecessor (`same_as_adjudication`) is still
       awaiting box 2c.
-- [ ] **5b — Retention policy driver.** The horizons OQ2 ruled are still applied
-      by hand. ADR-0040 promoted this to a **Tier 1 exit criterion** (§4), so it
-      no longer waits on ADR-0041's WM-2 precondition, and its *deciding* half
-      landed 2026-08-06 as `kirra_world::retention`. **This entry now covers only
-      the scheduled driver** — the acting half (`retention_driver`,
-      `retention_sweeper`) is written and unwired.
+- [x] **5b — Retention policy driver. DONE 2026-08-19.** ADR-0040 promoted this
+      to a **Tier 1 exit criterion** (§4); the *deciding* half landed 2026-08-06
+      as `kirra_world::retention`, the *acting* half as
+      `kirra_world_store::retention_driver`, and the *scheduling* half as
+      `::retention_sweeper` — and **none of them had a caller**, which is why §4
+      recorded this exit criterion satisfied for two weeks while nothing ran.
+      The scheduled driver is now `kirra-world-retention-service`, its own crate
+      rather than a second job inside `kirra-world-explain-service`: that crate
+      owns a read-only process boundary and says so, and retention DELETES. A
+      container name (`kirra-world-maintenance`) was declined for the reason the
+      explain service declined one — every World-side chore would move in until
+      the crate's authority was whatever accumulated there.
 - [ ] **5c.1 / 5c.2 / 5c.3** — as ruled above; 5c.3 blocked.
 - [ ] **5d — Operator teaching surface** (`WORLD_MODEL_ARCHITECTURE.md` §17;
       command in its §14.1): `AssertEntity`, corrections. **Blocked on ruling.**
