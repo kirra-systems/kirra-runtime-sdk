@@ -1,6 +1,6 @@
 {
   "_comment": [
-    "Tier 3 box 3d \u2014 the boundedness classification of the store's read surface.",
+    "Tier 3 box 3d — the boundedness classification of the store's read surface.",
     "",
     "KIRRA-WM-ANSWER-IDENTITY-001 clause 2 is 'queries are bounded'. Three defects",
     "in three consecutive PRs showed that per-query vigilance does not enforce it:",
@@ -58,15 +58,15 @@
     },
     "as_of_composed": {
       "class": "unbounded",
-      "why": "Composes `as_of` (bounded) with `identity_view_at` (the whole graph). The claims half is bounded and the identity half is not, so the composition is not \u2014 a bounded half does not bound a composition."
+      "why": "Composes `as_of` (bounded) with `identity_view_at` (the whole graph). The claims half is bounded and the identity half is not, so the composition is not — a bounded half does not bound a composition."
     },
     "as_of_composed_bounded": {
       "class": "bounded",
-      "why": "Box 3d. Both halves bounded inside ONE transaction: `as_of` was already subject-keyed, and the identity half now folds only the adjudications bearing on the objects those claims name, discovered through the affected-entity reverse index. Deliberately one primitive rather than two bounded calls \u2014 two would satisfy boundedness while reintroducing the cross-read incoherence box 3h closed."
+      "why": "Box 3d. Both halves bounded inside ONE transaction: `as_of` was already subject-keyed, and the identity half now folds only the adjudications bearing on the objects those claims name, discovered through the affected-entity reverse index. Deliberately one primitive rather than two bounded calls — two would satisfy boundedness while reintroducing the cross-read incoherence box 3h closed."
     },
     "backfill_adjudication_affects": {
       "class": "operational",
-      "why": "The one-time scan that fills the v6 reverse index on a migrated store. Deliberately a full scan and deliberately NOT on any request path \u2014 an explicit operational call rather than work hidden in `open`, so the cost lands where an operator can see it. This is exactly the trade box 3d is for: one operational scan buys bounded interactive reads."
+      "why": "The one-time scan that fills the v6 reverse index on a migrated store. Deliberately a full scan and deliberately NOT on any request path — an explicit operational call rather than work hidden in `open`, so the cost lands where an operator can see it. This is exactly the trade box 3d is for: one operational scan buys bounded interactive reads."
     },
     "backfill_provenance_edges": {
       "class": "operational",
@@ -106,7 +106,7 @@
     },
     "cursor_anchor": {
       "class": "bounded",
-      "why": "Two point reads: one row by primary key, and the log head via ORDER BY generation DESC LIMIT 1. Structurally bounded \u2014 the result is two scalars regardless of log size. It exists so a continuation cursor can be REFUSED rather than silently continued from a coordinate the log no longer holds."
+      "why": "Two point reads: one row by primary key, and the log head via ORDER BY generation DESC LIMIT 1. Structurally bounded — the result is two scalars regardless of log size. It exists so a continuation cursor can be REFUSED rather than silently continued from a coordinate the log no longer holds."
     },
     "claim_at_generation": {
       "class": "bounded",
@@ -158,11 +158,11 @@
     },
     "history_page": {
       "class": "bounded",
-      "why": "Box 3d's bounded replacement for `history`. Narrows in SQL with `generation > cursor` and `LIMIT limit + 1` rather than fetching the record and truncating \u2014 #1440's lesson, since truncating after the fetch bounds the ANSWER while leaving the WORK unbounded, which is what made all three defects invisible. The boundary decision is `lineage::boundary_for`, shared with the lineage family so the off-by-one has one implementation."
+      "why": "Box 3d's bounded replacement for `history`. Narrows in SQL with `generation > cursor` and `LIMIT limit + 1` rather than fetching the record and truncating — #1440's lesson, since truncating after the fetch bounds the ANSWER while leaving the WORK unbounded, which is what made all three defects invisible. The boundary decision is `lineage::boundary_for`, shared with the lineage family so the off-by-one has one implementation."
     },
     "history_whole": {
       "class": "unbounded",
-      "why": "EVERY confirmed claim ever recorded about a subject, no page and no cursor. The third instance of the defect class this gate exists for, and the one that proves per-query vigilance does not work: it was written in the PR that documented the other two. Its bounded replacement is the paginated form. RENAMED from `history` in the 3d dispatch slice: `WorldView::history` is the BOUNDED family of the same name, and the collision made the gate read the engine's dispatch into the bounded family as a call to this one. The same correction `resolve_at` -> `resolve_at_whole_graph` already took \u2014 a name that does not say `whole` is how a whole-record read gets called by mistake."
+      "why": "EVERY confirmed claim ever recorded about a subject, no page and no cursor. The third instance of the defect class this gate exists for, and the one that proves per-query vigilance does not work: it was written in the PR that documented the other two. Its bounded replacement is the paginated form. RENAMED from `history` in the 3d dispatch slice: `WorldView::history` is the BOUNDED family of the same name, and the collision made the gate read the engine's dispatch into the bounded family as a call to this one. The same correction `resolve_at` -> `resolve_at_whole_graph` already took — a name that does not say `whole` is how a whole-record read gets called by mistake."
     },
     "identity_view": {
       "class": "unbounded",
@@ -175,6 +175,10 @@
     "invalid_shape_rows": {
       "class": "operational",
       "why": "A schema-diagnostic sweep, not a domain question."
+    },
+    "unauthorized_confirmation_rows": {
+      "class": "operational",
+      "why": "The KIRRA-WM-PROMOTION-001 sibling of invalid_shape_rows, and classified with it for the same reason: a schema-diagnostic sweep an operator runs against a migrated store, not a domain question any interactive path asks. Unbounded by nature -- it must report EVERY inherited derivation-confirmed row or it would understate the finding, and a paged diagnostic that silently stopped at a limit would be the worse failure here."
     },
     "largest_compactable_prefix": {
       "class": "operational",
@@ -250,15 +254,15 @@
     },
     "resolve_at_whole_graph": {
       "class": "unbounded",
-      "why": "RENAMED from `resolve_at` on box 3d. Its body is `self.identity_view_at(cut)?.resolve_at(id)` \u2014 it materialises the WHOLE equivalence graph and then indexes it, so the old name read as a point lookup and was classified `bounded` from its signature on the first pass. The name now says what it does. Renaming also removes a real ambiguity in the gate's name-based scan: `HistoricalIdentityView::resolve_at` is a pure in-memory call on an already-loaded view, and sharing a name with an unbounded store method made every use of it look like a violation. `resolve_bounded_at` is the bounded form."
+      "why": "RENAMED from `resolve_at` on box 3d. Its body is `self.identity_view_at(cut)?.resolve_at(id)` — it materialises the WHOLE equivalence graph and then indexes it, so the old name read as a point lookup and was classified `bounded` from its signature on the first pass. The name now says what it does. Renaming also removes a real ambiguity in the gate's name-based scan: `HistoricalIdentityView::resolve_at` is a pure in-memory call on an already-loaded view, and sharing a name with an unbounded store method made every use of it look like a violation. `resolve_bounded_at` is the bounded form."
     },
     "resolve_bounded": {
       "class": "bounded",
-      "why": "Box 3d's identity primitive. Loads only the entities within MAX_REDIRECT_EDGES hops of the queried id and resolves over that subset, so the work is bounded by the traversal budget the resolver already enforces rather than by graph size. The resolution RULE is unchanged \u2014 the same `resolve` over a smaller view \u2014 which is what lets `bounded_resolution_agrees_with_whole_graph_resolution` assert the two are identical. Classified `bounded` and MEANT: the transitive check reads its body, so it stays honest."
+      "why": "Box 3d's identity primitive. Loads only the entities within MAX_REDIRECT_EDGES hops of the queried id and resolves over that subset, so the work is bounded by the traversal budget the resolver already enforces rather than by graph size. The resolution RULE is unchanged — the same `resolve` over a smaller view — which is what lets `bounded_resolution_agrees_with_whole_graph_resolution` assert the two are identical. Classified `bounded` and MEANT: the transitive check reads its body, so it stays honest."
     },
     "resolve_bounded_at": {
       "class": "bounded",
-      "why": "Box 3d's bounded historical identity read. Discovers the adjudications affecting the queried id through the affected-entity reverse index, expands newly-named entities, and stops at the resolver's own MAX_REDIRECT_EDGES budget \u2014 so it folds the records bearing on one entity's identity rather than every adjudication in the log. The index supplies GENERATIONS only; every record is read from world_events and folded by the unchanged fold_adjudication, so the log remains the sole evidence."
+      "why": "Box 3d's bounded historical identity read. Discovers the adjudications affecting the queried id through the affected-entity reverse index, expands newly-named entities, and stops at the resolver's own MAX_REDIRECT_EDGES budget — so it folds the records bearing on one entity's identity rather than every adjudication in the log. The index supplies GENERATIONS only; every record is read from world_events and folded by the unchanged fold_adjudication, so the log remains the sole evidence."
     },
     "resolved_entities": {
       "class": "unbounded",
@@ -336,7 +340,7 @@
     },
     "identity_view_for": {
       "class": "bounded",
-      "why": "Box 3d. Loads only the entities reachable from the seed ids within MAX_REDIRECT_EDGES hops, so `ask` pays O(predicates x budget) instead of O(entities) to resolve the objects its own claims name. Snapshot-scoped so the identity half of a composed answer is observed at the same point as the claims half \u2014 a WorldStore-level bounded resolve would be a second connection and would reintroduce the between-walks incoherence 3c closed."
+      "why": "Box 3d. Loads only the entities reachable from the seed ids within MAX_REDIRECT_EDGES hops, so `ask` pays O(predicates x budget) instead of O(entities) to resolve the objects its own claims name. Snapshot-scoped so the identity half of a composed answer is observed at the same point as the claims half — a WorldStore-level bounded resolve would be a second connection and would reintroduce the between-walks incoherence 3c closed."
     },
     "read_composed_subject_at_generation": {
       "class": "bounded",

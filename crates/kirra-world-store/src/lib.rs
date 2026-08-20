@@ -199,6 +199,16 @@ pub enum StoreError {
     /// SD-2, refused before the statement is built so the message names the
     /// rule rather than a constraint index.
     LlmCannotConfirm,
+    /// `KIRRA-WM-PROMOTION-001` — a `derivation`-class writer (a similarity
+    /// matcher, a rule engine) may PROPOSE co-reference but may never CONFIRM
+    /// it. Confirmed identity arrives only through explicit adjudication.
+    ///
+    /// The sibling of [`Self::LlmCannotConfirm`], and refused at the same point
+    /// for the same reason. The two differ only in which enforcement backs them
+    /// at the SQL layer: SD-2's `CHECK` has covered `llm_candidate` since v1,
+    /// while `derivation` is held by the v8 trigger, because SQLite cannot
+    /// widen a `CHECK` without rewriting the append-only log.
+    DerivationCannotConfirm,
     /// SD-4, refused early for the same reason.
     SpatialClaimNeedsFrame,
     /// `KIRRA-WM-CLAIM-SHAPES-001` — an object-bearing claim requires a
@@ -418,6 +428,11 @@ impl std::fmt::Display for StoreError {
                 f,
                 "writer_class=llm_candidate may not write claim_status=confirmed \
                  (ADR-0040; KIRRA-WM2-SCHEMA-001 SD-2)"
+            ),
+            Self::DerivationCannotConfirm => write!(
+                f,
+                "writer_class=derivation may not write claim_status=confirmed \
+                 (KIRRA-WM-PROMOTION-001: clustering proposes, adjudication confirms)"
             ),
             Self::SpatialClaimNeedsFrame => write!(
                 f,
@@ -1022,6 +1037,7 @@ pub fn schema_digest() -> String {
     effective.push_str(schema::SCHEMA_V5_MIGRATION);
     effective.push_str(schema::SCHEMA_V6_MIGRATION);
     effective.push_str(schema::SCHEMA_V7_MIGRATION);
+    effective.push_str(schema::SCHEMA_V8_MIGRATION);
     sha256_hex(effective.as_bytes())
 }
 
@@ -1097,11 +1113,12 @@ impl WorldStore {
             tx.execute_batch(schema::SCHEMA_V5_MIGRATION)?;
             tx.execute_batch(schema::SCHEMA_V6_MIGRATION)?;
             tx.execute_batch(schema::SCHEMA_V7_MIGRATION)?;
+            tx.execute_batch(schema::SCHEMA_V8_MIGRATION)?;
             tx.execute(
                 "INSERT INTO world_store_meta (key, value) VALUES ('schema_version', ?1)",
                 params![SCHEMA_VERSION.to_string()],
             )?;
-            // A store born at v7 indexes every event as it is appended, so no
+            // A store born at v8 indexes every event as it is appended, so no
             // generation is outside the citation index and the floor is 0.
             tx.execute(
                 "INSERT INTO world_store_meta (key, value) VALUES (?1, '0')",
@@ -1253,6 +1270,19 @@ impl WorldStore {
                 params![PROVENANCE_EDGES_FLOOR_KEY, head.to_string()],
             )?;
         }
+        // v8 installs the KIRRA-WM-PROMOTION-001 trigger. Same shape as v5 and
+        // the same consequence: it constrains future inserts and touches no
+        // existing row, so a store already carrying a `derivation`-confirmed row
+        // migrates cleanly and KEEPS it -- visible via
+        // `unauthorized_confirmation_rows`, never silently coerced or deleted.
+        //
+        // Migrating such a store is deliberately not an error. Refusing to open
+        // it would strand the operator with a database they can neither read nor
+        // repair, and the rows are already written: the honest outcome is a store
+        // that stops the next one and can name the ones it inherited.
+        if from < 8 {
+            tx.execute_batch(schema::SCHEMA_V8_MIGRATION)?;
+        }
 
         // Digest before version, inside the transaction. The order no longer
         // guards a crash window — the transaction does — but it still reads in
@@ -1311,6 +1341,46 @@ impl WorldStore {
         let mut stmt = self.conn.prepare(
             "SELECT generation, subject FROM world_events
              WHERE object IS NOT NULL AND predicate IS NULL
+             ORDER BY generation",
+        )?;
+        let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
+    }
+
+    /// Events a `derivation`-class writer self-confirmed — `KIRRA-WM-PROMOTION-001`
+    /// — as `(generation, subject)`.
+    ///
+    /// **Reports; never repairs.** The v8 trigger stops new ones, but a store
+    /// written before it existed may already contain some, and coercing them
+    /// would mean rewriting a hash-chained append-only log. So they survive, and
+    /// this method is what makes them a *finding* rather than a silence — the
+    /// same contract as [`Self::invalid_shape_rows`].
+    ///
+    /// An operator seeing a non-empty result should know what it implies: each
+    /// such row asserts a CONFIRMED claim on a matcher's authority alone, which
+    /// is precisely what promotion exists to prevent. Such a row folds into the
+    /// confirmed-only projection and is indistinguishable there from an
+    /// adjudicated one.
+    ///
+    /// # Why `llm_candidate` is not in the query
+    ///
+    /// Not an omission. SD-2's `CHECK` has refused that pairing since v1, so no
+    /// store of any vintage can hold one — including it would add a branch that
+    /// is unreachable by construction and read as though it might fire.
+    ///
+    /// Empty on any store created at v8 or later, which the trigger guarantees.
+    ///
+    /// # Errors
+    ///
+    /// [`StoreError::Sqlite`] if the event log cannot be read.
+    pub fn unauthorized_confirmation_rows(&self) -> Result<Vec<(i64, String)>, StoreError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT generation, subject FROM world_events
+             WHERE writer_class = 'derivation' AND claim_status = 'confirmed'
              ORDER BY generation",
         )?;
         let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
@@ -1401,6 +1471,13 @@ impl WorldStore {
     pub fn append(&mut self, e: &NewEvent<'_>) -> Result<i64, StoreError> {
         if e.writer_class == WriterClass::LlmCandidate && e.claim_status == ClaimStatus::Confirmed {
             return Err(StoreError::LlmCannotConfirm);
+        }
+        // `KIRRA-WM-PROMOTION-001`. Refused here so the error names the RULE,
+        // and again by the v8 trigger so raw SQL cannot route around it -- the
+        // same two-layer shape as the claim-shapes check below. Neither layer
+        // is redundant: this one is the message, that one is the guarantee.
+        if e.writer_class == WriterClass::Derivation && e.claim_status == ClaimStatus::Confirmed {
+            return Err(StoreError::DerivationCannotConfirm);
         }
         if e.kind == "spatial" && e.frame_id.is_none() {
             return Err(StoreError::SpatialClaimNeedsFrame);

@@ -115,7 +115,7 @@ pub const CHAIN_ALGORITHM: &str = "kirra-audit-hash/compute_record_hash_v2";
 /// | 5 | the object-requires-predicate trigger | `KIRRA-WM-CLAIM-SHAPES-001` |
 /// | 6 | the `adjudication_affects` reverse index | `WM_SCOPE.md` box 3d |
 /// | 7 | the `provenance_edges` citation index | `KIRRA-WM-PROVENANCE-GRAPH-001` |
-pub const SCHEMA_VERSION: i64 = 7;
+pub const SCHEMA_VERSION: i64 = 8;
 
 /// **v2 — the four orthogonal trust axes, added additively.**
 ///
@@ -496,4 +496,68 @@ CREATE TABLE IF NOT EXISTS provenance_edges (
 -- populated table is a migration, while adding it to an empty one is free.
 CREATE INDEX IF NOT EXISTS provenance_edges_by_cited
     ON provenance_edges (cited_observation_id, source_generation);
+"#;
+
+/// **v8 — a `derivation`-class writer may not confirm its own claim.**
+///
+/// `KIRRA-WM-PROMOTION-001` (adopted 2026-08-08): *clustering may PROPOSE
+/// co-reference; it may never CONFIRM identity.* A heuristic or learned matcher
+/// is authorized as a candidate producer; confirmed identity arrives only
+/// through explicit adjudication by an authorized adjudicator.
+///
+/// # This closed a real hole, not a theoretical one
+///
+/// [`SCHEMA_V1`]'s D-2 `CHECK` is `writer_class <> 'llm_candidate' OR
+/// claim_status = 'candidate'`. It names **one** class. `WM_SCOPE.md` §2a had
+/// already flagged that `derivation` + `confirmed` was consequently accepted,
+/// and recorded that an earlier draft of that same section wrongly claimed the
+/// boundary had been "extended to `derivation`" — so the state of the store was
+/// established by probing it rather than by reading either text:
+///
+/// ```text
+/// PROBE deriv-conf: Ok("ACCEPTED")
+/// PROBE llm-conf:   Err("LlmCannotConfirm")
+/// ```
+///
+/// Until this migration the rule held only because no `derivation`-class
+/// producer existed yet. Tier 2 box 2a is exactly such a producer, so the guard
+/// lands **first**: shipping the producer into a store that cannot refuse it
+/// would make the bypass reachable in the window between the two.
+///
+/// # Why a TRIGGER and not an extended `CHECK`
+///
+/// The same reason as [`SCHEMA_V5_MIGRATION`], and it applies with more force
+/// here. SQLite's `ALTER TABLE` cannot modify a constraint on existing columns;
+/// widening D-2's `CHECK` would require the 12-step table rebuild — create,
+/// copy every row, drop, rename — on the hash-chained append-only log, which is
+/// the one table whose whole value is that it is never rewritten. A rebuild to
+/// install an integrity guard would destroy a stronger integrity property to do
+/// it.
+///
+/// A `BEFORE INSERT` trigger enforces the rule at the SQL layer, so **raw SQL
+/// cannot route around it**, while remaining additive.
+///
+/// # Why this covers `derivation` only
+///
+/// `llm_candidate` is already refused by D-2's `CHECK`, from v1, on every store
+/// ever created. Repeating it here would give one rule two enforcement sites
+/// with two different error texts and no added strength. The two mechanisms are
+/// complementary halves of `KIRRA-WM-PROMOTION-001`, and
+/// `neither_unauthorized_class_can_self_confirm_through_raw_sql` asserts the
+/// **combination** is complete rather than trusting either half alone.
+///
+/// # Historical rows are left alone, deliberately
+///
+/// A trigger constrains future inserts and touches nothing already written —
+/// the v5 precedent, for the v5 reason: repairing a hash-chained log is a much
+/// larger decision than a migration is entitled to make.
+/// [`super::WorldStore::unauthorized_confirmation_rows`] makes any such row a
+/// finding rather than a silence.
+pub const SCHEMA_V8_MIGRATION: &str = r#"
+CREATE TRIGGER IF NOT EXISTS world_events_derivation_cannot_confirm
+BEFORE INSERT ON world_events
+WHEN NEW.writer_class = 'derivation' AND NEW.claim_status = 'confirmed'
+BEGIN
+    SELECT RAISE(ABORT, 'KIRRA-WM-PROMOTION-001: writer_class=derivation may not write claim_status=confirmed');
+END;
 "#;
