@@ -569,3 +569,88 @@ fn a_refused_adjudication_appends_nothing() {
         .expect("adjudicable");
     assert_eq!(store.count().expect("count"), before + 1);
 }
+
+// ---------------------------------------------------------------------------
+// Review finding on #1466 — the provenance walk must reach the judged candidate
+// ---------------------------------------------------------------------------
+
+/// **A provenance walk from the decision reaches the candidate it judged.**
+///
+/// The adjudication row's `provenance` originally carried only `cited()`, so the
+/// `candidate_observation_id` — the single most important citation, the thing
+/// the decision is ABOUT — was reachable only by parsing the payload. Box 4a's
+/// citation index is built from the `provenance` column, so a walk from a
+/// decision could not reach the proposal it judged.
+///
+/// This asserts the walk, not the encoding: it reads the edges the store
+/// actually indexed rather than the payload it wrote, which is the whole
+/// difference the finding turned on.
+#[test]
+fn the_decision_cites_the_candidate_it_judged_in_walkable_provenance() {
+    let (mut store, obs_a, _) = store_with_a_candidate("walkable");
+    let (e, o) = ids("walk");
+    store
+        .adjudicate_same_as(&request(
+            &e,
+            &o,
+            CANDIDATE_OBS,
+            vec![ObservationId::new(&obs_a).expect("id")],
+            operator(),
+            Outcome::Promoted,
+        ))
+        .expect("adjudicable");
+
+    // The decision is the newest row; take its generation from the row itself
+    // rather than assuming generations are dense.
+    let generation = store.head_generation_for_test().expect("head");
+    let page = store
+        .citations_of(generation, 16, None)
+        .expect("citations of the decision");
+    let cited: Vec<String> = page
+        .edges
+        .iter()
+        .map(|edge| edge.cited_observation_id.clone())
+        .collect();
+
+    assert!(
+        cited.contains(&CANDIDATE_OBS.to_owned()),
+        "the walk must reach the judged candidate: {cited:?}"
+    );
+    assert!(
+        cited.contains(&obs_a),
+        "and still reach the operator's own citations: {cited:?}"
+    );
+}
+
+/// **The candidate is cited once, even when the caller also names it.**
+///
+/// `provenance` is keyed `(generation, ordinal)`, so one observation appearing
+/// twice would make a single piece of evidence look like two — the defect
+/// `SameAsCandidate::propose` already refuses for support lists.
+#[test]
+fn naming_the_candidate_in_cited_as_well_does_not_double_count_it() {
+    let (mut store, obs_a, _) = store_with_a_candidate("no-double");
+    let (e, o) = ids("dup");
+    store
+        .adjudicate_same_as(&request(
+            &e,
+            &o,
+            CANDIDATE_OBS,
+            vec![
+                ObservationId::new(CANDIDATE_OBS).expect("id"),
+                ObservationId::new(&obs_a).expect("id"),
+            ],
+            operator(),
+            Outcome::Promoted,
+        ))
+        .expect("adjudicable");
+
+    let generation = store.head_generation_for_test().expect("head");
+    let page = store.citations_of(generation, 16, None).expect("citations");
+    let occurrences = page
+        .edges
+        .iter()
+        .filter(|edge| edge.cited_observation_id == CANDIDATE_OBS)
+        .count();
+    assert_eq!(occurrences, 1, "one citation, not two: {:?}", page.edges);
+}

@@ -1804,6 +1804,20 @@ impl WorldStore {
         Ok(generation)
     }
 
+    /// The generation of the newest event in the log.
+    ///
+    /// Test-support: a caller that has just appended one row needs its
+    /// generation to walk its citations, and inferring it from `count()` would
+    /// bake in "generations are dense" — which compaction makes false.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn head_generation_for_test(&self) -> Result<i64, StoreError> {
+        Ok(self
+            .conn
+            .query_row("SELECT MAX(generation) FROM world_events", [], |r| r.get(0))
+            .optional()?
+            .unwrap_or(0))
+    }
+
     /// **Adjudicate a persisted `same_as` candidate** — box 2b's sanctioned door.
     ///
     /// `KIRRA-WM-PROMOTION-001`: confirmed identity arrives only through an
@@ -1829,10 +1843,14 @@ impl WorldStore {
     ///   with its support intact — all of it by going through
     ///   [`Self::load_same_as_candidate`], whose decode ends in the domain's own
     ///   constructor ([`AdjudicateError::NotACandidate`]);
-    /// * the **adjudicator is authorized** — v1 is `SourceClass::Operator` only
-    ///   ([`AdjudicateError::UnauthorizedAdjudicator`]). A `Derivation`-class
-    ///   "adjudicator" is a matcher confirming its own proposal, which is the
-    ///   exact loop the ruling exists to break.
+    ///
+    /// What is **not** validated here, deliberately: the adjudicator's
+    /// authority. `AdjudicationAuthority::new` refuses every class but
+    /// `SourceClass::Operator` and the struct does not store one, so an
+    /// unauthorized adjudicator is unrepresentable and cannot reach this door.
+    /// An earlier draft carried a comparison against `Operator` anyway; it could
+    /// only ever be `false`, and a guard that cannot fire reads as the
+    /// enforcement while a reader stops looking for the real one.
     ///
     /// # The candidate survives
     ///

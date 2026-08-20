@@ -112,10 +112,16 @@ pub fn source_class_token(class: SourceClass) -> &'static str {
 /// Encode an adjudication's payload.
 ///
 /// The pair is NOT in here — it travels in `subject`/`object`, where an index
-/// can see it. The cited observations are the row's `provenance`, for the same
-/// reason candidates put their support there: box 4a's citation index is built
-/// from that column, so a decision whose evidence lived only in its payload
-/// would be invisible to the provenance walk.
+/// can see it. The evidence is not here either: the judged candidate and the
+/// cited observations are the row's `provenance`, because box 4a's citation
+/// index is built from that column and a decision whose evidence lived only in
+/// its payload would be invisible to the provenance walk.
+///
+/// `candidate_observation_id` DOES appear here as well, and the duplication is
+/// deliberate: `provenance` is a flat list of ids, so it records *that* the
+/// candidate was cited but not that it was the SUBJECT of the decision rather
+/// than one input among several. The payload keeps that distinction; the
+/// provenance column keeps the walk.
 #[must_use]
 pub fn encode_same_as_adjudication(a: &SameAsAdjudication) -> String {
     serde_json::json!({
@@ -137,9 +143,30 @@ pub fn encode_same_as_adjudication(a: &SameAsAdjudication) -> String {
 }
 
 /// The observation ids an adjudication row records as its `provenance`.
+///
+/// **The judged candidate comes first, then the cited observations.**
+///
+/// An earlier version returned only `cited()`, which left the
+/// `candidate_observation_id` — the single most important citation, the thing
+/// the decision is ABOUT — reachable only by parsing the payload. That
+/// contradicted this module's own stated reason for putting citations in
+/// `provenance`: box 4a's index is built from that column, so a provenance walk
+/// from a decision could not reach the proposal it judged.
+///
+/// Deduplicated, because a caller may legitimately also name the candidate in
+/// `cited` and the citation index keys on `(generation, ordinal)` — one
+/// observation appearing twice would make one piece of evidence look like two,
+/// the same defect `SameAsCandidate::propose` refuses for support lists.
 #[must_use]
 pub fn same_as_adjudication_provenance(a: &SameAsAdjudication) -> Vec<String> {
-    a.cited().iter().map(|o| o.as_str().to_owned()).collect()
+    let mut out = vec![a.candidate_observation_id().as_str().to_owned()];
+    for o in a.cited() {
+        let id = o.as_str().to_owned();
+        if !out.contains(&id) {
+            out.push(id);
+        }
+    }
+    out
 }
 
 /// What a caller must supply to adjudicate a persisted candidate.
