@@ -920,14 +920,40 @@ does not describe is how a residue disappears.
       confidence provenance. It writes through the same door as every other
       producer (§4.2) and is visible as inferred.
       **It may not write `claim_status = confirmed`, and may not touch
-      `Corroboration(n)`.** ⚠️ **This is a POLICY REQUIREMENT, not an enforced
-      boundary — and the difference was found by review, not by the schema.**
-      SD-2's `CHECK` refuses `llm_candidate` + `confirmed` and *only* that:
-      `world_events` has `CHECK (writer_class <> 'llm_candidate' OR claim_status
-      = 'candidate')`, so **`derivation` + `confirmed` is currently accepted by
-      the store.** An earlier draft here said the boundary was "extended to
-      `derivation`". It is not, and describing an unenforced policy as an
-      existing guard is how a reader stops looking for the guard.
+      `Corroboration(n)`.** ✅ **ENFORCED as of schema v8** (2026-08-20).
+      History worth keeping, because it is how the gap was found: this was a
+      POLICY REQUIREMENT with no guard behind it, and the difference was found
+      by review rather than by the schema. SD-2's `CHECK` refuses
+      `llm_candidate` + `confirmed` and *only* that, so `derivation` +
+      `confirmed` was accepted by the store. An earlier draft of this bullet
+      said the boundary had been "extended to `derivation`". It had not — and
+      because this section had already been wrong about it once, the state was
+      re-established by PROBING the store rather than by re-reading either text:
+
+      ```text
+      PROBE deriv-conf: Ok("ACCEPTED")
+      PROBE llm-conf:   Err("LlmCannotConfirm")
+      ```
+
+      `SCHEMA_V8_MIGRATION` closes it with a `BEFORE INSERT` trigger — not a
+      widened `CHECK`, because SQLite cannot alter a constraint without the
+      12-step table rebuild, and rebuilding the hash-chained append-only log to
+      install an integrity guard would destroy a stronger integrity property to
+      do it. The v5 claim-shapes trigger is the precedent.
+
+      The rule now has two enforcement sites for two classes — the v1 `CHECK`
+      for `llm_candidate`, the v8 trigger for `derivation` — so
+      `neither_unauthorized_class_can_self_confirm_through_raw_sql` asserts the
+      **combination** in raw SQL, going around every Rust-side refusal, because
+      a policy enforced only in a function is enforced only for callers of that
+      function. `StoreError::DerivationCannotConfirm` is the sibling of
+      `LlmCannotConfirm`: it names the rule for the caller, and is not the
+      guarantee.
+
+      Rows written before the guard are **not** coerced — the migration
+      constrains future inserts and touches nothing already written.
+      `WorldStore::unauthorized_confirmation_rows` makes any inherited row a
+      finding rather than a silence.
 
       In 2a the constraint holds because the *type* cannot express a confirmed
       candidate — `SameAsCandidate` has no claim-status field and pins its class
@@ -935,11 +961,11 @@ does not describe is how a residue disappears.
       producer-side guarantee, and it says nothing about a producer written
       later, by someone else, against the same store.
 
-      **OPEN — closing it is a schema change, not a doc change:** extend the
-      `CHECK` to `writer_class NOT IN ('llm_candidate','derivation') OR
-      claim_status = 'candidate'`, with a migration. Until then the write door
-      admits what `KIRRA-WM-PROMOTION-001` forbids, and only convention stops
-      it.
+      **CLOSED 2026-08-20 (schema v8).** It was closed as a schema change, as
+      that note required, and deliberately BEFORE 2a rather than with it: the
+      rule held only because no `derivation`-class producer existed yet, so
+      shipping the producer first would have made the bypass reachable in the
+      window between them.
 
       **`Corroboration(n)` is NOT 2a's to drive.** The axis folds *confirmed*
       `same_as`, so its first driver is promotion (2b) or an operator-declared
