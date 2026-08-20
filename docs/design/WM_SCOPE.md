@@ -1167,6 +1167,35 @@ does not describe is how a residue disappears.
          signature. The query-boundedness gate found it, not review. It is now
          the `relationship` point read on `PRIMARY KEY (low, high)`.
 
+      **Two more found on review of the PR**, both real and both the same
+      shape — a stated guarantee wider than its enforcement:
+
+      3. `relationship_from_row` validated `low`/`high` through the domain and
+         refused a non-canonical pair, but admitted **any**
+         `candidate_observation_id` and an **empty adjudicator** — while its own
+         doc said "refuses, never repairs". The reviewer's predicted mechanism
+         was wrong (an inadmissible id does not error downstream; `carriers`
+         matches nothing and the answer degrades to `Dangling`), and the wrong
+         mechanism is the worse one: `Dangling` reads as *"the evidence was
+         compacted"* when the truth is *"this row was edited"*. Both fields now
+         go through the same domain constructors the write side uses, with
+         `a_projection_row_with_an_inadmissible_citation_is_refused` and
+         `a_projection_row_signed_by_nobody_is_refused`.
+      4. The reducer's corpus rendering omitted `adjudicator` and the decided
+         instant's **clock domain**, so a reducer that hardcoded either would
+         have kept the semantics digest green. Adding the fields is the cheap
+         half and alone would have been ceremony — the corpus named ONE operator
+         on ONE clock, so a hardcoding reducer would still render identically.
+         `relationship_corpus` now VARIES both, with the odd values on the entry
+         that SURVIVES the fold (a fold is observable only through its final
+         state, so odd values on a withdrawn row would pin nothing), and
+         `the_relationship_corpus_catches_a_dropped_adjudicator_or_clock_domain`
+         is the control. `RelationshipFold` stays **v1**: the reducer is
+         byte-identical (its `source_pin` did not move) and v1 had never left
+         this PR, so there is no recorded history for the re-pinned
+         `corpus_digest` to contradict. A stronger corpus for an unchanged
+         reducer is not a behaviour change.
+
       **OPEN, and stated rather than implied: this projection has no domain
       consumer yet.** Rule 1 ("every new declaration needs a production
       consumer") is not satisfied by 5a alone; it is satisfied by the sequence

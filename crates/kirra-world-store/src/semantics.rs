@@ -264,7 +264,7 @@ pub const SEMANTICS: &[RuleSpec] = &[
     RuleSpec {
         rule: RuleId::RelationshipFold,
         version: 1,
-        corpus_digest: "0cc3e211f39f90c9e0243525d1e5a5d83449ed930fc72e50f474c60eb7797986",
+        corpus_digest: "db4975d3adc118885e0c180c58ac45311272df617e0b9f00333571b14cff3b95",
         source_pin: "e82c8a546104d622f71bb2c12e63670ad4c8a0733ac02eb88e2c7138b991b6b8",
         source_file: "crates/kirra-world-store/src/relationship_projection.rs",
         span: "relationship_fold",
@@ -822,6 +822,14 @@ pub fn render_provenance(tree: &crate::provenance_graph::ProvenanceTree) -> Stri
 ///   differently, which is what pins the choice to this version rather than to
 ///   a comment.
 ///
+/// The **adjudicator and the clock domain vary across entries**, and the entry
+/// that SURVIVES the fold (generation 4) is the one carrying the odd values.
+/// Both halves are load-bearing: a corpus where every decision named one
+/// operator on one clock renders identically under a reducer that hardcodes
+/// them, and a corpus where the odd values appear only on a withdrawn row
+/// renders identically too, because a fold is observable only through its
+/// final state.
+///
 /// The generation ORDER is load-bearing for the same reason
 /// [`world_current_corpus`] records: a fold is observable only through its
 /// FINAL state, so a divergence that later converges is invisible. Each of the
@@ -835,32 +843,103 @@ pub fn relationship_corpus() -> Vec<(i64, StoredAdjudication)> {
         )
         .expect("corpus pair")
     };
-    let decision = |a: &str, b: &str, outcome, ms: u64, candidate: &str| StoredAdjudication {
+    let decision = |a: &str,
+                    b: &str,
+                    outcome,
+                    ms: u64,
+                    domain: ClockDomain,
+                    adjudicator: &str,
+                    candidate: &str| StoredAdjudication {
         pair: pair(a, b),
         outcome,
         candidate_observation_id: candidate.to_owned(),
-        adjudicator: "corpus-operator".to_owned(),
-        decided_at: DomainInstant {
-            ms,
-            domain: ClockDomain::System,
-        },
+        adjudicator: adjudicator.to_owned(),
+        decided_at: DomainInstant { ms, domain },
     };
     use kirra_world::same_as_adjudication::Outcome;
+    let sys = ClockDomain::System;
     vec![
-        (1, decision("a", "b", Outcome::Promoted, 100, "cand-ab-1")),
-        (2, decision("b", "c", Outcome::Promoted, 101, "cand-bc-1")),
-        (3, decision("a", "b", Outcome::Rejected, 102, "cand-ab-1")),
-        (4, decision("a", "b", Outcome::Promoted, 103, "cand-ab-2")),
-        (5, decision("b", "c", Outcome::Unresolved, 104, "cand-bc-1")),
+        (
+            1,
+            decision(
+                "a",
+                "b",
+                Outcome::Promoted,
+                100,
+                sys,
+                "operator-1",
+                "cand-ab-1",
+            ),
+        ),
+        (
+            2,
+            decision(
+                "b",
+                "c",
+                Outcome::Promoted,
+                101,
+                sys,
+                "operator-1",
+                "cand-bc-1",
+            ),
+        ),
+        (
+            3,
+            decision(
+                "a",
+                "b",
+                Outcome::Rejected,
+                102,
+                sys,
+                "operator-1",
+                "cand-ab-1",
+            ),
+        ),
+        // The surviving row. Its adjudicator and its CLOCK DOMAIN both differ
+        // from every other entry, which is what makes the rendering able to see
+        // them -- see the doc above.
+        (
+            4,
+            decision(
+                "a",
+                "b",
+                Outcome::Promoted,
+                103,
+                ClockDomain::Boundary,
+                "operator-2",
+                "cand-ab-2",
+            ),
+        ),
+        (
+            5,
+            decision(
+                "b",
+                "c",
+                Outcome::Unresolved,
+                104,
+                sys,
+                "operator-1",
+                "cand-bc-1",
+            ),
+        ),
     ]
 }
 
 /// Render a folded relationship accumulator.
 ///
 /// Rendered rather than hashed at the assertion site so a failure shows **what**
-/// changed. Carries `decided_generation` and the cited candidate, not just the
-/// pair: a fold that kept the right pairs under the wrong decisions would
-/// otherwise render identically.
+/// changed. Carries **every field the projection persists** — the pair,
+/// `decided_generation`, the cited candidate, the adjudicator, and the decided
+/// instant with its CLOCK DOMAIN — because a fold that kept the right pairs
+/// under the wrong decisions would otherwise render identically.
+///
+/// The adjudicator and the domain were added on review of #1467. Adding the
+/// fields is only half of it and the cheaper half: a corpus in which every
+/// entry carries the same adjudicator and the same clock renders identically
+/// under a reducer that hardcodes them, so the fields would have been ceremony.
+/// [`relationship_corpus`] therefore VARIES both, and
+/// `the_relationship_corpus_catches_a_dropped_adjudicator_or_clock_domain` is
+/// the control that says so.
 #[must_use]
 pub fn render_relationships(rows: &BTreeMap<PairKey, ProjectedRelationship>) -> String {
     let mut out = String::new();
@@ -873,7 +952,13 @@ pub fn render_relationships(rows: &BTreeMap<PairKey, ProjectedRelationship>) -> 
         out.push(FIELD);
         out.push_str(&r.candidate_observation_id);
         out.push(FIELD);
+        out.push_str(&r.adjudicator);
+        out.push(FIELD);
         out.push_str(&r.decided_at.ms.to_string());
+        out.push(FIELD);
+        out.push_str(relationship_projection::clock_domain_token(
+            r.decided_at.domain,
+        ));
         out.push(ROW);
     }
     out

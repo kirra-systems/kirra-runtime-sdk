@@ -787,6 +787,76 @@ fn the_relationship_corpus_catches_transitive_closure() {
     assert_variant_is_caught(RuleId::RelationshipFold, "transitive_closure", &closed);
 }
 
+/// **A rendering that drops the adjudicator, or the clock domain, or both.**
+///
+/// Raised on review of #1467: the first draft rendered neither, so a reducer
+/// that hardcoded an adjudicator or coerced every instant onto one clock would
+/// have folded the corpus to the same digest.
+///
+/// The variant here is a rendering rather than a fold, deliberately. What is
+/// under test is whether the CORPUS carries enough variation for those fields
+/// to be observable — and that question is answered by removing them from the
+/// rendering and seeing whether anything moves. If the corpus named one
+/// operator on one clock, this test would fail, which is exactly the signal it
+/// exists to give.
+#[test]
+fn the_relationship_corpus_catches_a_dropped_adjudicator_or_clock_domain() {
+    use kirra_world_store::relationship_projection::{self, PairKey, ProjectedRelationship};
+    use std::collections::BTreeMap;
+
+    fn render_without(
+        rows: &BTreeMap<PairKey, ProjectedRelationship>,
+        adjudicator: bool,
+        domain: bool,
+    ) -> String {
+        let mut out = String::new();
+        for ((low, high), r) in rows {
+            out.push_str(low);
+            out.push('\u{1f}');
+            out.push_str(high);
+            out.push('\u{1f}');
+            out.push_str(&r.decided_generation.to_string());
+            out.push('\u{1f}');
+            out.push_str(&r.candidate_observation_id);
+            out.push('\u{1f}');
+            if adjudicator {
+                out.push_str(&r.adjudicator);
+            }
+            out.push('\u{1f}');
+            out.push_str(&r.decided_at.ms.to_string());
+            out.push('\u{1f}');
+            if domain {
+                out.push_str(relationship_projection::clock_domain_token(
+                    r.decided_at.domain,
+                ));
+            }
+            out.push('\u{1e}');
+        }
+        out
+    }
+
+    let folded =
+        relationship_projection::fold_all(relationship_corpus().iter().map(|(g, d)| (*g, d)));
+    // Sanity: rendering WITH both must reproduce the real one, or the variants
+    // below would be differing for the wrong reason.
+    assert_eq!(
+        render_without(&folded, true, true),
+        corpus_rendering(RuleId::RelationshipFold),
+        "the variant renderer must agree with the real one when it drops nothing"
+    );
+
+    assert_variant_is_caught(
+        RuleId::RelationshipFold,
+        "adjudicator_dropped",
+        &render_without(&folded, false, true),
+    );
+    assert_variant_is_caught(
+        RuleId::RelationshipFold,
+        "clock_domain_dropped",
+        &render_without(&folded, true, false),
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Coverage of the control table itself
 // ---------------------------------------------------------------------------

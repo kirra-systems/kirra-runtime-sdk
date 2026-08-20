@@ -4103,6 +4103,32 @@ fn relationship_from_row(
             detail: format!("stored pair ({low}, {high}) is not in canonical order"),
         });
     }
+    // The citation, through the same constructor the WRITE side parses it with
+    // (`decode_same_as_adjudication`). Checked rather than copied out: this
+    // string is the handle a reader follows back to the judged proposal, and an
+    // inadmissible one does NOT error downstream -- `carriers` simply matches
+    // nothing and the answer degrades to `Dangling`, which reads as "the
+    // evidence was compacted" when the truth is "this row was edited". That is
+    // the silent rewrite this decoder claims not to do.
+    //
+    // `ObservationId::new` does not normalize (`reference::admit`, and its
+    // `surrounding_whitespace_is_preserved_not_trimmed` test), so unlike the
+    // pair there is no repaired-vs-stored comparison to make.
+    kirra_world::reference::ObservationId::new(candidate_observation_id.as_str()).map_err(|e| {
+        StoreError::CorruptRelationshipProjectionRow {
+            detail: format!("candidate_observation_id `{candidate_observation_id}`: {e}"),
+        }
+    })?;
+    // And the adjudicator, through the DOMAIN constructor rather than an
+    // `is_empty` here, so "a decision nobody signed" has one definition and this
+    // path cannot drift from the one the write side enforces.
+    kirra_world::same_as_adjudication::AdjudicationAuthority::new(
+        kirra_world::same_as_adjudication::AUTHORIZED_ADJUDICATOR_CLASS,
+        adjudicator.clone(),
+    )
+    .map_err(|e| StoreError::CorruptRelationshipProjectionRow {
+        detail: format!("adjudicator: {e}"),
+    })?;
     // The inverse of the fold's write-side refusal. A negative stored value is
     // not a reading on any clock; the fold cannot write one.
     let decided_ms =

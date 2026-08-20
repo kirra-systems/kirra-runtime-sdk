@@ -867,3 +867,76 @@ fn a_later_carrier_of_the_same_id_does_not_resurrect_compacted_evidence() {
         ),
     }
 }
+
+/// **A projection row whose citation is not an admissible `ObservationId` is
+/// refused.**
+///
+/// Raised by review on #1467. The mechanism the comment predicted — an error
+/// downstream — is not what happens, and that is precisely why this matters:
+/// `carriers` on a garbage id simply matches nothing, so
+/// `relationship_provenance` would answer `Dangling`, which an operator reads
+/// as *"the evidence was compacted"* when the truth is *"this row was edited"*.
+/// A wrong answer, delivered confidently, is worse than an error.
+#[test]
+fn a_projection_row_with_an_inadmissible_citation_is_refused() {
+    let mut store = two_tracks_and_a_candidate("bad-citation");
+    decide(
+        &mut store,
+        "1",
+        "cand-obs-1",
+        Outcome::Promoted,
+        T0 as u64 + 10,
+    );
+    store.fold_relationship_projection().expect("fold");
+
+    store
+        .raw_execute_for_test("UPDATE relationships_projection SET candidate_observation_id = ''")
+        .expect("blank the citation");
+
+    match store.load_relationship_projection() {
+        Err(StoreError::CorruptRelationshipProjectionRow { detail }) => assert!(
+            detail.contains("candidate_observation_id"),
+            "the refusal must name the field: {detail}"
+        ),
+        other => panic!("an inadmissible citation must be refused: {other:?}"),
+    }
+    // And through the point read too, not only the whole-table load -- the two
+    // share `relationship_from_row` precisely so they cannot come to disagree
+    // about what a stored row means, and this is what holds them to it.
+    assert!(matches!(
+        store.relationship(&pair("track-a", "track-b")),
+        Err(StoreError::CorruptRelationshipProjectionRow { .. })
+    ));
+}
+
+/// **A projection row signed by nobody is refused.**
+///
+/// `AdjudicationAuthority::new` refuses an empty adjudicator at write time
+/// under `KIRRA-WM-PROMOTION-001`; a read path that admitted one would let a
+/// confirmed identity exist with no one accountable for it. The check goes
+/// through that same domain constructor rather than an `is_empty` at the
+/// decoder, so the two cannot drift.
+#[test]
+fn a_projection_row_signed_by_nobody_is_refused() {
+    let mut store = two_tracks_and_a_candidate("no-adjudicator");
+    decide(
+        &mut store,
+        "1",
+        "cand-obs-1",
+        Outcome::Promoted,
+        T0 as u64 + 10,
+    );
+    store.fold_relationship_projection().expect("fold");
+
+    store
+        .raw_execute_for_test("UPDATE relationships_projection SET adjudicator = '   '")
+        .expect("blank the adjudicator");
+
+    match store.load_relationship_projection() {
+        Err(StoreError::CorruptRelationshipProjectionRow { detail }) => assert!(
+            detail.contains("adjudicator"),
+            "the refusal must name the field: {detail}"
+        ),
+        other => panic!("an unsigned decision must be refused: {other:?}"),
+    }
+}
