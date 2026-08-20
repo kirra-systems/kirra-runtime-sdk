@@ -97,6 +97,7 @@
 use std::collections::BTreeMap;
 
 use kirra_world::observation::DomainInstant;
+use kirra_world::reference::EntityId;
 use kirra_world::same_as_adjudication::Outcome;
 use kirra_world::same_as_candidate::CandidatePair;
 
@@ -121,6 +122,14 @@ CREATE TABLE IF NOT EXISTS relationships_projection (
     decided_at_domain        TEXT    NOT NULL,
     PRIMARY KEY (low, high)
 );
+-- The REVERSE index, and it is load-bearing for box 5b's boundedness rather
+-- than an optimisation. `PRIMARY KEY (low, high)` indexes `low` only, so
+-- "which entities is `e` the same as" -- which must look in BOTH columns --
+-- would scan the whole projection for the `high = ?` half. A `LIMIT` bounds the
+-- rows RETURNED, never the rows SCANNED, which is exactly the distinction
+-- defect #1440 turned on.
+CREATE INDEX IF NOT EXISTS relationships_projection_high
+    ON relationships_projection (high, low);
 "#;
 
 /// This projection's checkpoint name.
@@ -291,4 +300,59 @@ pub fn state_digest_of(rows: &BTreeMap<PairKey, ProjectedRelationship>) -> Strin
         buf.push('\u{1e}');
     }
     crate::sha256_hex(buf.as_bytes())
+}
+
+/// The most neighbours one [`related`] answer carries.
+///
+/// [`related`]: crate::WorldStore::related
+///
+/// Same value as [`crate::provenance_edges::MAX_CITATIONS_PAGE`] and for the
+/// same reason: it is a page ceiling on a set whose size is a property of the
+/// fleet, not of the question. An entity can be adjudicated the same as many
+/// others, so there is no structural cardinality bound to lean on the way
+/// `relationship` leans on the primary key.
+pub const MAX_RELATED: usize = 256;
+
+/// One entity `related` found, and the decision that put it there.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RelatedEntity {
+    /// The OTHER entity — the one that is not the subject of the question.
+    ///
+    /// Derivable from `relationship.pair` by the caller, and provided anyway
+    /// because deriving it means asking "was my entity the low or the high?" at
+    /// every call site, and getting that backwards silently answers with the
+    /// entity the caller already had.
+    pub other: EntityId,
+    /// The relationship itself, so a caller can see WHICH decision it rests on
+    /// without a second lookup.
+    pub relationship: ProjectedRelationship,
+}
+
+/// Every entity one entity is currently adjudicated the same as.
+///
+/// **Truncation is carried, not inferred.** A full page and a cut-short page
+/// are the same length and mean different things — [`crate::provenance_graph`]'s
+/// `Carriers` records the same decision for the same reason.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RelatedNeighbours {
+    /// The entity asked about.
+    pub of: EntityId,
+    /// Its neighbours, ascending by the other entity's id.
+    pub neighbours: Vec<RelatedEntity>,
+    /// Whether more exist than [`MAX_RELATED`] admits.
+    pub truncated: bool,
+}
+
+impl RelatedNeighbours {
+    /// Whether this entity is adjudicated the same as nothing.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.neighbours.is_empty()
+    }
+
+    /// How many neighbours this answer carries.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.neighbours.len()
+    }
 }

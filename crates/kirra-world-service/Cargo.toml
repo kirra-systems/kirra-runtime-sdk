@@ -23,3 +23,10 @@ kirra-explain-types = { path = "../kirra-explain-types" }
 # which is why the refusal below has to be provoked rather than seeded.
 [dev-dependencies]
 kirra-world-store = { path = "../kirra-world-store", features = ["test-support"] }
+# Box 5b's end-to-end test drives the REAL production chain -- a matcher
+# proposing candidates, an operator adjudicating them -- rather than
+# hand-appending adjudication rows. A `Related` query proven only against
+# fixtures would prove the query works on data no producer can create, which is
+# the exact gap the pre-5a chain audit found. Dev-only: the read boundary does
+# not depend on the write path at runtime.
+kirra-world-ingest = { path = "../kirra-world-ingest" }

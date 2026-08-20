@@ -76,7 +76,8 @@ use crate::cursor::{resolve_cursor, CursorFamily, PageCursor};
 use crate::freshness::FreshnessSource;
 use crate::lineage::{LineageRef, LineageResolution};
 use crate::read_view::{
-    AskError, ComposedLookup, HistoryLookup, SummaryLookup, TemporalLookup, WorldView,
+    AskError, ComposedLookup, HistoryLookup, RelatedLookup, SummaryLookup, TemporalLookup,
+    WorldView,
 };
 
 mod sealed {
@@ -283,6 +284,48 @@ impl WorldQuery for SubjectSummary {
 
     fn execute(self, engine: &QueryEngine<'_>) -> Result<Self::Output, AskError> {
         engine.view().subject_summary(&self.subject)
+    }
+}
+
+/// **What one entity is currently adjudicated the same as** — box 5b.
+///
+/// The first typed query over a SEMANTIC projection rather than over the claim
+/// log, and what makes box 5a's `relationships_projection` a thing production
+/// code can reach. Before this, the projection existed and nothing could ask it
+/// anything through the sanctioned door.
+///
+/// # No page field, and that is not the `SubjectSummary` argument
+///
+/// `SubjectSummary` has no cursor because there is structurally one row per
+/// subject. That reasoning does NOT apply here: an entity can be adjudicated
+/// the same as many others, so the set genuinely grows.
+///
+/// The bound is a page CEILING carried on the answer
+/// ([`RelatedLookup::is_truncated`]) rather than a cursor on the request. That
+/// is a deliberate first slice: a cursor is a contract about stable ordering
+/// under concurrent folds, which box 3d's cursor work took real care to get
+/// right, and adding one before a consumer needs to walk past 256 same_as
+/// neighbours of a single entity would be inventing a dimension nobody has
+/// asked for. What is NOT deferred is honesty about the cap — truncation is
+/// carried, so a caller can never mistake a cut-short page for a complete one.
+///
+/// If a consumer does need to walk past the ceiling, the cursor belongs here
+/// and `RelatedLookup` is where it would surface.
+///
+/// [`RelatedLookup::is_truncated`]: crate::read_view::RelatedLookup::is_truncated
+#[derive(Debug, Clone)]
+pub struct Related {
+    /// The entity to ask about.
+    pub entity: String,
+}
+
+impl sealed::Sealed for Related {}
+
+impl WorldQuery for Related {
+    type Output = RelatedLookup;
+
+    fn execute(self, engine: &QueryEngine<'_>) -> Result<Self::Output, AskError> {
+        engine.view().related(&self.entity)
     }
 }
 

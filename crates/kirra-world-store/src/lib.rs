@@ -3214,6 +3214,100 @@ impl WorldStore {
         Ok(out)
     }
 
+    /// **Every entity one entity is currently adjudicated the same as** — 5b.
+    ///
+    /// The read the typed `Related` query dispatches into. Answers *"what is
+    /// `entity` the same as, according to the promoted decisions that currently
+    /// stand"*.
+    ///
+    /// # Bounded, and the index is part of the bound
+    ///
+    /// A pair is stored once, canonically, so the subject may be either column
+    /// and both must be looked in. `PRIMARY KEY (low, high)` indexes `low`
+    /// only, so the `high = ?` half would SCAN without
+    /// `relationships_projection_high`. A `LIMIT` bounds the rows returned and
+    /// not the rows scanned — #1440's distinction — so the index is load-bearing
+    /// for the boundedness claim rather than a speed-up.
+    ///
+    /// Capped at [`MAX_RELATED`] with the truncation flag CARRIED. It probes
+    /// one over the ceiling, for `citations_of`'s reason: a set of exactly
+    /// `MAX_RELATED` is complete, and inferring truncation from the length
+    /// would report it cut short.
+    ///
+    /// # The two halves cannot double-count
+    ///
+    /// `UNION ALL` rather than `UNION`, deliberately. A row could only appear
+    /// in both halves if `low == high`, and `CandidatePair::new` refuses a pair
+    /// of one entity — so the arms are disjoint by construction and paying for
+    /// a de-duplicating sort would be paying to prevent something the domain
+    /// already prevents. Asserted by
+    /// `the_two_index_halves_are_disjoint_so_union_all_cannot_double_count`.
+    ///
+    /// # Errors
+    ///
+    /// [`StoreError::CorruptRelationshipProjectionRow`] if a row cannot be read
+    /// back faithfully, or [`StoreError::Sqlite`] on storage failure.
+    ///
+    /// [`MAX_RELATED`]: relationship_projection::MAX_RELATED
+    pub fn related(
+        &self,
+        entity: &kirra_world::reference::EntityId,
+    ) -> Result<relationship_projection::RelatedNeighbours, StoreError> {
+        let mut out = relationship_projection::RelatedNeighbours {
+            of: entity.clone(),
+            neighbours: Vec::new(),
+            truncated: false,
+        };
+        if !self.has_relationship_projection()? {
+            return Ok(out);
+        }
+        // Self-healing for a projection installed before this index existed.
+        // Note what this deliberately does NOT do: it cannot create the
+        // projection TABLE, so a store that has never folded still holds only
+        // the event log and ADR-0041 D-20's `log_only_bytes` is untouched. An
+        // `ensure_relationship_projection()` here would have installed the
+        // table on a store that never projects, moving that figure for
+        // everyone. Proven by `related_heals_a_missing_reverse_index`.
+        self.conn.execute_batch(
+            "CREATE INDEX IF NOT EXISTS relationships_projection_high
+                 ON relationships_projection (high, low);",
+        )?;
+
+        let probe = i64::try_from(relationship_projection::MAX_RELATED)
+            .unwrap_or(i64::MAX)
+            .saturating_add(1);
+        let cols = "low, high, decided_generation, candidate_observation_id,
+                    adjudicator, decided_at_ms, decided_at_domain";
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT {cols} FROM relationships_projection WHERE low = ?1
+             UNION ALL
+             SELECT {cols} FROM relationships_projection WHERE high = ?1
+             ORDER BY low ASC, high ASC
+             LIMIT ?2"
+        ))?;
+        let mut rows = stmt.query(params![entity.as_str(), probe])?;
+        while let Some(r) = rows.next()? {
+            if out.neighbours.len() == relationship_projection::MAX_RELATED {
+                out.truncated = true;
+                break;
+            }
+            let relationship = relationship_from_row(r)?;
+            // The OTHER entity, decided once here rather than at every call
+            // site. A row reaches this loop only because one of its columns
+            // equals `entity`, so the else-branch is the low-match case.
+            let other = if relationship.pair.low() == entity {
+                relationship.pair.high().clone()
+            } else {
+                relationship.pair.low().clone()
+            };
+            out.neighbours.push(relationship_projection::RelatedEntity {
+                other,
+                relationship,
+            });
+        }
+        Ok(out)
+    }
+
     /// A digest over the relationship projection, in key order.
     ///
     /// # Errors

@@ -122,6 +122,18 @@ pub enum QueryKind {
     /// than a clock and a budget. That module records why the two are separate
     /// types sharing this enum instead of one struct holding the union.
     SubjectLineage,
+    /// [`crate::read_view::WorldView::related`] — what one entity is currently
+    /// adjudicated the same as.
+    ///
+    /// The first family over a SEMANTIC projection rather than over the claim
+    /// log, which is why its rule set shares nothing with the others: it does
+    /// not fold `world_current`, does not resolve object identity, and does not
+    /// apply admissibility. What it depends on is the relationship fold, and
+    /// only that.
+    ///
+    /// Not a ref family. Like [`Self::AsOfSubject`] it exists here because its
+    /// answers carry a dependency set, and every set is derived in one place.
+    Related,
 }
 
 /// **A reproducible descriptor for one answer.**
