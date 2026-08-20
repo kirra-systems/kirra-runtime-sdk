@@ -1210,6 +1210,93 @@ does not describe is how a residue disappears.
       and protected) and does not decide it. The measurement the ruling needs now
       exists: `a_promoted_relationship_survives_compaction_of_its_candidate`
       shows exactly what the projection inherits when the evidence goes.
+      **RULED — see `KIRRA-WM-EVIDENCE-RETENTION-001` below.**
+
+- [x] **`KIRRA-WM-EVIDENCE-RETENTION-001` — RULED 2026-08-20.**
+      **Decision durability is not evidence durability.**
+
+      > Promotion does **not** protect supporting candidate evidence from
+      > compaction. The adjudication remains durable and authoritative; the
+      > candidate evidence may age out under retention policy, and provenance
+      > must degrade honestly when that happens.
+
+      The decision survives because it is *itself* protected adjudication
+      evidence (`retention_class = "adjudication"`, and
+      `compaction::is_protected` holds for every class but `"raw"`), not because
+      anything downstream is pinning the proposal that motivated it.
+
+      **The caveat, which is the operative half:**
+
+      > Compaction may degrade the ability to explain WHY a promotion was made,
+      > but it must never silently alter WHETHER the promoted relationship
+      > exists.
+
+      # Why the alternative was refused
+
+      Protecting every supporting candidate would couple identity durability to
+      raw-evidence retention and produce a **reachability-based retention
+      graph**: one promotion would begin pinning evidence indefinitely, and every
+      future retention decision would then have to understand adjudication
+      citation reachability before it could delete anything. That is a large,
+      permanent constraint on the retention planner bought to preserve
+      explanatory detail — which Tier 4 already reports the loss of, honestly,
+      for free.
+
+      # What makes this a ruling and not a description
+
+      **Nothing changed in the code.** This ratifies behaviour 5a already had,
+      and a no-change ruling has one failure mode: nothing stops it drifting.
+      So the caveat is pinned by the exact behaviour 5a measured, in
+      `crates/kirra-world-ingest/tests/relationship_projection.rs`:
+
+      | Ruled | Pinned by |
+      |---|---|
+      | the promoted relationship survives candidate compaction | `a_promoted_relationship_survives_compaction_of_its_candidate` |
+      | the protected adjudication row remains | that test compacts ONLY the candidate's generation; the decision's class refuses |
+      | existence is **byte-identically** unaltered | `compaction_degrades_the_explanation_and_never_the_relationship` — the projection state digest before compaction equals the digest after compaction AND a full rebuild |
+      | provenance does not fabricate resolution | the same test: `Resolved` before, never `Resolved` after |
+      | it becomes `Dangling { PossiblyCompacted }` | the same test, naming the span |
+      | it does **not** collapse to `NeverVisible` | the same test — §11.3's forbidden collapse |
+      | the identity decision stays valid | `KIRRA-WM-IDENTITY-FRESHNESS-001` (`Timeless`) |
+
+      The digest comparison is what makes the caveat mechanical rather than
+      aspirational: a change that altered *whether* the relationship exists moves
+      the digest, and a change that only degraded the *explanation* does not.
+
+      # Scope, stated so it is not read wider than it is
+
+      This rules the relationship between **promotion and compaction**. It does
+      not rule how long raw candidates live — that is retention policy, and
+      `KIRRA-WM-IDENTITY-FRESHNESS-001` already declined to rule whether a
+      matcher's PROPOSAL goes stale.
+
+      # Found while recording this ruling: TWO precedence rules now disagree
+
+      Not part of this ruling, and surfaced here because the **next** step is
+      where it bites.
+
+      | Rule | Promoted-then-rejected | Production consumer |
+      |---|---|---|
+      | `confirmed_relations` (2c, pure) | still confirmed — no precedence | **none** (tests only) |
+      | `relationship_projection::fold_all` (5a) | withdrawn — last decision wins | `relationships_projection` |
+
+      5a decided the withdrawal question for its own fold, carefully, and in
+      isolation — without checking what the neighbouring rule over the same
+      evidence already did. That is the "second answer that drifts" 2c's own
+      docs name as the thing to avoid, created by the box that quoted them.
+
+      **It is latent, not live**, and the difference was established by RUNNING
+      it rather than reading: `promote_confirmed_same_as` has no production
+      caller, and the entity fold consumes `kind = "identity_adjudication"`
+      while `adjudicate_same_as` writes `kind = "same_as_adjudication"` — so
+      after a promote-then-reject, `resolve` answers `Unknown`, not a stale
+      merge. No shipped path can be asked the same question twice today.
+
+      What it is, is **a trap for the typed `Related` query**, which must pick a
+      source of truth from two that do not agree. Pinned by
+      `the_two_precedence_rules_disagree_and_only_one_has_a_production_consumer`,
+      next to 2b's existing no-precedence pin, so whoever rules on 2b's owed
+      question confronts both halves at once.
 
 - [x] **2c — Deterministic resolution over promoted identity. DONE 2026-08-20.**
       `kirra_world::adjudication::promote_confirmed_same_as` is the join: it asks

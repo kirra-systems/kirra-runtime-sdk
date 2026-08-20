@@ -294,6 +294,12 @@ fn re_affirming_a_pair_keeps_the_earliest_beginning() {
 /// This test exists so the behaviour cannot change by accident before someone
 /// rules on it. If last-write-wins is the intent, this test is the one that
 /// should fail first, and it should be changed deliberately in 2b.
+///
+/// **Box 5a has since answered the same question the other way for its own
+/// projection** — see
+/// `the_two_precedence_rules_disagree_and_only_one_has_a_production_consumer`
+/// immediately below, which pins the disagreement rather than leaving it to be
+/// discovered by whoever wires the next consumer.
 #[test]
 fn promoted_then_rejected_still_promotes_today_which_is_a_ruling_2b_owes() {
     let c = candidate("a", "b");
@@ -307,6 +313,87 @@ fn promoted_then_rejected_still_promotes_today_which_is_a_ruling_2b_owes() {
         promoted.len(),
         1,
         "today a later rejection does not un-confirm: {promoted:?}"
+    );
+}
+
+/// **The two precedence rules over `same_as` decisions DISAGREE.** Recorded,
+/// not endorsed — and measured, not inferred.
+///
+/// Two rules now read the same adjudication history and answer differently
+/// about a pair that was promoted and later rejected:
+///
+/// | Rule | Promoted-then-rejected | Consumer |
+/// |---|---|---|
+/// | `confirmed_relations` (2c, pure) | **still confirmed** — no precedence, one `Promoted` anywhere confirms | tests only |
+/// | `relationship_projection::fold_all` (5a) | **withdrawn** — last decision wins | `relationships_projection` |
+///
+/// # This is latent, not live, and the distinction is load-bearing
+///
+/// Stating it precisely because "two projections disagree" would be a much
+/// more serious claim than what is actually true, and the difference was
+/// established by running it rather than by reading:
+///
+/// * `promote_confirmed_same_as` has **no production caller** — every call site
+///   in the tree is a test.
+/// * The entity fold consumes `kind = "identity_adjudication"`, while
+///   `WorldStore::adjudicate_same_as` writes `kind = "same_as_adjudication"`.
+///   Different kinds, so the store's entity projection never sees a `same_as`
+///   decision at all: after a promote-then-reject, `resolve` answers `Unknown`,
+///   not a stale merge.
+///
+/// So no shipped path today can be asked the same question twice and get two
+/// answers. What exists is a **trap for the next step**: the typed `Related`
+/// query has to choose a source of truth, and the two available sources do not
+/// agree. Choosing by accident is exactly how the second answer that drifts
+/// gets created — which is the hazard 2c's own docs name and decline to create.
+///
+/// This test fails the moment either rule changes, so whoever rules on 2b's
+/// owed question has to confront both halves at once instead of one.
+#[test]
+fn the_two_precedence_rules_disagree_and_only_one_has_a_production_consumer() {
+    use kirra_world::same_as_adjudication::confirmed_relations;
+    use kirra_world_store::relationship_projection;
+    use kirra_world_store::same_as_adjudication_record::StoredAdjudication;
+
+    let c = candidate("a", "b");
+    let history = [
+        decide(&c, Outcome::Promoted, 10),
+        decide(&c, Outcome::Rejected, 20),
+    ];
+
+    // Rule 1 -- 2c's pure promotion path. No precedence.
+    assert_eq!(
+        confirmed_relations(&history).len(),
+        1,
+        "2c: one Promoted anywhere confirms the pair, however many rejections follow"
+    );
+
+    // Rule 2 -- 5a's fold, over the SAME decisions in the same order.
+    let stored: Vec<StoredAdjudication> = history
+        .iter()
+        .map(|a| StoredAdjudication {
+            pair: a.pair().clone(),
+            outcome: a.outcome(),
+            candidate_observation_id: a.candidate_observation_id().as_str().to_owned(),
+            adjudicator: a.authority().adjudicator().to_owned(),
+            decided_at: a.decided_at(),
+        })
+        .collect();
+    let folded = relationship_projection::fold_all(
+        stored.iter().enumerate().map(|(i, d)| (i as i64 + 1, d)),
+    );
+    assert!(
+        folded.is_empty(),
+        "5a: the newest authorized decision governs, so the pair is withdrawn: {folded:?}"
+    );
+
+    // The disagreement itself, asserted rather than left implicit in the two
+    // numbers above -- so the failure message says what is wrong, not just that
+    // a count moved.
+    assert_ne!(
+        confirmed_relations(&history).len(),
+        folded.len(),
+        "if these ever agree, one of the two precedence rules changed and this          pin should be retired deliberately rather than deleted to make a build green"
     );
 }
 
