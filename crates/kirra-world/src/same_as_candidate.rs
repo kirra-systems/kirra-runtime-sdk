@@ -52,19 +52,23 @@ use crate::relationship::Predicate;
 /// Not caller-chosen: a matcher is a derivation over recorded evidence, and
 /// pinning the class here means a producer on this path cannot select another.
 ///
-/// **Correction, found in review of 2b.** An earlier version of this comment
-/// said `KIRRA-WM-PROMOTION-001` "bars `derivation + confirmed` at the write
-/// door". **It does not.** `world_events` carries only
-/// `CHECK (writer_class <> 'llm_candidate' OR claim_status = 'candidate')`, so
-/// the store ACCEPTS `derivation` + `confirmed` today. The ruling forbids it;
-/// the schema does not yet enforce it.
+/// **Enforced as of schema v8** (2026-08-20). The history is kept because it is
+/// how the gap was found: an earlier version of this comment said
+/// `KIRRA-WM-PROMOTION-001` "bars `derivation + confirmed` at the write door",
+/// a review corrected it to "it does not", and for a while the store genuinely
+/// ACCEPTED that pairing while the ruling forbade it.
 ///
-/// What actually holds the line *here* is the type: [`SameAsCandidate`] has no
-/// claim-status field, so this path cannot express a confirmed candidate at
-/// all. That is a producer-side guarantee and it does not generalise to a
-/// producer written later against the same store — which is exactly what a
-/// schema `CHECK` would cover. Tracked as an open item in `WM_SCOPE.md` §5 2a;
-/// closing it is a migration, not a comment.
+/// Two independent mechanisms now hold the line, and the pair is the point:
+///
+/// * **The type**, here — [`SameAsCandidate`] has no claim-status field, so this
+///   path cannot express a confirmed candidate. A producer-side guarantee that
+///   does not generalise to a producer written later against the same store.
+/// * **The store** — `SCHEMA_V8_MIGRATION` installs a `BEFORE INSERT` trigger
+///   refusing `derivation` + `confirmed`, which is exactly the case the type
+///   cannot reach.
+///
+/// Neither is redundant: the type system does not reach raw SQL, and SQL does
+/// not reach a caller's intent.
 pub const CANDIDATE_SOURCE_CLASS: SourceClass = SourceClass::Derivation;
 
 /// The predicate every candidate carries.

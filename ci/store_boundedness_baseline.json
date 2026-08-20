@@ -52,6 +52,10 @@
       "class": "operational",
       "why": "Write path."
     },
+    "append_same_as_candidate": {
+      "class": "operational",
+      "why": "A write, classified with append and append_adjudication for the same reason: it is not a query and answers no domain question. One row per call, so there is nothing to bound -- the size of the write does not vary with the size of the store."
+    },
     "as_of": {
       "class": "bounded",
       "why": "One subject at one bitemporal point. Same PRIMARY KEY bound as `current`."
@@ -159,6 +163,18 @@
     "history_page": {
       "class": "bounded",
       "why": "Box 3d's bounded replacement for `history`. Narrows in SQL with `generation > cursor` and `LIMIT limit + 1` rather than fetching the record and truncating — #1440's lesson, since truncating after the fetch bounds the ANSWER while leaving the WORK unbounded, which is what made all three defects invisible. The boundary decision is `lineage::boundary_for`, shared with the lineage family so the off-by-one has one implementation."
+    },
+    "identifier_agreements": {
+      "class": "operational",
+      "why": "Box 2a's producer-side EVIDENCE SURVEY, not a domain question -- classified with fold and the backfills rather than with the query families, because no caller is asking Kirra World what is true; a matcher is reading the log it will propose from. Bounded regardless: the caller's limit is pushed into the statement as LIMIT ?2, so the ceiling is SQLite's and a full page means truncation, never completeness."
+    },
+    "load_same_as_candidate": {
+      "class": "bounded",
+      "why": "A point read keyed on observation_id with LIMIT 1 in the statement -- at most one row by construction, not a set trimmed after fetching. Bounded rather than operational because it answers a question ABOUT a claim (is this observation a derivation-class same_as candidate, and what does it propose), which is what box 2b's adjudicator will ask before it may judge."
+    },
+    "same_as_candidate_exists": {
+      "class": "operational",
+      "why": "Box 2a's producer-side idempotence point-read. EXISTS over one canonical pair plus matcher version, so it returns at most one row by construction; operational for the same reason as identifier_agreements -- a producer asking 'have I already said this', not a consumer asking what is true."
     },
     "history_whole": {
       "class": "unbounded",

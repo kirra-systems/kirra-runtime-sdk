@@ -2642,6 +2642,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "kirra-world-ingest"
+version = "0.1.0"
+dependencies = [
+ "kirra-world",
+ "kirra-world-store",
+]
+
+[[package]]
 name = "kirra-world-retention-service"
 version = "0.1.0"
 dependencies = [
