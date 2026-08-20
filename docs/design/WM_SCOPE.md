@@ -973,7 +973,34 @@ does not describe is how a residue disappears.
       reversal); reversing an actual promotion is existing `SplitEntity`;
       `ForgetEntity` is erasure and is not a reversal mechanism.
 
-- [ ] **2c — Deterministic resolution over promoted identity.** Rebuild-from-log
+- [x] **2c — Deterministic resolution over promoted identity. DONE 2026-08-20.**
+      `kirra_world::adjudication::promote_confirmed_same_as` is the join: it asks
+      `confirmed_relations` WHICH pairs are confirmed and turns each into a
+      `MergeEntities` the entity fold and `resolution::resolve` already
+      understand. **No second resolver and no second graph** — 2d's precedent.
+      Direction is canonical (`CandidatePair` is `low <= high`, so `high` merges
+      into `low`, always), which is the determinism 2c demands rather than a
+      claim that the lower id is better. Provenance is carried: the merge's
+      `Justification` is the union of the observations the promoting
+      adjudications actually cited. Cross-clock-domain promotions of one pair are
+      REFUSED (`PromotionDomainsDiffer`) rather than ordered by raw milliseconds.
+      **The acceptance proof is behavioural, deliberately.** Box 2b sat in the
+      orphan baseline for weeks, and 2a's own entry had been retired because 2b
+      *named* its types while doing nothing — module reachability mistaken for
+      integration, in this exact chain, before the gate could tell them apart.
+      So `a_confirmed_same_as_changes_what_b_resolves_to` runs the same log with
+      and without the promotion and asserts `resolve` gives two different
+      answers. Mutations: a no-op promotion kills it (plus the evidence and
+      earliest-beginning controls); promoting regardless of `Outcome` kills
+      exactly the rejection control and nothing else.
+      **One thing 2b still owes a ruling on**, pinned rather than decided here:
+      `confirmed_relations` applies no precedence, so a pair promoted and then
+      REJECTED is still confirmed. `promoted_then_rejected_still_promotes_today_which_is_a_ruling_2b_owes`
+      records that so it cannot change by accident. 2c consumes 2b's verdict
+      rather than re-deriving it — restating the predicate here would create a
+      second answer that drifts.
+
+      *Original scope, for the record:* Rebuild-from-log
       must stay exact: the same log yields the same identity, with no dependence
       on matcher output, tie-break order or wall-clock. The existing
       `resolution::resolve` invariants are the floor, not a new standard.

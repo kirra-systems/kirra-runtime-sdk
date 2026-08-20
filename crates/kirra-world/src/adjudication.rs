@@ -104,6 +104,10 @@ use crate::entity::Lifecycle;
 use crate::observation::DomainInstant;
 use crate::reference::EntityId;
 use crate::reference::ObservationId;
+// Box 2c: the promotion boundary consumes 2b's verdict and 2a's canonical pair.
+use crate::same_as_adjudication::{confirmed_relations, SameAsAdjudication};
+use crate::same_as_candidate::CandidatePair;
+use core::cmp::Ordering;
 
 // ---------------------------------------------------------------------------
 // Errors
@@ -116,6 +120,18 @@ use crate::reference::ObservationId;
 /// back to the payload to work out which id was the problem.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AdjudicationError {
+    /// Box 2c: one pair's promoting adjudications sit on different clock
+    /// domains, so "when did this identity begin" has no answer.
+    ///
+    /// Refused rather than resolved by raw milliseconds. `DomainInstant`
+    /// declines cross-domain comparison because the ordering is not merely
+    /// imprecise but meaningless, and a promotion that picked one anyway would
+    /// stamp an identity with a beginning nobody can defend.
+    PromotionDomainsDiffer {
+        /// The pair whose promotions could not be ordered.
+        pair: CandidatePair,
+    },
+
     /// No supporting observation was supplied.
     ///
     /// An adjudication with nothing behind it is an assertion. It may still be
@@ -192,6 +208,13 @@ pub enum AdjudicationError {
 impl core::fmt::Display for AdjudicationError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
+            Self::PromotionDomainsDiffer { pair } => write!(
+                f,
+                "the confirmed pair ({:?}, {:?}) was promoted on different clock \
+                 domains, so when the identity began cannot be ordered",
+                pair.low().as_str(),
+                pair.high().as_str()
+            ),
             Self::NoJustification => {
                 write!(f, "an adjudication must cite at least one observation")
             }
@@ -891,6 +914,130 @@ impl IdentityAdjudication {
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
+
+// ===========================================================================
+// Tier 2 box 2c — PROMOTION: a confirmed `same_as` becomes identity
+// ===========================================================================
+
+/// Turn the relations a set of `same_as` adjudications CONFIRMED into identity
+/// adjudications the projection already folds.
+///
+/// This is the join box 2c names, and it is deliberately the *whole* of it: a
+/// confirmed co-reference becomes a [`MergeEntities`], which the entity fold
+/// and [`crate::resolution::resolve`] already understand. There is **no second
+/// resolution algorithm and no second graph** — the precedent box 2d set when
+/// as-of resolution composed an as-of view with the unmodified resolver rather
+/// than growing a historical variant.
+///
+/// # Why this layer exists at all
+///
+/// `kirra_world::same_as_adjudication` decides *whether a candidate pair is the
+/// same thing*. `IdentityAdjudication` records *what happened to an entity*.
+/// They are different questions and neither should answer the other, so the
+/// conversion is explicit, in one place, and reads as a promotion rather than
+/// being smuggled into either type's constructor.
+///
+/// # The merge direction is canonical, not a judgement
+///
+/// [`CandidatePair`] is built canonically (`low <= high`), so `high` merges INTO
+/// `low` for every pair, always. That is a determinism requirement, not a claim
+/// that the lower id is better: box 2c holds that the same log must yield the
+/// same identity "with no dependence on matcher output, tie-break order or
+/// wall-clock", and a direction chosen from adjudication order would depend on
+/// all three.
+///
+/// # Provenance is carried, never invented
+///
+/// The merge's [`Justification`] is the union of the observations the promoting
+/// adjudications actually cited, in first-seen order and deduplicated —
+/// `Justification::new` refuses duplicates, and two adjudicators citing the same
+/// observation is ordinary rather than an error. Nothing is synthesised: a pair
+/// promoted without evidence cannot exist, because `SameAsAdjudication::record`
+/// already refuses an empty citation list.
+///
+/// # `confirmed_relations` is the authority on WHICH pairs
+///
+/// Deliberately not re-derived here by filtering on [`Outcome::Promoted`].
+/// Whether a pair counts as confirmed is box 2b's question — including how it
+/// treats a pair adjudicated more than once — and restating the predicate here
+/// would create a second answer that drifts. This layer asks 2b and carries the
+/// evidence.
+///
+/// # Errors
+///
+/// * [`AdjudicationError`] from `Justification::new` or `MergeEntities::new` —
+///   propagated rather than skipped, because a confirmed pair that cannot be
+///   expressed as a merge is a contradiction between two layers, not a row to
+///   drop quietly.
+/// * [`AdjudicationError::PromotionDomainsDiffer`] if one pair's promoting
+///   adjudications sit on different clock domains. `DomainInstant` refuses
+///   cross-domain comparison and this refuses with it: picking one would be
+///   confidently wrong about when an identity began.
+pub fn promote_confirmed_same_as(
+    adjudications: &[SameAsAdjudication],
+) -> Result<Vec<IdentityAdjudication>, AdjudicationError> {
+    // BTreeSet iteration order is the canonical pair order, so WHICH merges come
+    // out, in what order, and in which direction do not depend on how
+    // `adjudications` is arranged. The citation order INSIDE a merge does --
+    // it is first-seen across the slice.
+    //
+    // That asymmetry is deliberate, not an oversight. `Justification` preserves
+    // recorded order on purpose ("a constructor that tidied it would be editing
+    // the record"), so sorting here to buy set-determinism would fight that
+    // discipline for a property box 2c does not ask for: 2c's requirement is
+    // that the same log yield the same IDENTITY -- which entity resolves to
+    // which -- and that half IS arrangement-independent. Citation order is
+    // provenance, not identity.
+    let confirmed = confirmed_relations(adjudications);
+    let mut promoted = Vec::with_capacity(confirmed.len());
+
+    for pair in &confirmed {
+        let mut cited: Vec<ObservationId> = Vec::new();
+        let mut began: Option<DomainInstant> = None;
+
+        for a in adjudications
+            .iter()
+            .filter(|a| a.is_confirmed() && a.pair() == pair)
+        {
+            for observation in a.cited() {
+                if !cited.contains(observation) {
+                    cited.push(observation.clone());
+                }
+            }
+            // EARLIEST promotion wins: re-affirming a pair does not move when it
+            // became identity. Compared through `DomainInstant::compare`, which
+            // refuses across clock domains rather than ordering by raw
+            // milliseconds.
+            began = Some(match began {
+                None => a.decided_at(),
+                Some(prev) => match a.decided_at().compare(&prev) {
+                    Ok(Ordering::Less) => a.decided_at(),
+                    Ok(_) => prev,
+                    Err(_) => {
+                        return Err(AdjudicationError::PromotionDomainsDiffer {
+                            pair: pair.clone(),
+                        })
+                    }
+                },
+            });
+        }
+
+        // Unreachable: `confirmed_relations` only yields pairs some record
+        // promoted. Skipped rather than unwrapped so a future change to 2b's
+        // predicate degrades to "promotes nothing" instead of a panic in the
+        // identity path.
+        let Some(at) = began else { continue };
+
+        promoted.push(IdentityAdjudication::Merge(MergeEntities::new(
+            [pair.high().clone()],
+            pair.low().clone(),
+            Justification::new(cited)?,
+            at,
+        )?));
+    }
+
+    Ok(promoted)
+}
 
 #[cfg(test)]
 mod tests {
