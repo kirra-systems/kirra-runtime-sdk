@@ -112,6 +112,19 @@ use crate::semantics::SemanticVersions;
 /// knowledge is a success*, and only genuine faults use this channel.
 #[derive(Debug)]
 pub enum AskError {
+    /// The question named something that is not an admissible entity id.
+    ///
+    /// **A refusal, not an empty answer.** "That is not a question I can ask"
+    /// and "the answer is nothing" are different findings, and a caller told
+    /// the second would conclude the entity exists and is related to nothing.
+    /// The same distinction `AdjudicateError` draws between `NoSuchCandidate`
+    /// and `NotACandidate`.
+    MalformedEntity {
+        /// What was asked about.
+        entity: String,
+        /// Why it is not admissible, from the domain constructor.
+        detail: String,
+    },
     /// The store could not be read.
     Store(StoreError),
     /// The requested page bound is not a valid one.
@@ -185,6 +198,11 @@ impl fmt::Display for AskError {
             Self::Store(e) => write!(f, "store: {e:?}"),
             Self::PageSpec(e) => write!(f, "invalid page bound: {e:?}"),
             Self::Cursor(e) => write!(f, "continuation refused: {e}"),
+            Self::MalformedEntity { entity, detail } => write!(
+                f,
+                "{entity:?} is not an admissible entity id: {detail} — \
+                 refused rather than answered as unrelated"
+            ),
             Self::CorruptProvenance {
                 subject,
                 predicate,
@@ -854,6 +872,65 @@ impl<'a> WorldView<'a> {
         })
     }
 
+    /// **What one entity is currently adjudicated the same as** — box 5b.
+    ///
+    /// The first query family over a SEMANTIC projection rather than over the
+    /// claim log, and the first consumer of box 5a's `relationships_projection`.
+    ///
+    /// # Which precedence rule this serves, stated because there are two
+    ///
+    /// It reads the **relationship projection**, where the newest authorized
+    /// decision governs — so a pair promoted and later rejected is NOT related
+    /// here. It deliberately does NOT read
+    /// `kirra_world::same_as_adjudication::confirmed_relations`, which applies
+    /// no precedence and treats one `Promoted` anywhere as confirming forever.
+    ///
+    /// Those two disagree today. That disagreement is recorded and pinned by
+    /// `the_two_precedence_rules_disagree_today_which_is_a_ruling_2b_still_owes`
+    /// and is 2b's to resolve; this family does not resolve it. What it does is
+    /// name which of the two it serves, so the answer is attributable to a rule
+    /// rather than to whichever function was nearest.
+    ///
+    /// # Freshness is RESOLVED, not assumed
+    ///
+    /// `KIRRA-WM-IDENTITY-FRESHNESS-001` ruled a promoted `same_as` `Timeless`,
+    /// and this asks [`resolve_policy`] for it rather than hard-coding that
+    /// conclusion. Two things follow, both wanted: under
+    /// [`FreshnessSource::Ruled`] the ruling is genuinely consulted, so deleting
+    /// the ruled row reds this family instead of leaving it quietly serving a
+    /// policy nothing states; and under [`FreshnessSource::Caller`] a caller who
+    /// has taken responsibility for classification still governs.
+    ///
+    /// [`FreshnessSource::Caller`]: crate::freshness::FreshnessSource::Caller
+    /// [`FreshnessSource::Ruled`]: crate::freshness::FreshnessSource::Ruled
+    ///
+    /// # Errors
+    ///
+    /// [`AskError::MalformedEntity`] if `entity` is not an admissible
+    /// `EntityId` — REFUSED rather than answered "nothing is related", because
+    /// an unaskable question and a question with no answer are different
+    /// findings. [`AskError::UnclassifiedFreshness`] if the adjudication class
+    /// is unruled. Otherwise whatever the store raises.
+    pub fn related(&self, entity: &str) -> Result<RelatedLookup, AskError> {
+        let id = EntityId::new(entity).map_err(|e| AskError::MalformedEntity {
+            entity: entity.to_string(),
+            detail: e.to_string(),
+        })?;
+        // Resolved BEFORE the read, so an unruled class refuses rather than
+        // producing an answer nobody has classified. Same ordering `ask` uses.
+        let policy = resolve_policy(
+            self.freshness,
+            kirra_world_store::same_as_adjudication_record::SAME_AS_ADJUDICATION_KIND,
+            Some(kirra_world_store::same_as_adjudication_record::ADJUDICATION_PREDICATE_TOKEN),
+        )?;
+        let neighbours = self.store.related(&id)?;
+        Ok(RelatedLookup {
+            neighbours,
+            policy,
+            semantics: SemanticVersions::for_query(QueryKind::Related),
+        })
+    }
+
     /// **The ruled disposition for one claim, or a refusal.**
     ///
     /// The single place a claim's semantics become a freshness policy, so the
@@ -1187,6 +1264,66 @@ impl SummaryLookup {
         self.summary
             .as_ref()
             .is_some_and(|s| s.coverage.is_degraded())
+    }
+
+    /// The rules this answer was produced under.
+    #[must_use]
+    pub fn semantics(&self) -> &SemanticVersions {
+        &self.semantics
+    }
+}
+
+/// **What one entity is the same as** — box 5b.
+///
+/// # There is no `is_degraded`, and that is a decision
+///
+/// Every other lookup in this module carries one, so its absence needs a
+/// reason rather than being read as an oversight.
+///
+/// `KIRRA-WM-EVIDENCE-RETENTION-001` ruled that compaction may degrade the
+/// ability to explain WHY a promotion was made but must never alter WHETHER the
+/// relationship exists. A `is_degraded` on THIS type would answer the second
+/// question with the first one's evidence: it would report a relationship as
+/// somehow lessened because a candidate observation aged out, which is exactly
+/// the coupling the ruling refused.
+///
+/// The explanatory half is still askable — `WorldStore::relationship_provenance`
+/// returns box 4b's `CitationResolution` for one pair — and it is deliberately a
+/// SEPARATE question, so a caller that wants provenance has to ask for it rather
+/// than reading a summary flag whose meaning drifted.
+#[derive(Debug, Clone)]
+pub struct RelatedLookup {
+    neighbours: kirra_world_store::relationship_projection::RelatedNeighbours,
+    policy: FreshnessPolicy,
+    semantics: SemanticVersions,
+}
+
+impl RelatedLookup {
+    /// The entities this one is currently adjudicated the same as.
+    #[must_use]
+    pub fn neighbours(&self) -> &[kirra_world_store::relationship_projection::RelatedEntity] {
+        &self.neighbours.neighbours
+    }
+
+    /// Whether more neighbours exist than one page admits.
+    ///
+    /// Carried through from the store rather than inferred from the length —
+    /// a full page and a cut-short page are the same length.
+    #[must_use]
+    pub fn is_truncated(&self) -> bool {
+        self.neighbours.truncated
+    }
+
+    /// The freshness disposition this family resolved for an adjudicated
+    /// identity.
+    ///
+    /// Exposed rather than applied. Nothing here expires, because
+    /// `KIRRA-WM-IDENTITY-FRESHNESS-001` ruled the class `Timeless` — but the
+    /// value is served so a caller can SEE that a policy was resolved, instead
+    /// of having to trust that one was.
+    #[must_use]
+    pub fn policy(&self) -> FreshnessPolicy {
+        self.policy
     }
 
     /// The rules this answer was produced under.

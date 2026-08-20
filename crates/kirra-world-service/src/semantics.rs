@@ -179,6 +179,27 @@ impl SemanticVersions {
             // "identical by construction" — a temporal-resolution rule would
             // belong to one and not the other, and a shared arm that had to be
             // split later is a shared arm nobody remembers to split.
+            // Box 5b. EXACTLY ONE rule, and the three that are absent are the
+            // point rather than an omission:
+            //
+            //   world_current_fold  -- this family never touches the claim
+            //                          projection; it reads relationships.
+            //   entity_fold         -- it does NOT resolve identity. It reports
+            //                          the adjudicated pairs verbatim, so the
+            //                          resolver cannot change what it says.
+            //   answer_admissibility -- there is no claim to grade or expire.
+            //                          `KIRRA-WM-IDENTITY-FRESHNESS-001` made
+            //                          the class Timeless, so admitting an
+            //                          admissibility rule here would imply a
+            //                          staleness axis the ruling denies.
+            //
+            // Asserted rather than assumed by
+            // `the_related_query_depends_on_exactly_one_rule`, the same control
+            // `history` carries for the same reason.
+            QueryKind::Related => Self::new([RuleVersion {
+                rule: RuleId::RelationshipFold.as_str().to_string(),
+                version: store_semantics::version_of(RuleId::RelationshipFold),
+            }]),
             QueryKind::CurrentSubject | QueryKind::AsOfSubject => Self::new([
                 RuleVersion {
                     rule: RuleId::WorldCurrentFold.as_str().to_string(),

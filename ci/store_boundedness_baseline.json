@@ -192,6 +192,10 @@
       "class": "operational",
       "why": "Projection rebuild."
     },
+    "related": {
+      "class": "bounded",
+      "why": "Tier 5 box 5b. Two INDEXED lookups plus a page ceiling. A pair is stored once canonically, so the subject may be either column; `PRIMARY KEY (low, high)` covers the `low = ?` half and the `relationships_projection_high` index covers the `high = ?` half, so neither arm scans. Capped at MAX_RELATED with a probe of limit+1 and the truncation flag CARRIED -- not a set trimmed after fetching, which is #1440's distinction (a LIMIT bounds rows RETURNED, never rows SCANNED, so the index is part of the bound rather than a speed-up). Deliberately NOT structural in `relationship`'s sense: an entity can be adjudicated the same as many others, so there is no primary-key cardinality to lean on and the ceiling is doing real work."
+    },
     "relationship": {
       "class": "bounded",
       "why": "Tier 5 box 5a. A POINT READ by primary key: `WHERE low = ?1 AND high = ?2` on `relationships_projection`, whose PRIMARY KEY is `(low, high)`, so the result is at most one row regardless of how many relationships the fleet has accumulated. STRUCTURALLY bounded in the same sense as `current` -- there is no page and no cursor because there is no growth dimension. It takes a canonical pair the caller already holds and returns the row at it."

@@ -1196,12 +1196,13 @@ does not describe is how a residue disappears.
          `corpus_digest` to contradict. A stronger corpus for an unchanged
          reducer is not a behaviour change.
 
-      **OPEN, and stated rather than implied: this projection has no domain
-      consumer yet.** Rule 1 ("every new declaration needs a production
-      consumer") is not satisfied by 5a alone; it is satisfied by the sequence
-      5a → typed `Related` query through `QueryEngine` → a real consumer, of
-      which this is the first step. If that sequence stalls, this table and its
-      fold are the thing to delete, not to document.
+      **Was OPEN — the projection had no domain consumer. 5b closed the first
+      half 2026-08-20:** `kirra_world_service::query::Related` reaches it
+      through `QueryEngine::execute`, so the table is now something production
+      code can ask. Rule 1 is not yet fully paid: the sequence is 5a → typed
+      `Related` (DONE) → a real consumer (OPEN). If it stalls before the
+      consumer, this table and its fold are still the thing to delete rather
+      than document.
 
       **FOLLOW-UP RULING owed:** does promotion PROTECT the supporting candidate
       evidence from compaction, or is *protected adjudication + degradable
@@ -1297,6 +1298,56 @@ does not describe is how a residue disappears.
       `the_two_precedence_rules_disagree_and_only_one_has_a_production_consumer`,
       next to 2b's existing no-precedence pin, so whoever rules on 2b's owed
       question confronts both halves at once.
+
+- [x] **5b — The typed `Related` query. DONE 2026-08-20.**
+      `kirra_world_service::query::Related` → `WorldView::related` →
+      `WorldStore::related`. The first query family over a SEMANTIC projection
+      rather than over the claim log, and what makes 5a reachable through the
+      one sanctioned door.
+
+      **Which precedence rule it serves, named because there are two.** It reads
+      the RELATIONSHIP PROJECTION (newest authorized decision governs), not
+      `confirmed_relations` (no precedence, one `Promoted` confirms forever).
+      Those disagree today — see the ruling 2b still owes, above — and 5b does
+      not resolve that; it states which side it is on and proves it with
+      `a_withdrawn_promotion_is_no_longer_related`, which a refactor onto
+      `confirmed_relations` would fail while every other test stayed green.
+
+      **The bound is two INDEXED lookups plus a page ceiling.** A pair is stored
+      once canonically, so the subject may be either column; `PRIMARY KEY (low,
+      high)` covers one half and the lazily-installed
+      `relationships_projection_high` index covers the other. That index is part
+      of the bound rather than a speed-up — a `LIMIT` bounds rows RETURNED, never
+      rows SCANNED, which is #1440's distinction. Truncation is CARRIED, and
+      `exactly_the_ceiling_is_not_reported_as_truncated` is the twin that stops
+      a full page being reported as cut short.
+
+      **No cursor, and that is not `SubjectSummary`'s argument.** That family has
+      no cursor because there is structurally one row per subject; here the set
+      genuinely grows. A cursor is a contract about stable ordering under
+      concurrent folds, and adding one before a consumer needs to walk past 256
+      `same_as` neighbours of ONE entity would invent a dimension nobody asked
+      for. What is not deferred is honesty about the cap.
+
+      **`RelatedLookup` has no `is_degraded`, deliberately** — every sibling
+      lookup does, so the absence needs a reason. `KIRRA-WM-EVIDENCE-RETENTION-001`
+      ruled that compaction may degrade WHY a promotion was made but never
+      WHETHER it holds; a degraded flag here would answer the second question
+      with the first one's evidence. Provenance stays a separate question via
+      `relationship_provenance`.
+
+      **Freshness is RESOLVED, not assumed.** The family asks `resolve_policy`
+      for `(same_as_adjudication, same_as_adjudged)` and gets `Timeless` from
+      `KIRRA-WM-IDENTITY-FRESHNESS-001`, so deleting that ruled row reds this
+      family rather than leaving it serving a policy nothing states.
+      `a_caller_stated_policy_is_honoured` is the twin proving the source is
+      actually consulted.
+
+      Six mutations, each killing exactly its own control — including the D-20
+      trap: `related` self-heals a missing INDEX but must never call
+      `ensure_relationship_projection`, because that would install the projection
+      TABLE on a store that merely asked a question and move `log_only_bytes` for
+      everyone. `related_on_an_unfolded_store_is_empty_and_installs_nothing`.
 
 - [x] **2c — Deterministic resolution over promoted identity. DONE 2026-08-20.**
       `kirra_world::adjudication::promote_confirmed_same_as` is the join: it asks
