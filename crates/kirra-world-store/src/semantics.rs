@@ -82,6 +82,8 @@ use crate::entity_projection::{
     self, contradiction_json, lifecycle_token, origin_of, redirect_json, ProjectedEntity,
 };
 use crate::projection::{self, ProjectedClaim};
+use crate::relationship_projection::{self, PairKey, ProjectedRelationship};
+use crate::same_as_adjudication_record::StoredAdjudication;
 use crate::subject_projection::{self, ProjectedSubject, SubjectKey, SubjectObservation};
 
 /// A versioned reducer.
@@ -120,6 +122,16 @@ pub enum RuleId {
     /// evidence while looking identical — and unlike a page cursor, the
     /// difference is a statement about where a fact came from.
     CitationResolution,
+    /// [`crate::relationship_projection::fold_same_as_adjudication`] — the
+    /// promoted-`same_as` fold.
+    ///
+    /// It decides which pairs the store reports as the same thing, so a change
+    /// here alters a derived answer in the most direct way any rule in this
+    /// table can. It also decides what a NON-promotion does to a standing
+    /// promotion, which is a policy choice (`Unresolved` withdraws rather than
+    /// abstains) rather than a mechanical one — exactly the kind of decision a
+    /// version exists to make visible when it changes.
+    RelationshipFold,
 }
 
 impl RuleId {
@@ -136,6 +148,7 @@ impl RuleId {
             Self::SubjectSummaryFold => "subject_summary_fold",
             Self::LineageSelection => "lineage_selection",
             Self::CitationResolution => "citation_resolution",
+            Self::RelationshipFold => "relationship_fold",
         }
     }
 
@@ -151,6 +164,7 @@ impl RuleId {
             RuleId::SubjectSummaryFold,
             RuleId::LineageSelection,
             RuleId::CitationResolution,
+            RuleId::RelationshipFold,
         ]
     }
 }
@@ -246,6 +260,14 @@ pub const SEMANTICS: &[RuleSpec] = &[
         source_pin: "07e6d2b8b7d86207a61231c7dfa1e4df46be0240632bba3d15e171e42a5d7b4b",
         source_file: "crates/kirra-world-store/src/provenance_graph.rs",
         span: "citation_resolution",
+    },
+    RuleSpec {
+        rule: RuleId::RelationshipFold,
+        version: 1,
+        corpus_digest: "db4975d3adc118885e0c180c58ac45311272df617e0b9f00333571b14cff3b95",
+        source_pin: "e82c8a546104d622f71bb2c12e63670ad4c8a0733ac02eb88e2c7138b991b6b8",
+        source_file: "crates/kirra-world-store/src/relationship_projection.rs",
+        span: "relationship_fold",
     },
 ];
 
@@ -781,6 +803,167 @@ pub fn render_provenance(tree: &crate::provenance_graph::ProvenanceTree) -> Stri
     out
 }
 
+/// The relationship fold's corpus input, as `(generation, decision)`.
+///
+/// Every entry discriminates a behaviour, and the last three are the ones a
+/// happy-path corpus would miss:
+///
+/// * `(a, b)` promoted — the base case.
+/// * `(b, c)` promoted — a **second, distinct pair**, so a fold that keyed on
+///   one entity rather than on the pair collides visibly. It is also what makes
+///   the absence of `(a, c)` in the rendering meaningful: a fold that closed
+///   transitively would render a third row.
+/// * `(a, b)` **rejected** — a withdrawal, which must remove the earlier row
+///   rather than sit beside it.
+/// * `(a, b)` **re-promoted** — the withdrawal is not terminal, and the row
+///   that comes back names the NEW decision.
+/// * `(b, c)` **unresolved** — the policy choice. A fold that treated
+///   `Unresolved` as an abstention leaves this pair standing and renders
+///   differently, which is what pins the choice to this version rather than to
+///   a comment.
+///
+/// The **adjudicator and the clock domain vary across entries**, and the entry
+/// that SURVIVES the fold (generation 4) is the one carrying the odd values.
+/// Both halves are load-bearing: a corpus where every decision named one
+/// operator on one clock renders identically under a reducer that hardcodes
+/// them, and a corpus where the odd values appear only on a withdrawn row
+/// renders identically too, because a fold is observable only through its
+/// final state.
+///
+/// The generation ORDER is load-bearing for the same reason
+/// [`world_current_corpus`] records: a fold is observable only through its
+/// FINAL state, so a divergence that later converges is invisible. Each of the
+/// three policy entries is therefore the LAST word about its pair.
+#[must_use]
+pub fn relationship_corpus() -> Vec<(i64, StoredAdjudication)> {
+    let pair = |a: &str, b: &str| {
+        kirra_world::same_as_candidate::CandidatePair::new(
+            EntityId::new(a).expect("corpus entity"),
+            EntityId::new(b).expect("corpus entity"),
+        )
+        .expect("corpus pair")
+    };
+    let decision = |a: &str,
+                    b: &str,
+                    outcome,
+                    ms: u64,
+                    domain: ClockDomain,
+                    adjudicator: &str,
+                    candidate: &str| StoredAdjudication {
+        pair: pair(a, b),
+        outcome,
+        candidate_observation_id: candidate.to_owned(),
+        adjudicator: adjudicator.to_owned(),
+        decided_at: DomainInstant { ms, domain },
+    };
+    use kirra_world::same_as_adjudication::Outcome;
+    let sys = ClockDomain::System;
+    vec![
+        (
+            1,
+            decision(
+                "a",
+                "b",
+                Outcome::Promoted,
+                100,
+                sys,
+                "operator-1",
+                "cand-ab-1",
+            ),
+        ),
+        (
+            2,
+            decision(
+                "b",
+                "c",
+                Outcome::Promoted,
+                101,
+                sys,
+                "operator-1",
+                "cand-bc-1",
+            ),
+        ),
+        (
+            3,
+            decision(
+                "a",
+                "b",
+                Outcome::Rejected,
+                102,
+                sys,
+                "operator-1",
+                "cand-ab-1",
+            ),
+        ),
+        // The surviving row. Its adjudicator and its CLOCK DOMAIN both differ
+        // from every other entry, which is what makes the rendering able to see
+        // them -- see the doc above.
+        (
+            4,
+            decision(
+                "a",
+                "b",
+                Outcome::Promoted,
+                103,
+                ClockDomain::Boundary,
+                "operator-2",
+                "cand-ab-2",
+            ),
+        ),
+        (
+            5,
+            decision(
+                "b",
+                "c",
+                Outcome::Unresolved,
+                104,
+                sys,
+                "operator-1",
+                "cand-bc-1",
+            ),
+        ),
+    ]
+}
+
+/// Render a folded relationship accumulator.
+///
+/// Rendered rather than hashed at the assertion site so a failure shows **what**
+/// changed. Carries **every field the projection persists** — the pair,
+/// `decided_generation`, the cited candidate, the adjudicator, and the decided
+/// instant with its CLOCK DOMAIN — because a fold that kept the right pairs
+/// under the wrong decisions would otherwise render identically.
+///
+/// The adjudicator and the domain were added on review of #1467. Adding the
+/// fields is only half of it and the cheaper half: a corpus in which every
+/// entry carries the same adjudicator and the same clock renders identically
+/// under a reducer that hardcodes them, so the fields would have been ceremony.
+/// [`relationship_corpus`] therefore VARIES both, and
+/// `the_relationship_corpus_catches_a_dropped_adjudicator_or_clock_domain` is
+/// the control that says so.
+#[must_use]
+pub fn render_relationships(rows: &BTreeMap<PairKey, ProjectedRelationship>) -> String {
+    let mut out = String::new();
+    for ((low, high), r) in rows {
+        out.push_str(low);
+        out.push(FIELD);
+        out.push_str(high);
+        out.push(FIELD);
+        out.push_str(&r.decided_generation.to_string());
+        out.push(FIELD);
+        out.push_str(&r.candidate_observation_id);
+        out.push(FIELD);
+        out.push_str(&r.adjudicator);
+        out.push(FIELD);
+        out.push_str(&r.decided_at.ms.to_string());
+        out.push(FIELD);
+        out.push_str(relationship_projection::clock_domain_token(
+            r.decided_at.domain,
+        ));
+        out.push(ROW);
+    }
+    out
+}
+
 /// **Run one rule's corpus through the real reducer and render the result.**
 ///
 /// This is the value the declared [`RuleSpec::corpus_digest`] is a digest of. It
@@ -849,6 +1032,12 @@ pub fn corpus_rendering(rule: RuleId) -> String {
                 out.push(ROW);
             }
             out
+        }
+        RuleId::RelationshipFold => {
+            let corpus = relationship_corpus();
+            render_relationships(&relationship_projection::fold_all(
+                corpus.iter().map(|(g, d)| (*g, d)),
+            ))
         }
     }
 }

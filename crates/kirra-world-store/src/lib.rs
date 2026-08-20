@@ -90,6 +90,7 @@ pub mod lineage;
 pub mod projection;
 pub mod provenance_edges;
 pub mod provenance_graph;
+pub mod relationship_projection;
 pub mod retention_driver;
 pub mod retention_sweeper;
 pub mod same_as_adjudication_record;
@@ -275,6 +276,18 @@ pub enum StoreError {
         /// Which row, and how it disagreed.
         detail: String,
     },
+    /// A stored relationship-projection row could not be read back faithfully.
+    ///
+    /// **Refused, never repaired**, for
+    /// [`Self::CorruptEntityProjectionRow`]'s reason: the columns are written
+    /// only by the fold, so a row that disagrees with itself means the file was
+    /// edited underneath the store — and the recovery for a rebuildable view is
+    /// `rebuild_relationship_projection`, not a guess at what an operator
+    /// decided.
+    CorruptRelationshipProjectionRow {
+        /// Which row, and how it disagreed.
+        detail: String,
+    },
     /// A citation page was requested with an unusable bound — Tier 4 box 4a.
     ///
     /// **Refused, never clamped**, for the reason [`lineage::PageSpecError`]
@@ -427,6 +440,9 @@ impl std::fmt::Display for StoreError {
             // pre-existing cleanup, deliberately not smuggled into this PR.
             Self::CorruptEntityProjectionRow { detail } => {
                 write!(f, "corrupt stored row: {detail}")
+            }
+            Self::CorruptRelationshipProjectionRow { detail } => {
+                write!(f, "corrupt stored relationship row: {detail}")
             }
             Self::CitationPageSpec(e) => write!(f, "citation page: {e}"),
             Self::ProvenanceIndexIncomplete { requested, floor } => write!(
@@ -2888,6 +2904,371 @@ impl WorldStore {
         Ok(head)
     }
 
+    // -- The relationship projection (Tier 5 box 5a) --------------------
+    //
+    // Deliberately the same SHAPE as the entity projection above -- lazy DDL,
+    // seed-from-stored, fold-forward, rebuild-from-zero, a digest written with
+    // the checkpoint. That is not copy-paste convenience: `WM_SCOPE` §0a's
+    // rebuild-equals-incremental invariant is a property of that shape, and a
+    // projection built a different way would need its own argument for it.
+
+    /// Install the relationship projection's DDL, lazily.
+    ///
+    /// **First fold, never `open`** — [`WorldStore::ensure_entity_projection`]'s
+    /// reason, which applies unchanged: ADR-0041 D-20's `log_only_bytes` must
+    /// stay the size of a store holding only the log.
+    fn ensure_relationship_projection(&self) -> Result<(), StoreError> {
+        self.conn
+            .execute_batch(relationship_projection::RELATIONSHIP_PROJECTION_V1)?;
+        self.conn
+            .execute_batch(projection::PROJECTION_CHECKPOINT_V1)?;
+        Ok(())
+    }
+
+    /// Whether the relationship projection has ever been folded.
+    ///
+    /// # Errors
+    ///
+    /// [`StoreError::Sqlite`] if the catalogue cannot be read.
+    pub fn has_relationship_projection(&self) -> Result<bool, StoreError> {
+        let n: Option<i64> = self
+            .conn
+            .query_row(
+                "SELECT 1 FROM sqlite_master WHERE type='table' \
+                 AND name='relationships_projection'",
+                [],
+                |r| r.get(0),
+            )
+            .optional()?;
+        Ok(n.is_some())
+    }
+
+    /// How far the relationship fold has consumed.
+    ///
+    /// # Errors
+    ///
+    /// [`StoreError::Sqlite`] if the checkpoint cannot be read.
+    pub fn relationship_projection_generation(&self) -> Result<i64, StoreError> {
+        if !self.has_relationship_projection()? {
+            return Ok(0);
+        }
+        let g: Option<i64> = self
+            .conn
+            .query_row(
+                "SELECT generation FROM projection_checkpoint WHERE name = ?1",
+                params![relationship_projection::RELATIONSHIP_PROJECTION],
+                |r| r.get(0),
+            )
+            .optional()?;
+        Ok(g.unwrap_or(0))
+    }
+
+    /// Fold new confirmed `same_as` decisions into the relationship projection.
+    ///
+    /// # Errors
+    ///
+    /// [`StoreError::Sqlite`] on storage failure, or
+    /// [`StoreError::CorruptRelationshipProjectionRow`] if a stored row or a
+    /// log row cannot be read back faithfully. **Fail-closed**: a fold that
+    /// cannot read its own prior state does not start over from empty, because
+    /// that would silently drop every relationship below the checkpoint.
+    pub fn fold_relationship_projection(&mut self) -> Result<i64, StoreError> {
+        self.ensure_relationship_projection()?;
+        let from = self.relationship_projection_generation()?;
+        self.fold_relationship_range(from)
+    }
+
+    /// Discard the relationship projection and rebuild it from generation 0.
+    ///
+    /// The result must equal an incremental fold — ADR-0041's stated purity
+    /// property, checked by
+    /// [`WorldStore::relationship_projection_state_digest`] rather than assumed.
+    ///
+    /// # Errors
+    ///
+    /// As [`WorldStore::fold_relationship_projection`].
+    pub fn rebuild_relationship_projection(&mut self) -> Result<i64, StoreError> {
+        self.ensure_relationship_projection()?;
+        // Unlike the entity rebuild's, this DELETE **is** load-bearing, and the
+        // difference is worth stating because the two methods otherwise read
+        // identically. This fold WITHDRAWS: a pair whose newest decision is not
+        // `Promoted` is removed from the accumulator. `fold_relationship_range`
+        // then upserts the accumulator and deletes the keys it no longer holds,
+        // so leaving stale rows here would be corrected -- but only for pairs
+        // the accumulator SEEDED from those same rows. Clearing first makes the
+        // rebuild depend on the log alone, which is what "rebuildable view"
+        // means. The negative control is
+        // `a_rebuild_does_not_inherit_a_row_the_log_does_not_justify`.
+        self.conn
+            .execute("DELETE FROM relationships_projection", [])?;
+        self.conn.execute(
+            "DELETE FROM projection_checkpoint WHERE name = ?1",
+            params![relationship_projection::RELATIONSHIP_PROJECTION],
+        )?;
+        self.fold_relationship_range(0)
+    }
+
+    fn fold_relationship_range(&mut self, from_generation: i64) -> Result<i64, StoreError> {
+        // Seeded from the STORED rows. The reason is NOT the entity fold's --
+        // that one needs the prior lifecycle to tell a legal transition from a
+        // contradiction, and this reducer needs no prior state at all, since
+        // each decision overwrites its own pair outright.
+        //
+        // What the seed is actually for is the WITHDRAWAL SWEEP below, which
+        // reads "a stored key the accumulator no longer holds" as a
+        // withdrawal. An accumulator seeded from empty holds only the pairs the
+        // tail mentioned, so every relationship promoted below the checkpoint
+        // and untouched since would be swept as though an operator had revoked
+        // it -- silent data loss on an ordinary incremental fold, in the
+        // opposite direction from the stale row one might expect.
+        //
+        // That is a MEASURED claim, not a plausible one: the first draft of
+        // this comment asserted the stale-row failure, the mutation left every
+        // test green, and the test that now names it
+        // (`a_relationship_promoted_below_the_checkpoint_survives_a_later_unrelated_fold`)
+        // was written because of it.
+        let mut acc = self.load_relationship_projection()?;
+        let seeded: Vec<relationship_projection::PairKey> = acc.keys().cloned().collect();
+
+        let tx = self.conn.transaction()?;
+        let mut head = from_generation;
+        {
+            let mut stmt = tx.prepare(
+                "SELECT generation, writer_class, claim_status, kind, predicate,
+                        subject, object, payload, payload_schema
+                 FROM world_events
+                 WHERE generation > ?1 AND claim_status = 'confirmed' AND kind = ?2
+                 ORDER BY generation ASC",
+            )?;
+            let mut rows = stmt.query(params![
+                from_generation,
+                same_as_adjudication_record::SAME_AS_ADJUDICATION_KIND
+            ])?;
+            while let Some(r) = rows.next()? {
+                let generation: i64 = r.get(0)?;
+                let writer_class: String = r.get(1)?;
+                let claim_status: String = r.get(2)?;
+                let kind: String = r.get(3)?;
+                let predicate: Option<String> = r.get(4)?;
+                let subject: String = r.get(5)?;
+                let object: Option<String> = r.get(6)?;
+                let payload: String = r.get(7)?;
+                let payload_schema: i64 = r.get(8)?;
+                let decision = same_as_adjudication_record::decode_same_as_adjudication(
+                    &same_as_adjudication_record::StoredAdjudicationRow {
+                        writer_class: writer_class.as_str(),
+                        claim_status: claim_status.as_str(),
+                        kind: kind.as_str(),
+                        predicate: predicate.as_deref(),
+                        subject: subject.as_str(),
+                        object: object.as_deref(),
+                        payload: payload.as_str(),
+                        payload_schema,
+                    },
+                )
+                .map_err(|e| StoreError::CorruptRelationshipProjectionRow {
+                    detail: format!("generation {generation}: {e}"),
+                })?;
+                relationship_projection::fold_same_as_adjudication(&mut acc, &decision, generation);
+                head = generation;
+            }
+
+            let mut upsert = tx.prepare(
+                "INSERT INTO relationships_projection
+                     (low, high, decided_generation, candidate_observation_id,
+                      adjudicator, decided_at_ms, decided_at_domain)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+                 ON CONFLICT(low, high) DO UPDATE SET
+                     decided_generation = excluded.decided_generation,
+                     candidate_observation_id = excluded.candidate_observation_id,
+                     adjudicator = excluded.adjudicator,
+                     decided_at_ms = excluded.decided_at_ms,
+                     decided_at_domain = excluded.decided_at_domain",
+            )?;
+            for r in acc.values() {
+                // `DomainInstant::ms` is a `u64` and a SQLite INTEGER is signed,
+                // so the top half of the domain has no storage. REFUSED, not
+                // saturated: clamping would write a different instant from the
+                // one the decision recorded, and this column is what an
+                // operator reads to place the decision in time. Reachable from
+                // a payload carrying a `ms` above `i64::MAX` -- the decoder
+                // admits it (it is a valid `u64`) and this is where it stops.
+                let decided_at_ms = i64::try_from(r.decided_at.ms).map_err(|_| {
+                    StoreError::CorruptRelationshipProjectionRow {
+                        detail: format!(
+                            "generation {}: decided_at.ms {} exceeds the storable range",
+                            r.decided_generation, r.decided_at.ms
+                        ),
+                    }
+                })?;
+                upsert.execute(params![
+                    r.pair.low().as_str(),
+                    r.pair.high().as_str(),
+                    r.decided_generation,
+                    r.candidate_observation_id.as_str(),
+                    r.adjudicator.as_str(),
+                    decided_at_ms,
+                    relationship_projection::clock_domain_token(r.decided_at.domain),
+                ])?;
+            }
+
+            // WITHDRAWALS. A seeded key the fold no longer holds was withdrawn
+            // by a decision in this range, and an upsert-only writer would
+            // leave it standing -- the table would keep asserting an identity
+            // the newest authorized decision revoked. Scoped to the keys this
+            // fold SEEDED rather than "delete everything not in `acc`", so a
+            // fold and a concurrent one cannot delete each other's rows.
+            let mut drop =
+                tx.prepare("DELETE FROM relationships_projection WHERE low = ?1 AND high = ?2")?;
+            for key in &seeded {
+                if !acc.contains_key(key) {
+                    drop.execute(params![key.0.as_str(), key.1.as_str()])?;
+                }
+            }
+
+            tx.execute(
+                "INSERT INTO projection_checkpoint (name, generation, state_digest)
+                 VALUES (?1, ?2, ?3)
+                 ON CONFLICT(name) DO UPDATE SET
+                     generation = excluded.generation,
+                     state_digest = excluded.state_digest",
+                params![
+                    relationship_projection::RELATIONSHIP_PROJECTION,
+                    head,
+                    relationship_projection::state_digest_of(&acc)
+                ],
+            )?;
+        }
+        tx.commit()?;
+        Ok(head)
+    }
+
+    /// **One relationship, by canonical pair** — a point read.
+    ///
+    /// `WHERE low = ?1 AND high = ?2` against `PRIMARY KEY (low, high)`, so the
+    /// result is at most one row regardless of how many relationships the fleet
+    /// has accumulated. STRUCTURALLY bounded, in the sense
+    /// `ci/store_boundedness_baseline.json` records for `current`.
+    ///
+    /// This exists because the first draft of
+    /// [`WorldStore::relationship_provenance`] answered a one-pair question by
+    /// calling [`WorldStore::load_relationship_projection`] and indexing the
+    /// result — a whole-table scan behind a point-read signature, which is
+    /// defect #1441's exact shape and was caught by the boundedness gate rather
+    /// than by review.
+    ///
+    /// # Errors
+    ///
+    /// [`StoreError::CorruptRelationshipProjectionRow`] if the row cannot be
+    /// read back faithfully.
+    pub fn relationship(
+        &self,
+        pair: &kirra_world::same_as_candidate::CandidatePair,
+    ) -> Result<Option<relationship_projection::ProjectedRelationship>, StoreError> {
+        if !self.has_relationship_projection()? {
+            return Ok(None);
+        }
+        let mut stmt = self.conn.prepare(
+            "SELECT low, high, decided_generation, candidate_observation_id,
+                    adjudicator, decided_at_ms, decided_at_domain
+             FROM relationships_projection WHERE low = ?1 AND high = ?2",
+        )?;
+        match stmt.query_row(params![pair.low().as_str(), pair.high().as_str()], |r| {
+            Ok(relationship_from_row(r))
+        }) {
+            Ok(row) => Ok(Some(row?)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    /// Every relationship that currently holds, keyed by canonical pair.
+    ///
+    /// # Errors
+    ///
+    /// [`StoreError::CorruptRelationshipProjectionRow`] if a stored row cannot
+    /// be read back faithfully.
+    pub fn load_relationship_projection(
+        &self,
+    ) -> Result<
+        std::collections::BTreeMap<
+            relationship_projection::PairKey,
+            relationship_projection::ProjectedRelationship,
+        >,
+        StoreError,
+    > {
+        let mut out = std::collections::BTreeMap::new();
+        if !self.has_relationship_projection()? {
+            return Ok(out);
+        }
+        let mut stmt = self.conn.prepare(
+            "SELECT low, high, decided_generation, candidate_observation_id,
+                    adjudicator, decided_at_ms, decided_at_domain
+             FROM relationships_projection ORDER BY low ASC, high ASC",
+        )?;
+        let mut rows = stmt.query([])?;
+        while let Some(r) = rows.next()? {
+            let row = relationship_from_row(r)?;
+            out.insert(relationship_projection::pair_key(&row.pair), row);
+        }
+        Ok(out)
+    }
+
+    /// A digest over the relationship projection, in key order.
+    ///
+    /// # Errors
+    ///
+    /// As [`WorldStore::load_relationship_projection`].
+    pub fn relationship_projection_state_digest(&self) -> Result<String, StoreError> {
+        Ok(relationship_projection::state_digest_of(
+            &self.load_relationship_projection()?,
+        ))
+    }
+
+    /// **How well a promoted relationship's candidate evidence still resolves.**
+    ///
+    /// The read side of the scope statement in
+    /// [`crate::relationship_projection`]: the relationship is authoritative as
+    /// adjudicated, and this answers the *separate* question of whether the
+    /// proposal it cites is still in the log.
+    ///
+    /// It returns box 4b's [`CitationResolution`] rather than a boolean, and
+    /// that is the structural half of "must not be upgraded to fully
+    /// evidenced": `Resolved` cannot be constructed without a visible carrier,
+    /// so a compacted candidate degrades to `Dangling { PossiblyCompacted }` by
+    /// construction rather than by a caller remembering to check.
+    ///
+    /// `Ok(None)` means no such relationship holds — distinct from a
+    /// relationship whose evidence dangles, which is `Some(Dangling)`.
+    ///
+    /// # Errors
+    ///
+    /// [`StoreError::CorruptRelationshipProjectionRow`] if the row cannot be
+    /// read back, or [`StoreError::Sqlite`] on storage failure.
+    ///
+    /// [`CitationResolution`]: provenance_graph::CitationResolution
+    pub fn relationship_provenance(
+        &self,
+        pair: &kirra_world::same_as_candidate::CandidatePair,
+    ) -> Result<Option<provenance_graph::CitationResolution>, StoreError> {
+        use provenance_graph::CitationLookup as _;
+
+        let Some(row) = self.relationship(pair)? else {
+            return Ok(None);
+        };
+        // Pinned at the DECIDING generation, not at the head. The question is
+        // whether the evidence that decision rested on is still visible, and
+        // resolving at the head would let an observation appended afterwards
+        // stand in for one that was compacted away -- box 4b's historical
+        // visibility rule, applied to the one pin that makes it meaningful.
+        let at = row.decided_generation;
+        let carriers = self.carriers(row.candidate_observation_id.as_str(), at)?;
+        let spans = self.compacted_spans(at)?;
+        Ok(Some(provenance_graph::resolve_citation(
+            &carriers, at, &spans,
+        )))
+    }
+
     /// Every projected entity, keyed by id.
     ///
     /// # Errors
@@ -3674,6 +4055,105 @@ impl WorldStore {
 // ===========================================================================
 
 /// Columns the fold reads, in one place so the two readers cannot drift.
+/// Decode one `relationships_projection` row, fail-closed.
+///
+/// **Refuses, never repairs.** The columns are written only by the fold, so a
+/// row that disagrees with itself means the file was edited underneath the
+/// store — and a rebuildable view's recovery is
+/// [`WorldStore::rebuild_relationship_projection`], not a guess at what an
+/// operator decided.
+///
+/// Shared by the whole-table load and the point read so the two cannot come to
+/// disagree about what a stored row means. Column order is the one both
+/// statements select.
+fn relationship_from_row(
+    r: &rusqlite::Row<'_>,
+) -> Result<relationship_projection::ProjectedRelationship, StoreError> {
+    let low: String = r.get(0)?;
+    let high: String = r.get(1)?;
+    let decided_generation: i64 = r.get(2)?;
+    let candidate_observation_id: String = r.get(3)?;
+    let adjudicator: String = r.get(4)?;
+    let decided_at_ms: i64 = r.get(5)?;
+    let decided_at_domain: String = r.get(6)?;
+
+    // Through the domain constructors. A row whose ids no longer parse was not
+    // written by the fold.
+    let low_id = kirra_world::reference::EntityId::new(low.as_str()).map_err(|e| {
+        StoreError::CorruptRelationshipProjectionRow {
+            detail: format!("low `{low}`: {e}"),
+        }
+    })?;
+    let high_id = kirra_world::reference::EntityId::new(high.as_str()).map_err(|e| {
+        StoreError::CorruptRelationshipProjectionRow {
+            detail: format!("high `{high}`: {e}"),
+        }
+    })?;
+    let pair =
+        kirra_world::same_as_candidate::CandidatePair::new(low_id, high_id).map_err(|e| {
+            StoreError::CorruptRelationshipProjectionRow {
+                detail: format!("({low}, {high}): {e}"),
+            }
+        })?;
+    // Checked, not repaired: `CandidatePair::new` canonicalises, so a row stored
+    // the wrong way round would come back looking correct while colliding on
+    // one key with the row that was stored correctly.
+    if pair.low().as_str() != low {
+        return Err(StoreError::CorruptRelationshipProjectionRow {
+            detail: format!("stored pair ({low}, {high}) is not in canonical order"),
+        });
+    }
+    // The citation, through the same constructor the WRITE side parses it with
+    // (`decode_same_as_adjudication`). Checked rather than copied out: this
+    // string is the handle a reader follows back to the judged proposal, and an
+    // inadmissible one does NOT error downstream -- `carriers` simply matches
+    // nothing and the answer degrades to `Dangling`, which reads as "the
+    // evidence was compacted" when the truth is "this row was edited". That is
+    // the silent rewrite this decoder claims not to do.
+    //
+    // `ObservationId::new` does not normalize (`reference::admit`, and its
+    // `surrounding_whitespace_is_preserved_not_trimmed` test), so unlike the
+    // pair there is no repaired-vs-stored comparison to make.
+    kirra_world::reference::ObservationId::new(candidate_observation_id.as_str()).map_err(|e| {
+        StoreError::CorruptRelationshipProjectionRow {
+            detail: format!("candidate_observation_id `{candidate_observation_id}`: {e}"),
+        }
+    })?;
+    // And the adjudicator, through the DOMAIN constructor rather than an
+    // `is_empty` here, so "a decision nobody signed" has one definition and this
+    // path cannot drift from the one the write side enforces.
+    kirra_world::same_as_adjudication::AdjudicationAuthority::new(
+        kirra_world::same_as_adjudication::AUTHORIZED_ADJUDICATOR_CLASS,
+        adjudicator.clone(),
+    )
+    .map_err(|e| StoreError::CorruptRelationshipProjectionRow {
+        detail: format!("adjudicator: {e}"),
+    })?;
+    // The inverse of the fold's write-side refusal. A negative stored value is
+    // not a reading on any clock; the fold cannot write one.
+    let decided_ms =
+        u64::try_from(decided_at_ms).map_err(|_| StoreError::CorruptRelationshipProjectionRow {
+            detail: format!("decided_at_ms {decided_at_ms} is negative"),
+        })?;
+    let domain = relationship_projection::clock_domain_from_token(decided_at_domain.as_str())
+        .ok_or_else(|| StoreError::CorruptRelationshipProjectionRow {
+            detail: format!(
+                "decided_at_domain `{decided_at_domain}` is not a clock this build knows"
+            ),
+        })?;
+
+    Ok(relationship_projection::ProjectedRelationship {
+        pair,
+        decided_generation,
+        candidate_observation_id,
+        adjudicator,
+        decided_at: kirra_world::observation::DomainInstant {
+            ms: decided_ms,
+            domain,
+        },
+    })
+}
+
 const CLAIM_COLUMNS: &str = "subject, predicate, object, kind, payload, frame_id, map_id, \
      source, valid_from_ms, valid_to_ms, txn_time_ms, generation, event_id, chain_digest, \
      origin, corroboration, corroboration_n, adjudication";

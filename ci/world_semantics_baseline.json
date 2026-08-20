@@ -55,6 +55,13 @@
         "corpus_digest": "d74f62272fc120646d699e587bfd181e55aa00b00e57b7e23542245fb6f65b4a",
         "source_pin": "07e6d2b8b7d86207a61231c7dfa1e4df46be0240632bba3d15e171e42a5d7b4b"
       }
+    ],
+    "relationship_fold": [
+      {
+        "version": 1,
+        "corpus_digest": "db4975d3adc118885e0c180c58ac45311272df617e0b9f00333571b14cff3b95",
+        "source_pin": "e82c8a546104d622f71bb2c12e63670ad4c8a0733ac02eb88e2c7138b991b6b8"
+      }
     ]
   }
 }

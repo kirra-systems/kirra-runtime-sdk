@@ -74,8 +74,9 @@ use kirra_world_store::provenance_graph::{
     ProvenanceTree,
 };
 use kirra_world_store::semantics::{
-    self, corpus_digest, corpus_rendering, entity_corpus, render_entities, render_subjects,
-    render_world_current, subject_corpus, world_current_corpus, RuleId, SEMANTICS,
+    self, corpus_digest, corpus_rendering, entity_corpus, relationship_corpus, render_entities,
+    render_relationships, render_subjects, render_world_current, subject_corpus,
+    world_current_corpus, RuleId, SEMANTICS,
 };
 use kirra_world_store::subject_projection::{
     ProjectedSubject, SubjectKey, SubjectObservation, SummaryKind,
@@ -659,6 +660,203 @@ fn the_lineage_corpus_catches_dropping_unconfirmed_candidates() {
     );
 }
 
+// --- relationship_fold ---------------------------------------------------
+
+/// Fold the relationship corpus with a caller-supplied outcome policy.
+///
+/// The three variants below differ only in what a non-`Promoted` decision does,
+/// which is the whole of this reducer's discretion — the promotion arm has no
+/// choices to get wrong.
+fn fold_relationships_with(
+    withdraws: impl Fn(kirra_world::same_as_adjudication::Outcome) -> bool,
+) -> String {
+    use kirra_world::same_as_adjudication::Outcome;
+    use kirra_world_store::relationship_projection::{PairKey, ProjectedRelationship};
+
+    let mut acc: std::collections::BTreeMap<PairKey, ProjectedRelationship> =
+        std::collections::BTreeMap::new();
+    for (generation, d) in relationship_corpus() {
+        let key = (
+            d.pair.low().as_str().to_owned(),
+            d.pair.high().as_str().to_owned(),
+        );
+        if d.outcome == Outcome::Promoted {
+            acc.insert(
+                key,
+                ProjectedRelationship {
+                    pair: d.pair.clone(),
+                    decided_generation: generation,
+                    candidate_observation_id: d.candidate_observation_id.clone(),
+                    adjudicator: d.adjudicator.clone(),
+                    decided_at: d.decided_at,
+                },
+            );
+        } else if withdraws(d.outcome) {
+            acc.remove(&key);
+        }
+    }
+    render_relationships(&acc)
+}
+
+/// **`Unresolved` treated as an abstention.** The policy choice box 5a made,
+/// as a variant: a fold that leaves a standing promotion alone when the
+/// operator says "I can no longer tell" keeps `(b, c)` in the projection.
+///
+/// This is the control that pins the choice to the version rather than to a
+/// paragraph — changing the policy now moves the digest.
+#[test]
+fn the_relationship_corpus_catches_unresolved_abstaining() {
+    use kirra_world::same_as_adjudication::Outcome;
+    assert_variant_is_caught(
+        RuleId::RelationshipFold,
+        "unresolved_abstains",
+        &fold_relationships_with(|o| o == Outcome::Rejected),
+    );
+}
+
+/// **A rejection treated as an abstention.** The stronger version of the same
+/// axis: a fold that never withdraws keeps every pair it ever promoted, so the
+/// projection would go on asserting an identity an operator explicitly revoked.
+#[test]
+fn the_relationship_corpus_catches_a_fold_that_never_withdraws() {
+    assert_variant_is_caught(
+        RuleId::RelationshipFold,
+        "never_withdraws",
+        &fold_relationships_with(|_| false),
+    );
+}
+
+/// **Transitive closure.** `(a, b)` and `(b, c)` are each promoted, so a fold
+/// that emitted the traversed relation would render a third row.
+/// `KIRRA-WM-TRANSITIVITY-001` forbids that, and this is what makes the
+/// corpus able to see it rather than merely not doing it.
+#[test]
+fn the_relationship_corpus_catches_transitive_closure() {
+    use kirra_world::same_as_adjudication::Outcome;
+    use kirra_world_store::relationship_projection::{
+        fold_same_as_adjudication, ProjectedRelationship,
+    };
+
+    // The real fold, then ONE round of closure over whatever it produced --
+    // which is the smallest version of the rule this layer is forbidden to
+    // have. It runs against the corpus at the point where (a, b) and (b, c)
+    // are both standing, so a closure step has something to close.
+    let mut acc = std::collections::BTreeMap::new();
+    for (generation, d) in relationship_corpus() {
+        // Stop before the trailing `Unresolved`, which withdraws (b, c) and
+        // would leave the closure with nothing to do -- the corpus would then
+        // fail to discriminate a rule it is supposed to see.
+        if d.outcome == Outcome::Unresolved {
+            break;
+        }
+        fold_same_as_adjudication(&mut acc, &d, generation);
+    }
+    let held: Vec<ProjectedRelationship> = acc.values().cloned().collect();
+    for left in &held {
+        for right in &held {
+            if left.pair.high() == right.pair.low() {
+                let synthesized = kirra_world::same_as_candidate::CandidatePair::new(
+                    left.pair.low().clone(),
+                    right.pair.high().clone(),
+                )
+                .expect("a distinct synthesized pair");
+                acc.insert(
+                    (
+                        synthesized.low().as_str().to_owned(),
+                        synthesized.high().as_str().to_owned(),
+                    ),
+                    ProjectedRelationship {
+                        pair: synthesized,
+                        decided_generation: left.decided_generation,
+                        candidate_observation_id: left.candidate_observation_id.clone(),
+                        adjudicator: left.adjudicator.clone(),
+                        decided_at: left.decided_at,
+                    },
+                );
+            }
+        }
+    }
+    let closed = render_relationships(&acc);
+
+    // Non-vacuity: the variant must actually have synthesized something, or
+    // this test would pass by comparing two renderings of the same prefix.
+    assert!(
+        closed.contains("a\u{1f}c"),
+        "the closure variant must have produced (a, c): {closed:?}"
+    );
+    assert_variant_is_caught(RuleId::RelationshipFold, "transitive_closure", &closed);
+}
+
+/// **A rendering that drops the adjudicator, or the clock domain, or both.**
+///
+/// Raised on review of #1467: the first draft rendered neither, so a reducer
+/// that hardcoded an adjudicator or coerced every instant onto one clock would
+/// have folded the corpus to the same digest.
+///
+/// The variant here is a rendering rather than a fold, deliberately. What is
+/// under test is whether the CORPUS carries enough variation for those fields
+/// to be observable — and that question is answered by removing them from the
+/// rendering and seeing whether anything moves. If the corpus named one
+/// operator on one clock, this test would fail, which is exactly the signal it
+/// exists to give.
+#[test]
+fn the_relationship_corpus_catches_a_dropped_adjudicator_or_clock_domain() {
+    use kirra_world_store::relationship_projection::{self, PairKey, ProjectedRelationship};
+    use std::collections::BTreeMap;
+
+    fn render_without(
+        rows: &BTreeMap<PairKey, ProjectedRelationship>,
+        adjudicator: bool,
+        domain: bool,
+    ) -> String {
+        let mut out = String::new();
+        for ((low, high), r) in rows {
+            out.push_str(low);
+            out.push('\u{1f}');
+            out.push_str(high);
+            out.push('\u{1f}');
+            out.push_str(&r.decided_generation.to_string());
+            out.push('\u{1f}');
+            out.push_str(&r.candidate_observation_id);
+            out.push('\u{1f}');
+            if adjudicator {
+                out.push_str(&r.adjudicator);
+            }
+            out.push('\u{1f}');
+            out.push_str(&r.decided_at.ms.to_string());
+            out.push('\u{1f}');
+            if domain {
+                out.push_str(relationship_projection::clock_domain_token(
+                    r.decided_at.domain,
+                ));
+            }
+            out.push('\u{1e}');
+        }
+        out
+    }
+
+    let folded =
+        relationship_projection::fold_all(relationship_corpus().iter().map(|(g, d)| (*g, d)));
+    // Sanity: rendering WITH both must reproduce the real one, or the variants
+    // below would be differing for the wrong reason.
+    assert_eq!(
+        render_without(&folded, true, true),
+        corpus_rendering(RuleId::RelationshipFold),
+        "the variant renderer must agree with the real one when it drops nothing"
+    );
+
+    assert_variant_is_caught(
+        RuleId::RelationshipFold,
+        "adjudicator_dropped",
+        &render_without(&folded, false, true),
+    );
+    assert_variant_is_caught(
+        RuleId::RelationshipFold,
+        "clock_domain_dropped",
+        &render_without(&folded, true, false),
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Coverage of the control table itself
 // ---------------------------------------------------------------------------
@@ -679,6 +877,7 @@ fn every_rule_has_at_least_one_sensitivity_control() {
         RuleId::SubjectSummaryFold,
         RuleId::LineageSelection,
         RuleId::CitationResolution,
+        RuleId::RelationshipFold,
     ];
     for rule in RuleId::all() {
         assert!(
