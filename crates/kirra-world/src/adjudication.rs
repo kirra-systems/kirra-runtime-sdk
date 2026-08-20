@@ -976,8 +976,18 @@ impl IdentityAdjudication {
 pub fn promote_confirmed_same_as(
     adjudications: &[SameAsAdjudication],
 ) -> Result<Vec<IdentityAdjudication>, AdjudicationError> {
-    // BTreeSet iteration order is the canonical pair order, so the output is a
-    // deterministic function of the input SET rather than of its arrangement.
+    // BTreeSet iteration order is the canonical pair order, so WHICH merges come
+    // out, in what order, and in which direction do not depend on how
+    // `adjudications` is arranged. The citation order INSIDE a merge does --
+    // it is first-seen across the slice.
+    //
+    // That asymmetry is deliberate, not an oversight. `Justification` preserves
+    // recorded order on purpose ("a constructor that tidied it would be editing
+    // the record"), so sorting here to buy set-determinism would fight that
+    // discipline for a property box 2c does not ask for: 2c's requirement is
+    // that the same log yield the same IDENTITY -- which entity resolves to
+    // which -- and that half IS arrangement-independent. Citation order is
+    // provenance, not identity.
     let confirmed = confirmed_relations(adjudications);
     let mut promoted = Vec::with_capacity(confirmed.len());
 

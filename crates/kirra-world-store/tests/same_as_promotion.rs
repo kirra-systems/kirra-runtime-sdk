@@ -16,7 +16,8 @@
 //! is-it-wired check, and fail here.
 
 use kirra_world::adjudication::{
-    promote_confirmed_same_as, AssertIdentity, IdentityAdjudication, Justification,
+    promote_confirmed_same_as, AdjudicationError, AssertIdentity, IdentityAdjudication,
+    Justification,
 };
 use kirra_world::observation::{
     ClockDomain, Confidence, ConfidenceBasis, DomainInstant, SourceClass,
@@ -78,6 +79,27 @@ fn operator() -> AdjudicationAuthority {
 fn decide(c: &SameAsCandidate, outcome: Outcome, ms: u64) -> SameAsAdjudication {
     SameAsAdjudication::record(c, vec![obs(OBS)], operator(), outcome, at(ms))
         .expect("adjudication")
+}
+
+/// `decide`, but the caller names the clock the decision was read from.
+///
+/// Separate from `decide` rather than a fourth parameter on it: every other test
+/// here is about identity, where the domain is noise, and threading `System`
+/// through six call sites would bury the one place the domain is the subject.
+fn decide_on(
+    c: &SameAsCandidate,
+    outcome: Outcome,
+    ms: u64,
+    domain: ClockDomain,
+) -> SameAsAdjudication {
+    SameAsAdjudication::record(
+        c,
+        vec![obs(OBS)],
+        operator(),
+        outcome,
+        DomainInstant { ms, domain },
+    )
+    .expect("adjudication")
 }
 
 /// Seed a store with the asserted entities, then whatever identity
@@ -269,5 +291,99 @@ fn promoted_then_rejected_still_promotes_today_which_is_a_ruling_2b_owes() {
         promoted.len(),
         1,
         "today a later rejection does not un-confirm: {promoted:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// The refusal branch, and the boundary of the determinism claim
+// ---------------------------------------------------------------------------
+
+/// **Two clocks cannot be ordered, so the promotion refuses instead of guessing.**
+///
+/// One pair confirmed twice, once off the system clock and once off the boundary
+/// clock. "Earliest promotion wins" needs an ordering, and `DomainInstant`
+/// refuses to supply one across domains — comparing raw milliseconds from two
+/// clocks is not imprecise, it is meaningless. So this returns
+/// `PromotionDomainsDiffer` rather than stamping the identity with whichever
+/// number happened to be smaller.
+///
+/// Paired with `..._is_only_the_domains` below, which holds everything else
+/// constant and swaps the domain back: without that twin, this test would still
+/// pass if the promotion started refusing every re-affirmation for some
+/// unrelated reason.
+#[test]
+fn a_cross_domain_re_affirmation_is_refused_rather_than_ordered() {
+    let c = candidate("a", "b");
+    let err = promote_confirmed_same_as(&[
+        decide_on(&c, Outcome::Promoted, 90, ClockDomain::System),
+        decide_on(&c, Outcome::Promoted, 20, ClockDomain::Boundary),
+    ])
+    .expect_err("two clock domains must not be ordered");
+
+    let AdjudicationError::PromotionDomainsDiffer { pair } = err else {
+        panic!("expected PromotionDomainsDiffer, got {err:?}");
+    };
+    assert_eq!(
+        (pair.low().as_str(), pair.high().as_str()),
+        ("a", "b"),
+        "the refusal must name the pair it could not date"
+    );
+}
+
+/// **The non-vacuity twin.** The same two decisions, same instants, same order —
+/// only both now read off one clock — promote normally, at the earlier of the
+/// two.
+///
+/// This is what makes the refusal above attributable to the DOMAIN rather than
+/// to re-affirmation, to the 90-then-20 ordering, or to anything else the two
+/// tests share.
+#[test]
+fn the_only_thing_that_refuses_it_is_only_the_domains() {
+    let c = candidate("a", "b");
+    let promoted = promote_confirmed_same_as(&[
+        decide_on(&c, Outcome::Promoted, 90, ClockDomain::Boundary),
+        decide_on(&c, Outcome::Promoted, 20, ClockDomain::Boundary),
+    ])
+    .expect("one clock domain orders fine");
+
+    assert_eq!(promoted.len(), 1, "one pair, one merge: {promoted:?}");
+    assert_eq!(
+        promoted[0].at(),
+        DomainInstant {
+            ms: 20,
+            domain: ClockDomain::Boundary
+        },
+        "the earliest promotion is still when the identity began"
+    );
+}
+
+/// **Arrangement changes provenance order, never identity.**
+///
+/// The precise boundary of the determinism claim in `promote_confirmed_same_as`,
+/// pinned so the corrected comment there is checkable rather than asserted.
+/// Two pairs, fed in both orders:
+///
+/// * the merge LIST is identical — same pairs, same directions, same order,
+///   because `confirmed_relations` yields them through a `BTreeSet`;
+/// * so a caller asking "what does `b` resolve to" gets the same answer either
+///   way, which is the half box 2c actually requires.
+///
+/// Citation order within a merge is the half that does follow arrangement, and
+/// `Justification` preserves recorded order deliberately. That is why this test
+/// asserts equality of the whole merge list here — with one citation per
+/// adjudication there is nothing for arrangement to reorder — rather than
+/// claiming a set-determinism the function does not have.
+#[test]
+fn feeding_the_same_adjudications_in_either_order_yields_the_same_merges() {
+    let ab = decide(&candidate("a", "b"), Outcome::Promoted, 5);
+    let cd = decide(&candidate("c", "d"), Outcome::Promoted, 7);
+
+    let forward = promote_confirmed_same_as(&[ab.clone(), cd.clone()]).expect("promotion");
+    let reversed = promote_confirmed_same_as(&[cd, ab]).expect("promotion");
+
+    assert_eq!(forward.len(), 2, "two pairs, two merges: {forward:?}");
+    assert_eq!(
+        forward, reversed,
+        "the merge list must not depend on the arrangement of the input"
     );
 }
