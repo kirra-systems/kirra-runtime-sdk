@@ -393,7 +393,8 @@ fn the_two_precedence_rules_disagree_and_only_one_has_a_production_consumer() {
     assert_ne!(
         confirmed_relations(&history).len(),
         folded.len(),
-        "if these ever agree, one of the two precedence rules changed and this          pin should be retired deliberately rather than deleted to make a build green"
+        "if these ever agree, one of the two precedence rules changed; retire this \
+         pin deliberately rather than deleting it to make a build green"
     );
 }
 

@@ -1231,7 +1231,7 @@ does not describe is how a residue disappears.
       > but it must never silently alter WHETHER the promoted relationship
       > exists.
 
-      # Why the alternative was refused
+      **Why the alternative was refused:**
 
       Protecting every supporting candidate would couple identity durability to
       raw-evidence retention and produce a **reachability-based retention
@@ -1242,7 +1242,7 @@ does not describe is how a residue disappears.
       explanatory detail — which Tier 4 already reports the loss of, honestly,
       for free.
 
-      # What makes this a ruling and not a description
+      **What makes this a ruling and not a description:**
 
       **Nothing changed in the code.** This ratifies behaviour 5a already had,
       and a no-change ruling has one failure mode: nothing stops it drifting.
@@ -1263,14 +1263,14 @@ does not describe is how a residue disappears.
       aspirational: a change that altered *whether* the relationship exists moves
       the digest, and a change that only degraded the *explanation* does not.
 
-      # Scope, stated so it is not read wider than it is
+      **Scope, stated so it is not read wider than it is:**
 
       This rules the relationship between **promotion and compaction**. It does
       not rule how long raw candidates live — that is retention policy, and
       `KIRRA-WM-IDENTITY-FRESHNESS-001` already declined to rule whether a
       matcher's PROPOSAL goes stale.
 
-      # Found while recording this ruling: TWO precedence rules now disagree
+      **Found while recording this ruling: TWO precedence rules now disagree.**
 
       Not part of this ruling, and surfaced here because the **next** step is
       where it bites.
