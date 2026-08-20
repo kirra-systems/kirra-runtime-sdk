@@ -50,7 +50,7 @@ use std::collections::BTreeSet;
 use crate::observation::{DomainInstant, SourceClass};
 use crate::reference::ObservationId;
 use crate::relationship::Predicate;
-use crate::same_as_candidate::{CandidatePair, SameAsCandidate};
+use crate::same_as_candidate::CandidatePair;
 
 /// The one writer class authorized to promote, per `KIRRA-WM-PROMOTION-001`.
 pub const AUTHORIZED_ADJUDICATOR_CLASS: SourceClass = SourceClass::Operator;
@@ -181,6 +181,7 @@ pub enum Outcome {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SameAsAdjudication {
     pair: CandidatePair,
+    candidate_observation_id: ObservationId,
     cited: Vec<ObservationId>,
     authority: AdjudicationAuthority,
     outcome: Outcome,
@@ -188,18 +189,33 @@ pub struct SameAsAdjudication {
 }
 
 impl SameAsAdjudication {
-    /// Record a decision about a candidate.
+    /// Record a decision about a **persisted** candidate.
     ///
-    /// Takes the candidate by reference: an adjudication **cites** a candidate,
-    /// it never consumes one. That is what makes "a rejected candidate survives
-    /// as evidence" a property of the signature rather than a convention.
+    /// # There is no `&SameAsCandidate` parameter, deliberately
+    ///
+    /// An earlier signature took the candidate by value-reference, which meant
+    /// an adjudicator could be handed a caller-constructed struct that merely
+    /// *looked* like evidence. Judging that is judging an assertion, not a
+    /// record — and the whole point of `KIRRA-WM-PROMOTION-001` is that
+    /// confirmed identity rests on recorded evidence.
+    ///
+    /// So this takes the `pair` and the **`candidate_observation_id`** of a
+    /// candidate that exists in the log. The production caller is
+    /// `WorldStore::adjudicate_same_as`, which obtains both by LOADING the row
+    /// and validating it; nothing here can be satisfied by a value that was
+    /// never written.
+    ///
+    /// The id is kept on the record rather than merely checked, because *which*
+    /// persisted candidate was judged is part of what a later reader needs — a
+    /// decision that cannot name its subject is not auditable.
     ///
     /// # Errors
     ///
     /// * [`AdjudicationError::NoCandidateCited`] — `cited` is empty.
     /// * [`AdjudicationError::DuplicateCitation`] — an id appears twice.
     pub fn record(
-        candidate: &SameAsCandidate,
+        pair: CandidatePair,
+        candidate_observation_id: ObservationId,
         cited: Vec<ObservationId>,
         authority: AdjudicationAuthority,
         outcome: Outcome,
@@ -213,12 +229,19 @@ impl SameAsAdjudication {
             return Err(AdjudicationError::DuplicateCitation);
         }
         Ok(Self {
-            pair: candidate.pair().clone(),
+            pair,
+            candidate_observation_id,
             cited,
             authority,
             outcome,
             decided_at,
         })
+    }
+
+    /// The persisted candidate observation this decision judged.
+    #[must_use]
+    pub fn candidate_observation_id(&self) -> &ObservationId {
+        &self.candidate_observation_id
     }
 
     /// The pair decided about.
@@ -295,7 +318,7 @@ mod tests {
     use super::*;
     use crate::observation::{ClockDomain, Confidence, ConfidenceBasis};
     use crate::reference::EntityId;
-    use crate::same_as_candidate::MatcherIdentity;
+    use crate::same_as_candidate::{MatcherIdentity, SameAsCandidate};
 
     const OBS_A: &str = "01ARZ3NDEKTSV4RRFFQ69G5FAV";
     const OBS_B: &str = "01ARZ3NDEKTSV4RRFFQ69G5FAW";
@@ -326,7 +349,15 @@ mod tests {
         .expect("valid candidate")
     }
     fn decide(c: &SameAsCandidate, o: Outcome, cite: &str) -> SameAsAdjudication {
-        SameAsAdjudication::record(c, vec![obs(cite)], operator(), o, at(1)).expect("recordable")
+        SameAsAdjudication::record(
+            c.pair().clone(),
+            obs("cand-obs-1"),
+            vec![obs(cite)],
+            operator(),
+            o,
+            at(1),
+        )
+        .expect("recordable")
     }
 
     /// **Only the ruled class may promote.** A matcher writes as `Derivation`,
@@ -354,13 +385,21 @@ mod tests {
     fn an_adjudication_must_cite_the_candidate() {
         let c = candidate("robot-a", "robot-b", OBS_A);
         assert_eq!(
-            SameAsAdjudication::record(&c, vec![], operator(), Outcome::Promoted, at(1))
-                .unwrap_err(),
+            SameAsAdjudication::record(
+                c.pair().clone(),
+                obs("cand-obs-1"),
+                vec![],
+                operator(),
+                Outcome::Promoted,
+                at(1)
+            )
+            .unwrap_err(),
             AdjudicationError::NoCandidateCited
         );
         assert_eq!(
             SameAsAdjudication::record(
-                &c,
+                c.pair().clone(),
+                obs("cand-obs-1"),
                 vec![obs(OBS_A), obs(OBS_A)],
                 operator(),
                 Outcome::Promoted,

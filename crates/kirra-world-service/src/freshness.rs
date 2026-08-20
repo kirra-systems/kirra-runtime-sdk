@@ -167,6 +167,37 @@ pub const RULED: &[(SemanticClass, FreshnessPolicy)] = &[
         },
         FreshnessPolicy::Timeless,
     ),
+    // `KIRRA-WM-IDENTITY-FRESHNESS-001` (2026-08-20). An **adjudicated identity
+    // decision** does not age.
+    //
+    // The distinction this ruling turns on, stated because it is the whole
+    // argument and it is easy to collapse:
+    //
+    //   candidate evidence   — "I currently think A and B may be the same"
+    //                          -> freshness may matter
+    //   adjudicated decision — "an authorized adjudicator DECIDED A and B are
+    //                          the same identity"
+    //                          -> does not age out merely because time passed
+    //
+    // A matcher's proposal is a present-tense belief resting on observations
+    // that may themselves be bounded. A decision recorded by an authorized
+    // adjudicator is a different kind of fact: it remains valid until CHANGED by
+    // later adjudication -- `SplitEntity`, `ForgetEntity`, or superseding
+    // identity evidence -- not until a clock runs out. Ageing it would make
+    // identity silently dissolve with nobody deciding anything, which is exactly
+    // what §6.3's "a merged id stays resolvable forever" forbids.
+    //
+    // Note this rules the DECISION row (`same_as_adjudication`), not the
+    // candidate. `(observation, "same_as")` -- the matcher's proposal -- stays
+    // in `ci/freshness_unruled_baseline.json`, deliberately: whether a PROPOSAL
+    // goes stale is a separate question this ruling does not answer.
+    (
+        SemanticClass {
+            kind: "same_as_adjudication",
+            predicate: Some("same_as_adjudged"),
+        },
+        FreshnessPolicy::Timeless,
+    ),
 ];
 
 /// The ruled disposition for a semantic class, if one exists.

@@ -44,6 +44,11 @@
       "kind": "observation",
       "predicate": "serial_number",
       "why": "The identifying predicate box 2a's end-to-end fixture observes, so the exact-identifier rule has evidence to survey. Knowingly unruled: whether a serial number ages is a question about the asset-tagging regime that issues it, not about Kirra World -- a serial is timeless while it is affixed and meaningless the moment the tag is replaced, and the class alone cannot tell those apart. No production producer writes it today; when one does, it rules its own predicate rather than inheriting a disposition invented for a fixture."
+    },
+    {
+      "kind": "observation",
+      "predicate": "near",
+      "why": "A fixture predicate in box 2b's adversarial suite, standing in for 'a candidate-status claim that proposes something other than co-reference' so the wrong-predicate refusal can be isolated. Knowingly unruled: proximity is plainly recency-sensitive, but by how much is a question about the sensing regime rather than about Kirra World, and no production producer writes it. A real proximity producer rules its own predicate rather than inheriting a number invented for a fixture."
     }
   ]
 }

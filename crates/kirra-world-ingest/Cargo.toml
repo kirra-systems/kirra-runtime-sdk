@@ -41,3 +41,10 @@ publish = false  # proprietary (see COPYRIGHT) — not for crates.io
 kirra-world-store = { path = "../kirra-world-store" }
 # SameAsCandidate, MatcherIdentity, Confidence — the domain types the door takes.
 kirra-world = { path = "../kirra-world" }
+
+[dev-dependencies]
+# `test-support` for `head_generation_for_test`: box 2b's provenance-walk tests
+# need the generation of the row they just appended, and inferring it from
+# `count()` would bake in "generations are dense" -- which compaction makes
+# false. Dev-only, so the production build of this crate is unchanged.
+kirra-world-store = { path = "../kirra-world-store", features = ["test-support"] }
