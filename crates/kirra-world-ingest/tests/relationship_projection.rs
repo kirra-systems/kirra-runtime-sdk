@@ -940,3 +940,105 @@ fn a_projection_row_signed_by_nobody_is_refused() {
         other => panic!("an unsigned decision must be refused: {other:?}"),
     }
 }
+
+/// **`KIRRA-WM-EVIDENCE-RETENTION-001`'s caveat, as a mechanical check.**
+///
+/// > Compaction may degrade the ability to explain WHY a promotion was made,
+/// > but it must never silently alter WHETHER the promoted relationship exists.
+///
+/// `a_promoted_relationship_survives_compaction_of_its_candidate` shows the
+/// relationship is still *there* and its citation degraded. This asserts the
+/// stronger and more mechanical half: the projection's **state digest** is
+/// unchanged across the compaction and a full rebuild after it.
+///
+/// The digest is the right instrument because of what it covers — the pair,
+/// `decided_generation`, the cited candidate id, the adjudicator, and the
+/// decided instant. So a change that altered *whether* the relationship exists,
+/// or *which decision* put it there, moves it; a change that only degraded the
+/// *explanation* cannot. That is exactly the line the ruling draws, and it is
+/// drawn here by a value rather than by a paragraph.
+///
+/// # The two halves must both hold, in the same run
+///
+/// Asserting digest-equality alone would pass on a store where the compaction
+/// silently did nothing, and asserting the degradation alone would pass on a
+/// store that lost the relationship entirely. Neither is the ruled behaviour.
+/// So this pins the conjunction: the explanation moved `Resolved` →
+/// `Dangling { PossiblyCompacted }`, and the relationship state did not move at
+/// all.
+#[test]
+fn compaction_degrades_the_explanation_and_never_the_relationship() {
+    let mut store = two_tracks_and_a_candidate("ruling-caveat");
+    decide(
+        &mut store,
+        "1",
+        "cand-obs-1",
+        Outcome::Promoted,
+        T0 as u64 + 10,
+    );
+    store.fold_relationship_projection().expect("fold");
+
+    let key = pair("track-a", "track-b");
+    let before_digest = store
+        .relationship_projection_state_digest()
+        .expect("digest");
+    let candidate_generation = match store
+        .relationship_provenance(&key)
+        .expect("provenance")
+        .expect("the relationship holds")
+    {
+        CitationResolution::Resolved { target_generation } => target_generation,
+        other => panic!("the explanation must be intact before compaction: {other:?}"),
+    };
+
+    let outcome = store
+        .compact_range(candidate_generation, candidate_generation, T0 + 100)
+        .expect("a raw candidate is compactable; the protected decision is not");
+    assert!(
+        outcome.removed > 0,
+        "the compaction must have removed something, or nothing is being tested"
+    );
+
+    // --- WHETHER: unchanged, and unchanged again after a rebuild from zero ---
+    assert_eq!(
+        store
+            .relationship_projection_state_digest()
+            .expect("digest"),
+        before_digest,
+        "compaction must not alter whether the promoted relationship exists"
+    );
+    store.rebuild_relationship_projection().expect("rebuild");
+    assert_eq!(
+        store
+            .relationship_projection_state_digest()
+            .expect("digest"),
+        before_digest,
+        "and a rebuild from the surviving log must reach the same state — the \
+         decision is durable because it is itself protected evidence, not \
+         because the projection table happened to still hold the row"
+    );
+
+    // --- WHY: degraded, honestly, and not collapsed ---
+    match store
+        .relationship_provenance(&key)
+        .expect("provenance")
+        .expect("the relationship still holds")
+    {
+        CitationResolution::Dangling {
+            reason: DanglingReason::PossiblyCompacted { spans, truncated },
+        } => {
+            assert!(!truncated);
+            assert!(
+                spans.contains(&candidate_generation),
+                "the degraded answer must name the compaction citation an \
+                 investigator would go and read: {spans:?}"
+            );
+        }
+        other => panic!(
+            "the explanation must degrade to PossiblyCompacted — never stay \
+             Resolved (fabricated evidence) and never become NeverVisible \
+             (§11.3's forbidden collapse of 'deleted' into 'never recorded'): \
+             {other:?}"
+        ),
+    }
+}
