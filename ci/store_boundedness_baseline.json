@@ -56,6 +56,10 @@
       "class": "operational",
       "why": "A write, classified with append and append_adjudication for the same reason: it is not a query and answers no domain question. One row per call, so there is nothing to bound -- the size of the write does not vary with the size of the store."
     },
+    "adjudicate_same_as": {
+      "class": "operational",
+      "why": "A write, classified with append and the other doors. Its one read is a point lookup (load_same_as_candidate, LIMIT 1) and it appends exactly one row, so nothing about its cost varies with the size of the store. Box 2b's sanctioned adjudication door."
+    },
     "as_of": {
       "class": "bounded",
       "why": "One subject at one bitemporal point. Same PRIMARY KEY bound as `current`."

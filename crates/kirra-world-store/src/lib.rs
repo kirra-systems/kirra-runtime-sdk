@@ -92,6 +92,7 @@ pub mod provenance_edges;
 pub mod provenance_graph;
 pub mod retention_driver;
 pub mod retention_sweeper;
+pub mod same_as_adjudication_record;
 pub mod schema;
 pub mod semantics;
 pub mod snapshot;
@@ -197,6 +198,8 @@ pub enum StoreError {
     /// SQLite said no — including the schema `CHECK` violations, which is
     /// deliberate. See [`schema`].
     Sqlite(rusqlite::Error),
+    /// An adjudication was refused — box 2b.
+    Adjudicate(same_as_adjudication_record::AdjudicateError),
     /// A stored row is not a well-formed derivation-class `same_as` candidate.
     ///
     /// Distinct from `Ok(None)` on purpose — see
@@ -430,6 +433,7 @@ impl std::fmt::Display for StoreError {
                 f,
                 "provenance index does not cover generation {requested} (floor {floor})"
             ),
+            Self::Adjudicate(e) => write!(f, "{e}"),
             Self::CandidateDecode(e) => write!(f, "stored same_as candidate: {e}"),
             Self::LlmCannotConfirm => write!(
                 f,
@@ -1798,6 +1802,149 @@ impl WorldStore {
             return Err(e.into());
         }
         Ok(generation)
+    }
+
+    /// **Adjudicate a persisted `same_as` candidate** — box 2b's sanctioned door.
+    ///
+    /// `KIRRA-WM-PROMOTION-001`: confirmed identity arrives only through an
+    /// explicitly authorized adjudicator, over recorded evidence.
+    ///
+    /// # The trust boundary is the signature
+    ///
+    /// [`SameAsAdjudicationRequest`](same_as_adjudication_record::SameAsAdjudicationRequest)
+    /// carries a candidate `ObservationId` and no candidate VALUE. An in-memory
+    /// `SameAsCandidate` cannot be passed here, so "adjudication acts on
+    /// persisted evidence" is not a check that could be forgotten — there is no
+    /// argument through which unpersisted evidence could arrive.
+    ///
+    /// The order matters: load → validate → decide → append. Nothing is written
+    /// until the evidence has been found and proved to be what it claims, so a
+    /// refused adjudication leaves no trace of having been attempted, and a
+    /// recorded one always names a candidate that exists.
+    ///
+    /// # What is validated
+    ///
+    /// * the observation **exists** ([`AdjudicateError::NoSuchCandidate`]);
+    /// * the row is a `derivation`-class, `candidate`-status, `same_as` claim
+    ///   with its support intact — all of it by going through
+    ///   [`Self::load_same_as_candidate`], whose decode ends in the domain's own
+    ///   constructor ([`AdjudicateError::NotACandidate`]);
+    /// * the **adjudicator is authorized** — v1 is `SourceClass::Operator` only
+    ///   ([`AdjudicateError::UnauthorizedAdjudicator`]). A `Derivation`-class
+    ///   "adjudicator" is a matcher confirming its own proposal, which is the
+    ///   exact loop the ruling exists to break.
+    ///
+    /// # The candidate survives
+    ///
+    /// Nothing here mutates or removes the candidate row, on any outcome. A
+    /// rejection is a **new** append-only record citing the same evidence — the
+    /// candidate remains in the ledger, because deleting the thing a judgement
+    /// is about destroys the judgement's subject.
+    ///
+    /// # Errors
+    ///
+    /// [`StoreError::Adjudicate`] wrapping the reason, or
+    /// [`StoreError::Sqlite`] if the log cannot be read or written.
+    pub fn adjudicate_same_as(
+        &mut self,
+        request: &same_as_adjudication_record::SameAsAdjudicationRequest<'_>,
+    ) -> Result<kirra_world::same_as_adjudication::SameAsAdjudication, StoreError> {
+        use same_as_adjudication_record as rec;
+
+        // 1. LOAD. `load_same_as_candidate` distinguishes "no such row" from
+        //    "that row is not a candidate", and both distinctions survive here:
+        //    an adjudicator told the wrong one would look in the wrong place.
+        let candidate = match self.load_same_as_candidate(request.candidate_observation_id) {
+            Ok(Some(c)) => c,
+            Ok(None) => {
+                return Err(StoreError::Adjudicate(
+                    rec::AdjudicateError::NoSuchCandidate {
+                        observation_id: request.candidate_observation_id.to_owned(),
+                    },
+                ))
+            }
+            Err(StoreError::CandidateDecode(e)) => {
+                return Err(StoreError::Adjudicate(
+                    rec::AdjudicateError::NotACandidate {
+                        detail: e.to_string(),
+                    },
+                ))
+            }
+            Err(e) => return Err(e),
+        };
+
+        // 2. AUTHORITY -- carried by the TYPE, not re-checked here.
+        //
+        //    An earlier draft of this method compared
+        //    `request.authority.class()` against `Operator` and refused
+        //    otherwise. That check was DEAD: `AdjudicationAuthority::new`
+        //    already refuses every class but `Operator`, and the type does not
+        //    even store one -- `class()` returns the constant. So the comparison
+        //    was a constant `false` dressed as a guard, which is worse than no
+        //    guard: a reader counts it as the enforcement and stops looking for
+        //    the real one.
+        //
+        //    Same reasoning `Justification` records for declining to offer
+        //    `is_empty`. An unauthorized adjudicator is UNREPRESENTABLE, so it
+        //    cannot reach this door -- see
+        //    `an_unauthorized_adjudicator_cannot_be_constructed_at_all`.
+        //
+        // 2. DECIDE. The pair comes from the LOADED candidate, never from the
+        //    caller -- so a decision cannot be recorded against a pair the
+        //    evidence does not name.
+        let adjudication = kirra_world::same_as_adjudication::SameAsAdjudication::record(
+            candidate.pair().clone(),
+            kirra_world::reference::ObservationId::new(request.candidate_observation_id).map_err(
+                |e| {
+                    StoreError::Adjudicate(rec::AdjudicateError::Domain {
+                        detail: e.to_string(),
+                    })
+                },
+            )?,
+            request.cited.clone(),
+            request.authority.clone(),
+            request.outcome,
+            request.decided_at,
+        )
+        .map_err(|e| {
+            StoreError::Adjudicate(rec::AdjudicateError::Domain {
+                detail: e.to_string(),
+            })
+        })?;
+
+        // 3. APPEND.
+        let payload = rec::encode_same_as_adjudication(&adjudication);
+        let provenance = rec::same_as_adjudication_provenance(&adjudication);
+        let prov: Vec<&str> = provenance.iter().map(String::as_str).collect();
+        let (subject, object) = rec::adjudication_columns(adjudication.pair());
+
+        self.append(&NewEvent {
+            event_id: request.event_id,
+            observation_id: request.observation_id,
+            txn_time_ms: request.txn_time_ms,
+            valid_from_ms: request.txn_time_ms,
+            valid_to_ms: None,
+            source: request.source,
+            source_version: request.source_version,
+            // The authorized class, checked above. `Operator` is not a default
+            // here -- it is the only value the check admits.
+            writer_class: WriterClass::Operator,
+            claim_status: ClaimStatus::Confirmed,
+            provenance: &prov,
+            frame_id: None,
+            map_id: None,
+            kind: rec::SAME_AS_ADJUDICATION_KIND,
+            subject: subject.as_str(),
+            subject_ref: None,
+            predicate: Some(rec::ADJUDICATION_PREDICATE_TOKEN),
+            object: Some(object.as_str()),
+            payload: payload.as_str(),
+            payload_schema: rec::SAME_AS_ADJUDICATION_PAYLOAD_SCHEMA,
+            retention_class: rec::SAME_AS_ADJUDICATION_RETENTION_CLASS,
+            trust: None,
+        })?;
+
+        Ok(adjudication)
     }
 
     /// Load a persisted `same_as` candidate **by its observation id** — the

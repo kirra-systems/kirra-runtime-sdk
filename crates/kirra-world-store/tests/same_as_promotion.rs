@@ -32,6 +32,13 @@ use kirra_world_store::{WorldStore, WriterClass};
 const T0: i64 = 1_700_000_000_000;
 const OBS: &str = "01ARZ3NDEKTSV4RRFFQ69G5FAV";
 const OBS2: &str = "01ARZ3NDEKTSV4RRFFQ69G5FB0";
+/// The persisted candidate these decisions judge.
+///
+/// Box 2b made adjudication name the candidate OBSERVATION rather than take a
+/// candidate value, so every record here carries one. These are pure-layer
+/// promotion tests, so the id is a fixture — the store door is what proves a
+/// real one exists (`kirra-world-ingest/tests/persisted_adjudication.rs`).
+const CANDIDATE_OBS: &str = "01ARZ3NDEKTSV4RRFFQ69G5FC1";
 
 fn eid(s: &str) -> EntityId {
     EntityId::new(s.to_string()).expect("entity id")
@@ -77,8 +84,15 @@ fn operator() -> AdjudicationAuthority {
 }
 
 fn decide(c: &SameAsCandidate, outcome: Outcome, ms: u64) -> SameAsAdjudication {
-    SameAsAdjudication::record(c, vec![obs(OBS)], operator(), outcome, at(ms))
-        .expect("adjudication")
+    SameAsAdjudication::record(
+        c.pair().clone(),
+        obs(CANDIDATE_OBS),
+        vec![obs(OBS)],
+        operator(),
+        outcome,
+        at(ms),
+    )
+    .expect("adjudication")
 }
 
 /// `decide`, but the caller names the clock the decision was read from.
@@ -93,7 +107,8 @@ fn decide_on(
     domain: ClockDomain,
 ) -> SameAsAdjudication {
     SameAsAdjudication::record(
-        c,
+        c.pair().clone(),
+        obs(CANDIDATE_OBS),
         vec![obs(OBS)],
         operator(),
         outcome,
@@ -220,7 +235,8 @@ fn promotion_does_not_depend_on_which_side_was_named_first() {
 #[test]
 fn the_promoted_merge_cites_the_adjudications_evidence() {
     let adj = SameAsAdjudication::record(
-        &candidate("a", "b"),
+        candidate("a", "b").pair().clone(),
+        obs(CANDIDATE_OBS),
         vec![obs(OBS), obs(OBS2)],
         operator(),
         Outcome::Promoted,

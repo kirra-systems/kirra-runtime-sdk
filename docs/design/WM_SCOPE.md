@@ -1031,7 +1031,7 @@ does not describe is how a residue disappears.
       in-memory cluster objects passed to an adjudicator. 2a needs to know
       nothing else about how confirmation works.
 
-- [ ] **2b — Adjudication / promotion.** The deterministic, auditable step that
+- [x] **2b — Adjudication / promotion. DONE 2026-08-20.** The deterministic, auditable step that
       turns a confirmed `same_as` into identity, and the **only** boundary at
       which a relation may affect canonical identity.
       **Unblocked: transitivity was ruled 2026-08-08**
@@ -1047,6 +1047,60 @@ does not describe is how a residue disappears.
       Rejection is a **separate append-only record** (not a deletion, and not a
       reversal); reversing an actual promotion is existing `SplitEntity`;
       `ForgetEntity` is erasure and is not a reversal mechanism.
+
+      **BUILT 2026-08-20 — adjudication acts on PERSISTED evidence.**
+      `SameAsAdjudication::record` no longer takes a `&SameAsCandidate`. It takes
+      the pair and the **`ObservationId` of a persisted candidate**, and the
+      production door `WorldStore::adjudicate_same_as` obtains both by LOADING
+      the row and validating it. An in-memory candidate with no persisted id
+      cannot enter the API — that is a property of the signature, not a check,
+      so there is deliberately no test for it.
+
+      Order is load → validate → decide → append: a refused attempt writes
+      nothing, and a recorded decision always names a candidate that exists.
+
+      **Two findings from writing the tests, both recorded because they are the
+      kind that survive review:**
+
+      1. **A dead guard.** The door originally compared
+         `authority.class()` against `Operator` and refused otherwise. That
+         comparison can never be true: `AdjudicationAuthority::new` refuses every
+         other class and the struct does not even store one — `class()` returns
+         the constant. An unauthorized adjudicator is UNREPRESENTABLE. The check
+         was removed; a guard that is constantly `false` is worse than none,
+         because a reader counts it as the enforcement and stops looking.
+      2. **Adversarial fixtures passing for the wrong reason.** Three refusal
+         tests used a `"{}"` payload and empty provenance, so each was refused by
+         the payload decode or by `NoSupportingEvidence` before its named
+         property was ever consulted — disabling the `writer_class` check left
+         them all green. The fixtures are now valid candidates in every respect
+         but the one column under test, and each mutation now kills exactly its
+         own case.
+
+      **`claim_status` is checked at the DECODER, not reachable through the
+      door** — schema v8 forbids `derivation` + `confirmed`, so no such row can
+      exist to be loaded. The decoder's check stays because `decode_candidate` is
+      public and total and a future non-SQLite backend has no v8 trigger.
+
+- [x] **`KIRRA-WM-IDENTITY-FRESHNESS-001` — RULED 2026-08-20.** An adjudicated
+      identity decision is **`Timeless`**.
+
+      > candidate evidence — *"I currently think A and B may be the same"* →
+      > freshness may matter.
+      > adjudicated decision — *"an authorized adjudicator DECIDED A and B are
+      > the same identity"* → does not age out merely because time passed.
+
+      A promoted `same_as` identity relation remains valid until CHANGED by later
+      adjudication — `SplitEntity`, `ForgetEntity`, or superseding identity
+      evidence — not until a clock runs out. Ageing it would make identity
+      dissolve with nobody deciding anything, which §6.3's *"a merged id stays
+      resolvable forever"* forbids.
+
+      Recorded in `kirra_world_service::freshness::RULED` against
+      `(same_as_adjudication, "same_as_adjudged")`. It rules the DECISION row and
+      **not** the candidate: `(observation, "same_as")` stays knowingly unruled,
+      because whether a matcher's PROPOSAL goes stale is a separate question this
+      ruling does not answer.
 
 - [x] **2c — Deterministic resolution over promoted identity. DONE 2026-08-20.**
       `kirra_world::adjudication::promote_confirmed_same_as` is the join: it asks
