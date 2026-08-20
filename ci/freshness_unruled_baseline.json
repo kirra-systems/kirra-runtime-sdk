@@ -39,6 +39,11 @@
       "kind": "observation",
       "predicate": "same_as",
       "why": "The co-reference claim shape KIRRA-WM-CLUSTERING-001 rules in, appearing here as the fixture the schema-v8 promotion guard is tested against. Knowingly unruled, and deliberately not ruled by this PR: whether a same_as claim ages is a question about how long two references stay co-referent, which is Tier 2's (2a/2b) to answer alongside the matcher and the adjudicator. Ruling it inside a schema-guard change would be exactly the smuggled semantics that tier keeps out. Unruled means queries for it REFUSE, which is the safe direction while the ruling is open. Moves into RULED when 2a/2b land."
+    },
+    {
+      "kind": "observation",
+      "predicate": "serial_number",
+      "why": "The identifying predicate box 2a's end-to-end fixture observes, so the exact-identifier rule has evidence to survey. Knowingly unruled: whether a serial number ages is a question about the asset-tagging regime that issues it, not about Kirra World -- a serial is timeless while it is affixed and meaningless the moment the tag is replaced, and the class alone cannot tell those apart. No production producer writes it today; when one does, it rules its own predicate rather than inheriting a disposition invented for a fixture."
     }
   ]
 }

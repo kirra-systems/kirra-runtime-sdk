@@ -914,7 +914,7 @@ does not describe is how a residue disappears.
       matcher gets mistaken for identity truth, which is the failure the ruling
       exists to prevent.
 
-- [ ] **2a — Candidate generation / matching.** A `derivation`-class producer
+- [x] **2a — Candidate generation / matching. DONE 2026-08-20.** A `derivation`-class producer
       emitting `candidate` `same_as` claims: the two subjects, the similarity or
       evidence that prompted it, the source and its model/rule **version**, and
       confidence provenance. It writes through the same door as every other
@@ -967,12 +967,61 @@ does not describe is how a residue disappears.
       shipping the producer first would have made the bypass reachable in the
       window between them.
 
+      **BUILT 2026-08-20 — `crates/kirra-world-ingest`, the FIRST production
+      write path into Kirra World.** Until it existed the store had a read side,
+      an explain side and a delete side, and no way for a fact to enter except a
+      test; that was found by tracing one `same_as` relationship from producer to
+      projection and discovering the chain broke at its first link.
+
+      * **The door** — `WorldStore::append_same_as_candidate` takes no
+        `writer_class` and no `claim_status`. Both are pinned by the door, so a
+        matcher cannot borrow a privileged class OR confirm. A validated
+        parameter still admits the call and refuses it at runtime; a pinned field
+        admits no call to refuse.
+      * **The producer** — `ExactIdentifierRule`, exact agreement on one strong
+        identifier. Deliberately a RULE, not a model: 2a's job is to establish
+        the write path, and a model would make the first writer's correctness a
+        question about the model instead of about the path.
+      * **Confidence is scoreless** (`basis = Unspecified`). An exact-match rule
+        computes no probability, and §7.3 forbids forcing producers to invent
+        precision they do not have. A rule stamping `0.95` on every proposal
+        would be doing exactly that, in a field an adjudicator later reads.
+      * **All pairs, never a chain.** Three subjects sharing a value yield three
+        proposals. `KIRRA-WM-TRANSITIVITY-001` bans deriving `a=c` from `a=b` and
+        `b=c`, so a chain-emitting matcher would make the final identity depend
+        on a closure nobody may compute — invisibly, by omission.
+      * **The survey reads the LOG, not `world_current`.** Two reasons, both
+        load-bearing: the projection keeps one row per `(subject, predicate)` so
+        a superseded agreement is simply gone, and it carries no
+        `observation_id` — a rule reading it could not cite its own evidence
+        truthfully and would have to reconstruct an id, which is fabrication
+        wearing provenance's clothes. That defect was written, caught by asking
+        what the citation would resolve to, and replaced.
+      * **`MAX_IDENTIFIER_GROUP`** (32) bounds all-pairs structurally. An
+        over-wide value is a placeholder or a parse failure rather than an
+        identifier; the pass REFUSES and names it rather than trimming, because a
+        silently dropped group reads as a pass that found nothing.
+      * **The artifact is the durable observation.**
+        `WorldStore::load_same_as_candidate` fetches it by the observation id a
+        promotion would cite, and refuses a row whose class or status is not a
+        matcher's proposal — which is the seam box 2b needs.
+
       **`Corroboration(n)` is NOT 2a's to drive.** The axis folds *confirmed*
       `same_as`, so its first driver is promotion (2b) or an operator-declared
       confirmation — never the matcher. An earlier note in this session said
       building 2a "gives `Corroboration(n)` its first driver"; that contradicted
       the bar above and is withdrawn. A matcher score must not become trust
       corroboration, quietly or otherwise.
+
+      **OPEN, recorded rather than decided here — candidate retention.**
+      Candidate rows are written `retention_class = "raw"`, the one spelling that
+      leaves them compactable. That is required: a matcher proposes continuously
+      and most proposals are never promoted, so protecting every one would make
+      retention a function of matcher throughput. The consequence is that a
+      candidate which WAS promoted can still be compacted, and the promotion's
+      citation of it then resolves to `Dangling`. Whether a promotion should
+      PROTECT what it cites is a retention ruling; making it inside the propose
+      door would decide a retention question in the one place nobody would look.
 
       **The seam, fixed by `KIRRA-WM-PROMOTION-001` before this box is coded:**
       a promotion cites candidates by `ObservationId` through `Justification`,

@@ -1,0 +1,43 @@
+# crates/kirra-world-ingest/Cargo.toml
+#
+# Tier 2 box 2a — the FIRST production write path into Kirra World.
+#
+# Until this crate existed, Kirra World had a read side, an explain side and a
+# delete side, and no way for a fact to enter except a test. That asymmetry was
+# found by tracing one same_as relationship from producer to projection and
+# discovering the chain broke at its first link.
+#
+# ONE JOB, and the name bounds it: `ingest`, not `writer` or `pipeline`. This
+# crate proposes `same_as` CANDIDATES and nothing else. `KIRRA-WM-PROMOTION-001`
+# authorizes a matcher as a candidate producer and no more, so a crate that
+# could also confirm — or that accumulated other write paths because its name
+# admitted them — would be the wrong shape for the one rule it exists under.
+#
+# It cannot confirm, and that is structural rather than reviewed: the only door
+# it uses is `WorldStore::append_same_as_candidate`, which takes no
+# `writer_class` and no `claim_status` to supply.
+#
+# THE `kirra-world-` PREFIX IS LOAD-BEARING: `is_world_package` in
+# ci/check_kirra_world_bidirectional_fence.py is name-prefixed, so this crate
+# falls under Fence A by CONSTRUCTION. Renaming it out of the namespace would
+# silently remove the fence — and an INGEST path is the one that most needs it,
+# being the point where outside data enters.
+#
+# May depend on:  kirra-world-store, kirra-world
+# May NOT depend on: the verifier or anything in the safety closure (Fence B),
+#                    Mick, ROS/DDS/serial, checker/governor types.
+[package]
+name = "kirra-world-ingest"
+version = "0.1.0"
+edition = "2021"
+rust-version.workspace = true
+description = "The production candidate-write path into Kirra World: proposes same_as candidates, and structurally cannot confirm them."
+repository = "https://github.com/kirra-systems/kirra-runtime-sdk"
+license-file = "../../COPYRIGHT"
+publish = false  # proprietary (see COPYRIGHT) — not for crates.io
+
+[dependencies]
+# The sanctioned write door and the projected-claim read the pass surveys.
+kirra-world-store = { path = "../kirra-world-store" }
+# SameAsCandidate, MatcherIdentity, Confidence — the domain types the door takes.
+kirra-world = { path = "../kirra-world" }

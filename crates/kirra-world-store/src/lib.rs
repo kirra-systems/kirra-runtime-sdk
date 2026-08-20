@@ -83,6 +83,7 @@ use kirra_world::retention::RetentionError;
 use rusqlite::{params, Connection, OptionalExtension};
 
 pub mod adjudication_record;
+pub mod candidate_record;
 pub mod compaction;
 pub mod entity_projection;
 pub mod lineage;
@@ -196,6 +197,11 @@ pub enum StoreError {
     /// SQLite said no — including the schema `CHECK` violations, which is
     /// deliberate. See [`schema`].
     Sqlite(rusqlite::Error),
+    /// A stored row is not a well-formed derivation-class `same_as` candidate.
+    ///
+    /// Distinct from `Ok(None)` on purpose — see
+    /// [`WorldStore::load_same_as_candidate`].
+    CandidateDecode(candidate_record::CandidateDecodeError),
     /// SD-2, refused before the statement is built so the message names the
     /// rule rather than a constraint index.
     LlmCannotConfirm,
@@ -424,6 +430,7 @@ impl std::fmt::Display for StoreError {
                 f,
                 "provenance index does not cover generation {requested} (floor {floor})"
             ),
+            Self::CandidateDecode(e) => write!(f, "stored same_as candidate: {e}"),
             Self::LlmCannotConfirm => write!(
                 f,
                 "writer_class=llm_candidate may not write claim_status=confirmed \
@@ -1078,6 +1085,21 @@ pub const GENESIS: &str = kirra_world::evidence::GENESIS_TOKEN;
 /// The append-only evidence log.
 pub struct WorldStore {
     conn: Connection,
+}
+
+/// The raw columns [`WorldStore::load_same_as_candidate`] reads, named rather
+/// than left as a nine-element tuple — which clippy flags as a very complex type
+/// and which, more to the point, nobody can read at the call site.
+struct StoredCandidateColumns {
+    writer_class: String,
+    claim_status: String,
+    kind: String,
+    predicate: Option<String>,
+    subject: String,
+    object: Option<String>,
+    payload: String,
+    payload_schema: i64,
+    provenance: String,
 }
 
 impl WorldStore {
@@ -1776,6 +1798,300 @@ impl WorldStore {
             return Err(e.into());
         }
         Ok(generation)
+    }
+
+    /// Load a persisted `same_as` candidate **by its observation id** — the
+    /// citable handle `KIRRA-WM-PROMOTION-001` makes a promotion cite.
+    ///
+    /// This is what "the durable candidate observation is the artifact" means
+    /// operationally. Box 2a writes a row; anything downstream works from the
+    /// ROW, reached by the same id a `Justification` would carry, rather than
+    /// from an in-memory value that merely looks like one.
+    ///
+    /// # It proves the row is a candidate before returning one
+    ///
+    /// The decode refuses a row whose `writer_class` is not `derivation` or
+    /// whose `claim_status` is not `candidate`, so a caller cannot be handed a
+    /// confirmed claim — or one written under a more privileged class — dressed
+    /// as a matcher's proposal. That check is the reason this returns through
+    /// [`candidate_record::decode_candidate`] instead of assembling a value
+    /// here.
+    ///
+    /// `Ok(None)` means no row carries that observation id. A row that exists
+    /// but is not a candidate is an ERROR, not `None`: those two answers mean
+    /// different things to an adjudicator, and collapsing them would let
+    /// "that is not evidence" read as "there is no evidence".
+    ///
+    /// # Errors
+    ///
+    /// [`StoreError::Sqlite`] if the log cannot be read, or
+    /// [`StoreError::CandidateDecode`] if the row is not a well-formed
+    /// derivation-class `same_as` candidate.
+    pub fn load_same_as_candidate(
+        &self,
+        observation_id: &str,
+    ) -> Result<Option<kirra_world::same_as_candidate::SameAsCandidate>, StoreError> {
+        let row = self
+            .conn
+            .query_row(
+                // An ObservationId can have MORE THAN ONE carrier event:
+                // `reference.rs` is explicit that an observation may be
+                // re-attributed, and each such record is its own event. So
+                // "the row with this observation id" is not well defined, and
+                // taking the earliest would decode a re-attribution and report
+                // "not a candidate" while the candidate row sat right there.
+                //
+                // The ordering therefore prefers a CANDIDATE-SHAPED carrier,
+                // newest first, and falls back to any carrier. The fallback is
+                // deliberate rather than an omission: it is what still produces
+                // the intended decode ERROR when the id exists but names
+                // something that is not a matcher's proposal -- which must stay
+                // distinguishable from `Ok(None)`.
+                "SELECT writer_class, claim_status, kind, predicate, subject, object,
+                        payload, payload_schema, provenance
+                 FROM world_events WHERE observation_id = ?1
+                 ORDER BY (writer_class = ?2 AND claim_status = ?3 AND predicate = ?4) DESC,
+                          generation DESC
+                 LIMIT 1",
+                params![
+                    observation_id,
+                    candidate_record::DERIVATION_TOKEN,
+                    candidate_record::CANDIDATE_STATUS_TOKEN,
+                    candidate_record::CANDIDATE_PREDICATE_TOKEN
+                ],
+                |r| {
+                    Ok(StoredCandidateColumns {
+                        writer_class: r.get(0)?,
+                        claim_status: r.get(1)?,
+                        kind: r.get(2)?,
+                        predicate: r.get(3)?,
+                        subject: r.get(4)?,
+                        object: r.get(5)?,
+                        payload: r.get(6)?,
+                        payload_schema: r.get(7)?,
+                        provenance: r.get(8)?,
+                    })
+                },
+            )
+            .optional()?;
+        let Some(row) = row else {
+            return Ok(None);
+        };
+        // `unwrap_or_default`: an unparseable provenance becomes an EMPTY support
+        // list, which `SameAsCandidate::propose` then refuses as
+        // `NoSupportingEvidence`. A corrupt citation list still fails closed --
+        // through the domain's own rule rather than a second one restated here.
+        let support: Vec<String> = serde_json::from_str(&row.provenance).unwrap_or_default();
+        let candidate = candidate_record::decode_candidate(
+            &candidate_record::StoredCandidateRow {
+                writer_class: &row.writer_class,
+                claim_status: &row.claim_status,
+                kind: &row.kind,
+                predicate: row.predicate.as_deref(),
+                subject: &row.subject,
+                object_id: row.object.as_deref(),
+                payload: &row.payload,
+                payload_schema: row.payload_schema,
+            },
+            &support,
+        )
+        .map_err(StoreError::CandidateDecode)?;
+        Ok(Some(candidate))
+    }
+
+    /// Confirmed observations agreeing on one predicate, as
+    /// `(subject, value, observation_id)` — the evidence an entity-resolution
+    /// rule surveys.
+    ///
+    /// # Why this reads the LOG and not `world_current`
+    ///
+    /// A matcher wants OBSERVATIONS, not folded current state. Two differences
+    /// matter and both cut the same way:
+    ///
+    /// * `world_current` keeps one row per `(subject, predicate_key)`, so an
+    ///   earlier agreement superseded by a later claim is simply gone — and a
+    ///   past agreement is still evidence that two references co-referred.
+    /// * `world_current` does not carry `observation_id` at all, and
+    ///   `KIRRA-WM-PROMOTION-001` makes that id the citable handle a candidate's
+    ///   support list is built from. A rule reading the projection could not cite
+    ///   its own evidence truthfully; it would have to reconstruct an id, which
+    ///   is fabrication wearing provenance's clothes.
+    ///
+    /// # Confirmed only
+    ///
+    /// `claim_status = 'confirmed'`, so candidates cannot breed candidates: a
+    /// matcher that fed on its own prior proposals would manufacture agreement
+    /// out of its own output and present it as independent evidence.
+    ///
+    /// # Bounded in SQL
+    ///
+    /// The `LIMIT` is in the statement, not applied to a fetched `Vec` — the
+    /// distinction the query-boundedness gate's rule 6 exists to enforce. The
+    /// caller learns it hit the ceiling by getting exactly `limit` rows and is
+    /// expected to treat that as truncation rather than as completeness.
+    ///
+    /// # Errors
+    ///
+    /// [`StoreError::Sqlite`] if the log cannot be read.
+    pub fn identifier_agreements(
+        &self,
+        predicate: &str,
+        limit: usize,
+    ) -> Result<Vec<(String, String, String)>, StoreError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT subject, object, observation_id FROM world_events
+             WHERE predicate = ?1
+               AND object IS NOT NULL
+               AND claim_status = 'confirmed'
+             ORDER BY generation ASC
+             LIMIT ?2",
+        )?;
+        let rows = stmt.query_map(params![predicate, limit as i64], |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
+    }
+
+    /// Whether a `same_as` candidate for this canonical pair, proposed by this
+    /// matcher VERSION, is already on record.
+    ///
+    /// The idempotence point-read box 2a's pass uses. `EXISTS` in SQL rather
+    /// than fetching a subject's candidates and scanning them in Rust: the
+    /// question is a yes/no about one pair, and materialising every candidate
+    /// for a subject to answer it would make a per-pair check cost grow with
+    /// how many proposals that subject has ever attracted.
+    ///
+    /// # Why the version is part of the key
+    ///
+    /// A NEW matcher version re-proposing a pair is a different claim — a
+    /// different rule looked at the same evidence and agreed — and collapsing
+    /// the two would erase which version's judgement is on record. Only a
+    /// re-run of the SAME version is a duplicate.
+    ///
+    /// Matched against the payload the candidate door wrote, which is the same
+    /// bytes a decode would read rather than a second copy that could disagree.
+    ///
+    /// # Errors
+    ///
+    /// [`StoreError::Sqlite`] if the log cannot be read.
+    pub fn same_as_candidate_exists(
+        &self,
+        low: &str,
+        high: &str,
+        matcher_version: &str,
+    ) -> Result<bool, StoreError> {
+        // Built with the JSON encoder, not with `format!`. A version containing
+        // a quote or a newline is stored ESCAPED, and a hand-spelled needle
+        // would then match nothing -- so the idempotence check would silently
+        // answer "no" every pass and the log would grow by the whole proposal
+        // set each time. Encoding the value the same way the payload did is the
+        // only spelling that cannot drift from it.
+        let needle = format!(
+            "\"version\":{}",
+            serde_json::to_string(matcher_version).map_err(|e| StoreError::Sqlite(
+                rusqlite::Error::ToSqlConversionFailure(Box::new(e))
+            ))?
+        );
+        let found: Option<i64> = self
+            .conn
+            .query_row(
+                "SELECT 1 FROM world_events
+                 WHERE subject = ?1 AND object = ?2
+                   AND predicate = ?3
+                   AND claim_status = 'candidate'
+                   AND payload LIKE '%' || ?4 || '%'
+                 LIMIT 1",
+                params![
+                    low,
+                    high,
+                    candidate_record::CANDIDATE_PREDICATE_TOKEN,
+                    needle
+                ],
+                |r| r.get(0),
+            )
+            .optional()?;
+        Ok(found.is_some())
+    }
+
+    /// Append one `same_as` **candidate** — the sanctioned production write
+    /// door for `WM_SCOPE.md` §5 box 2a.
+    ///
+    /// `KIRRA-WM-PROMOTION-001` authorizes a matcher as a candidate PRODUCER and
+    /// nothing more. This is that authorization expressed as an API: the two
+    /// fields a matcher could abuse are not parameters.
+    ///
+    /// * `writer_class` is pinned to [`WriterClass::Derivation`] — a matcher
+    ///   cannot borrow a more privileged class.
+    /// * `claim_status` is pinned to [`ClaimStatus::Candidate`] — a matcher
+    ///   cannot confirm.
+    ///
+    /// Both are pinned HERE rather than validated from a caller-supplied value,
+    /// because a validated parameter still admits the call and refuses it at
+    /// runtime, where a refusal is something to handle. A pinned field admits no
+    /// call to refuse.
+    ///
+    /// # How the candidate lands in the columns
+    ///
+    /// `subject` is the pair's LOW side and `object` its HIGH side, taken from
+    /// [`CandidatePair`](kirra_world::same_as_candidate::CandidatePair)'s
+    /// canonical ordering rather than from argument order — so proposing
+    /// `(a, b)` and `(b, a)` writes the same row shape, and a later
+    /// `candidates(subject)` lookup has one place to look instead of two.
+    ///
+    /// The support observations become the row's `provenance`, which is what
+    /// box 4a's citation index is built from — so a candidate's evidence is
+    /// walkable by the ordinary provenance machinery rather than by a
+    /// candidate-specific path.
+    ///
+    /// # Errors
+    ///
+    /// [`StoreError`] from the underlying append — including
+    /// [`StoreError::DerivationCannotConfirm`], which this path cannot trigger
+    /// but which remains the store's answer to any path that tries.
+    pub fn append_same_as_candidate(
+        &mut self,
+        row: &candidate_record::CandidateRow<'_>,
+        candidate: &kirra_world::same_as_candidate::SameAsCandidate,
+    ) -> Result<i64, StoreError> {
+        let payload = candidate_record::encode_candidate(candidate);
+        let provenance = candidate_record::candidate_provenance(candidate);
+        let prov: Vec<&str> = provenance.iter().map(String::as_str).collect();
+        let subject = candidate.pair().low().as_str().to_owned();
+        let object = candidate.pair().high().as_str().to_owned();
+
+        self.append(&NewEvent {
+            event_id: row.event_id,
+            observation_id: row.observation_id,
+            txn_time_ms: row.txn_time_ms,
+            valid_from_ms: row.valid_from_ms,
+            valid_to_ms: None,
+            source: row.source,
+            source_version: row.source_version,
+            // The two pinned fields. See this method's docs.
+            writer_class: WriterClass::Derivation,
+            claim_status: ClaimStatus::Candidate,
+            provenance: &prov,
+            frame_id: None,
+            map_id: None,
+            kind: candidate_record::CANDIDATE_KIND,
+            subject: subject.as_str(),
+            // `None`, not `SubjectRef::Candidate(..)`. KIRRA-WM-CANDIDATE-ID-001
+            // keeps a candidate identifier out of the hashed record, and
+            // `append` refuses `CandidateSubjectNotStorable` for exactly that
+            // reason. The SUBJECT of a same_as candidate is an entity anyway —
+            // the candidacy is the CLAIM's status, not the subject's kind.
+            subject_ref: None,
+            predicate: Some(candidate_record::CANDIDATE_PREDICATE_TOKEN),
+            object: Some(object.as_str()),
+            payload: payload.as_str(),
+            payload_schema: candidate_record::CANDIDATE_PAYLOAD_SCHEMA,
+            retention_class: candidate_record::CANDIDATE_RETENTION_CLASS,
+            trust: None,
+        })
     }
 
     /// The event half of [`Self::append_adjudication`], split out so the

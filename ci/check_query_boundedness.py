@@ -77,7 +77,25 @@ BASELINE_PATH = REPO_ROOT / "ci" / "store_boundedness_baseline.json"
 
 # Rule 5. The crates that IMPLEMENT the boundary — everything else that touches
 # the world is a domain consumer and must go through the query engine.
-WORLD_CRATES = {"kirra-world", "kirra-world-store", "kirra-world-service"}
+# Crates that IMPLEMENT Kirra World's boundary rather than consume it. Rule 5
+# asks whether application code reached past the query engine; these are not
+# application code, so the question does not apply to them.
+#
+# `kirra-world-ingest` is here because it is the WRITE half of that boundary
+# (box 2a). It asks the store nothing on anyone's behalf -- it surveys evidence
+# it is about to propose from. Routing a producer through `QueryEngine` would
+# mean inventing a domain request meaning "let me see the log so I can write to
+# it", which is not a question the engine exists to answer.
+#
+# The exemption is scoped: rule 2 covers this crate's `src/` (see INGEST_SRC),
+# so it is exempt from "consumers must use the engine" and NOT from "the
+# unbounded reads stay out of the write path".
+WORLD_CRATES = {
+    "kirra-world",
+    "kirra-world-store",
+    "kirra-world-service",
+    "kirra-world-ingest",
+}
 
 # The boundary internals the engine exists to be the only route past. These are
 # `pub(crate)` in the source, so the compiler already refuses a consumer that
@@ -115,6 +133,12 @@ STORE_LIB = REPO_ROOT / "crates" / "kirra-world-store" / "src" / "lib.rs"
 STORE_SNAPSHOT = REPO_ROOT / "crates" / "kirra-world-store" / "src" / "snapshot.rs"
 STORE_SRC = REPO_ROOT / "crates" / "kirra-world-store" / "src"
 BOUNDARY_SRC = REPO_ROOT / "crates" / "kirra-world-service" / "src"
+# Box 2a's production write path. Not a request path, so rule 5 does not apply
+# to it (see WORLD_CRATES) -- but its PRODUCTION code must still never reach for
+# an unbounded read, and rule 2 is where that is enforced rather than asserted.
+# An ingest pass runs unattended on a growing log; an unbounded fetch there is
+# the same defect as one behind a bounded-looking query, with nobody watching.
+INGEST_SRC = REPO_ROOT / "crates" / "kirra-world-ingest" / "src"
 
 VALID_CLASSES = {"bounded", "unbounded", "operational"}
 
@@ -383,19 +407,20 @@ def run(verbose: bool = False) -> list[str]:
     # invariant stays false. The boundary crate IS the request path, so every
     # file in it is checked and there is no file to move the call to.
     forbidden = unbounded_names(baseline)
-    for path in sorted(BOUNDARY_SRC.rglob("*.rs")):
-        rel = path.relative_to(REPO_ROOT)
-        for line_no, method, line in scan_interactive(path.read_text(), forbidden):
-            failures.append(
-                f"{rel}:{line_no} — the answer boundary calls the UNBOUNDED store "
-                f"method `{method}`.\n"
-                f"      {line}\n"
-                f"    A bounded-looking query standing on an unbounded read is the "
-                f"exact defect class of #1440 and #1441: the answer is bounded, the "
-                f"work is not, and nothing shows it.\n"
-                f"    Use the bounded equivalent, or narrow the fetch in SQL and add "
-                f"an agreement test."
-            )
+    for root in (BOUNDARY_SRC, INGEST_SRC):
+        for path in sorted(root.rglob("*.rs")):
+            rel = path.relative_to(REPO_ROOT)
+            for line_no, method, line in scan_interactive(path.read_text(), forbidden):
+                failures.append(
+                    f"{rel}:{line_no} — the answer boundary calls the UNBOUNDED store "
+                    f"method `{method}`.\n"
+                    f"      {line}\n"
+                    f"    A bounded-looking query standing on an unbounded read is the "
+                    f"exact defect class of #1440 and #1441: the answer is bounded, the "
+                    f"work is not, and nothing shows it.\n"
+                    f"    Use the bounded equivalent, or narrow the fetch in SQL and add "
+                    f"an agreement test."
+                )
 
     # 3. A store method classified `bounded` may not CALL an unbounded one.
     #
