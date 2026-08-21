@@ -59,7 +59,7 @@
 use kirra_world::resolution::RefusalReason;
 use kirra_world::trust::{TrustGrade, Validity};
 use kirra_world_service::freshness::{FreshnessPolicy, FreshnessSource};
-use kirra_world_service::query::{Ask, QueryEngine};
+use kirra_world_service::query::{Ask, QueryEngine, Related};
 use kirra_world_service::read_view::{AskError, ObjectIdentity, UnknownReason, WorldLookup};
 use kirra_world_store::WorldStore;
 
@@ -393,6 +393,17 @@ fn mirror_resolution(identity: &ObjectIdentity) -> ObjectResolution {
     }
 }
 
+/// The relation an identity-rescue step is reported under.
+///
+/// Mirrors the store's own predicate token rather than re-spelling it, so the
+/// symbol a consumer reads is the one the log records. Built through
+/// [`ContextId::new`] like every other id that crosses the seam; the token is a
+/// non-empty constant, so the `expect` cannot fire.
+fn same_as_relation() -> ContextId {
+    ContextId::new(kirra_world_store::candidate_record::CANDIDATE_PREDICATE_TOKEN)
+        .expect("the same_as predicate token is a non-empty constant")
+}
+
 /// Derive proposal-shaping context from what Kirra World knows about `subject`.
 ///
 /// The one behaviour, kept deliberately tiny: if the world holds a claim
@@ -472,6 +483,11 @@ pub fn mission_context(
     // could not be used.
     let mut unresolved: Option<ObjectResolution> = None;
 
+    // The object the world named but the caller did not offer. Recorded on the
+    // way past so the identity rescue below has something to ask about, WITHOUT
+    // a second walk of the answers.
+    let mut unmatched_object: Option<String> = None;
+
     let matched = answers.iter().find_map(|a| {
         if a.predicate()? != relation.as_str() {
             return None;
@@ -485,7 +501,10 @@ pub fn mission_context(
             unresolved.get_or_insert_with(|| mirror_resolution(a.object_identity()));
             return None;
         };
-        let candidate = candidates.iter().find(|c| c.as_str() == object)?;
+        let Some(candidate) = candidates.iter().find(|c| c.as_str() == object) else {
+            unmatched_object.get_or_insert_with(|| object.to_owned());
+            return None;
+        };
         Some((candidate, a))
     });
 
@@ -497,6 +516,84 @@ pub fn mission_context(
             ));
         }
     }
+
+    // --- The identity rescue, box 5c -------------------------------------
+    //
+    // The world named an object the caller did not offer. Before reporting no
+    // preference, ask whether that object is ADJUDICATED THE SAME AS one the
+    // caller did offer: "the package was last seen at dock_b_annex, and an
+    // operator decided dock_b_annex is dock_b."
+    //
+    // WHAT THIS MAY AND MAY NOT DO, because this is the seam the whole tier is
+    // about. It SELECTS from `candidates` — the caller's own list — and can
+    // therefore only ever reorder choices the caller had already declared
+    // valid. It cannot introduce a destination, and it emits no quantity: the
+    // identity step crosses as a `MissionFact` triple, which is symbolic.
+    // Turning a chosen symbol into coordinates remains configuration's job
+    // (`MissionTable`), which is why World cannot place anything.
+    //
+    // "Selects, never invents" turns out to be STRUCTURAL as well as
+    // documented, and that was discovered rather than designed, so it is worth
+    // stating precisely rather than claiming more than is true. `matched` is
+    // `Option<(&ContextId, &WorldAnswer)>` whose first element borrows from
+    // `candidates`, and `preferred` flows from it straight into
+    // `PreferDestination`. Two attempts to mutate this rescue into choosing a
+    // NON-candidate -- picking the projection's first neighbour, and widening
+    // the search to an owned list of neighbours -- were both refused by the
+    // borrow checker, because the value has nowhere to live that outlives the
+    // arm. An author would have to change the binding's type first.
+    //
+    // The honest claim is therefore "the obvious mutation does not compile",
+    // NOT "this is impossible". A determined restructure could own the value,
+    // and `the_rescue_cannot_introduce_a_destination_the_caller_did_not_offer`
+    // is what catches that -- a behavioural control, because the type-level one
+    // is a happy accident and accidents are not guarantees.
+    //
+    // EXACTLY ONE extra query, and that is structural rather than a budget:
+    // `world_current`'s primary key is `(subject, predicate_key)`, so an `Ask`
+    // yields at most ONE answer naming `relation`, hence at most one unmatched
+    // object to ask about. There is no arbitrary "first" being picked here.
+    //
+    // PROMOTED relations only, and never transitively closed — `Related` reads
+    // the relationship projection, where the newest authorized decision governs
+    // and `KIRRA-WM-TRANSITIVITY-001` keeps the answer pairwise. A rejected or
+    // withdrawn promotion rescues nothing, which
+    // `a_withdrawn_promotion_does_not_rescue_the_candidate` pins.
+    let mut identity_step: Option<(ContextId, ContextId)> = None;
+    let matched = match (matched, unmatched_object.as_deref()) {
+        (None, Some(object)) => {
+            let related = engine.execute(Related {
+                entity: object.to_owned(),
+            })?;
+            // The caller's OWN ordering breaks a tie when several neighbours
+            // are candidates. Their preference is the right authority here —
+            // World has no basis for ranking two destinations the caller
+            // already considers valid, and picking by the projection's key
+            // order would let entity-id spelling decide a mission.
+            let chosen = candidates.iter().find(|c| {
+                related
+                    .neighbours()
+                    .iter()
+                    .any(|n| n.other.as_str() == c.as_str())
+            });
+            match (chosen, ContextId::new(object)) {
+                (Some(c), Some(from)) => {
+                    identity_step = Some((from, c.clone()));
+                    // The ANSWER is still the original claim: its trust and
+                    // freshness describe the fact the world served, and the
+                    // identity step is reported separately rather than folded
+                    // into it. Grading the rescue as if it were the claim would
+                    // attribute the adjudication's authority to a sensor.
+                    answers
+                        .iter()
+                        .find(|a| a.predicate() == Some(relation.as_str()))
+                        .map(|a| (c, a))
+                }
+                _ => None,
+            }
+        }
+        (m, _) => m,
+    };
 
     let Some((preferred, answer)) = matched else {
         return Ok(ProposalContext::silent(
@@ -553,18 +650,39 @@ pub fn mission_context(
         }
     };
 
+    // The world's own fact names what the world ACTUALLY said. On the rescue
+    // path that is the unmatched object, not the chosen candidate — reporting
+    // the destination here would erase the step that got us to it and make the
+    // context claim the world said something it did not.
+    let stated_object = identity_step
+        .as_ref()
+        .map_or_else(|| preferred.clone(), |(from, _)| from.clone());
+
+    let mut hints = vec![
+        ContextHint::PreferDestination(preferred.clone()),
+        ContextHint::CandidatePriority(priority),
+        ContextHint::MissionFact {
+            subject: subject.clone(),
+            relation: relation.clone(),
+            object: stated_object,
+        },
+    ];
+    // The identity step, as its own symbolic triple, so the chain of reasoning
+    // is auditable from the context alone: `subject --relation--> X` and
+    // `X --same_as--> preferred`. A consumer that ignores it still gets the
+    // same preference; one that renders an explanation can say WHY.
+    if let Some((from, to)) = identity_step {
+        hints.push(ContextHint::MissionFact {
+            subject: from,
+            relation: same_as_relation(),
+            object: to,
+        });
+    }
+    hints.push(ContextHint::FactTrust(grade));
+    hints.push(ContextHint::FactFreshness(freshness));
+
     Ok(ProposalContext {
-        hints: vec![
-            ContextHint::PreferDestination(preferred.clone()),
-            ContextHint::CandidatePriority(priority),
-            ContextHint::MissionFact {
-                subject: subject.clone(),
-                relation: relation.clone(),
-                object: preferred.clone(),
-            },
-            ContextHint::FactTrust(grade),
-            ContextHint::FactFreshness(freshness),
-        ],
+        hints,
         silence: None,
     })
 }

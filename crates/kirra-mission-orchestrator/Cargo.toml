@@ -24,6 +24,19 @@ kirra-proposal-context = { path = "../kirra-proposal-context" }
 kirra-planner = { path = "../kirra-planner" }
 
 [dev-dependencies]
+# Box 5c's identity-rescue differential builds its promoted `same_as` through
+# the REAL production chain -- the matcher proposes, an operator adjudicates --
+# rather than hand-writing a projection row. A closure proof over data no
+# producer can create would not be a closure proof. Dev-only.
+kirra-world-ingest = { path = "../kirra-world-ingest" }
+# The domain vocabulary the adjudication door takes: AdjudicationAuthority,
+# Outcome, MatcherIdentity, DomainInstant. Dev-only, same as the rest.
+kirra-world = { path = "../kirra-world" }
+# The sanctioned answer boundary. Box 5c's non-vacuity check asks whether the
+# fixture really promoted anything, and rule 5 of the boundedness gate is right
+# that a test is still a domain consumer: it goes through `QueryEngine` like
+# everyone else rather than reaching into the store.
+kirra-world-service = { path = "../kirra-world-service" }
 # Fixture only: the differential harness needs a CorridorSource and the frozen
 # contract to build a PlanInput and to digest the enforced envelope. A DEV edge —
 # the shipped crate names no checker-input type it does not forward.

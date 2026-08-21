@@ -1196,13 +1196,10 @@ does not describe is how a residue disappears.
          `corpus_digest` to contradict. A stronger corpus for an unchanged
          reducer is not a behaviour change.
 
-      **Was OPEN — the projection had no domain consumer. 5b closed the first
-      half 2026-08-20:** `kirra_world_service::query::Related` reaches it
-      through `QueryEngine::execute`, so the table is now something production
-      code can ask. Rule 1 is not yet fully paid: the sequence is 5a → typed
-      `Related` (DONE) → a real consumer (OPEN). If it stalls before the
-      consumer, this table and its fold are still the thing to delete rather
-      than document.
+      **CLOSED 2026-08-20 by 5c.** Rule 1 is paid: 5a → typed `Related` (5b) →
+      `mission_context`'s identity rescue (5c), which changes what a REAL
+      `GeometricPlanner` proposes. The projection is load-bearing on a
+      production behaviour path, not just reachable.
 
       **FOLLOW-UP RULING owed:** does promotion PROTECT the supporting candidate
       evidence from compaction, or is *protected adjudication + degradable
@@ -1348,6 +1345,60 @@ does not describe is how a residue disappears.
       `ensure_relationship_projection`, because that would install the projection
       TABLE on a store that merely asked a question and move `log_only_bytes` for
       everyone. `related_on_an_unfolded_store_is_empty_and_installs_nothing`.
+
+- [x] **5c — The identity rescue: `Related` reaching a real proposal. DONE 2026-08-20.**
+      The consumer that pays Rule 1 for the whole 5a/5b slice, chosen over Mick
+      narration deliberately — narration is too easy to satisfy without proving
+      the projection influences operational behaviour.
+
+      **The behaviour, kept narrow.** When the world holds
+      `subject --relation--> X` and `X` is NOT among the caller's candidates,
+      `mission_context` asks `Related(X)`; if `X` is adjudicated the same as a
+      candidate the caller DID offer, that candidate is preferred. *"The package
+      was last seen at dock_b_annex, and an operator decided dock_b_annex is
+      dock_b."*
+
+      **It selects; it does not invent.** The choice comes from `candidates` —
+      the caller's own list — so World can only reorder options already declared
+      valid. Turning a chosen symbol into coordinates stays configuration's job
+      (`MissionTable`). `the_rescue_cannot_introduce_a_destination_the_caller_did_not_offer`
+      asserts that directly rather than leaving it to emerge: a promoted
+      relation to a NON-candidate is refused.
+
+      **The seam stays symbolic.** The identity step crosses as a
+      `ContextHint::MissionFact` triple — no new variant, no quantity — so
+      `ci/check_proposal_context_symbolic.py` is unaffected. The context reports
+      BOTH the world's own fact (naming what the world actually said, the
+      unmatched object) and the identity step, so the chain of reasoning is
+      auditable from the context alone.
+
+      **Exactly one extra query, structurally.** `world_current`'s primary key is
+      `(subject, predicate_key)`, so an `Ask` yields at most one answer naming
+      the relation, hence at most one object to ask about. No arbitrary "first"
+      is picked.
+
+      **Acceptance is the Tier 2.5 differential**, per §5.5's own standard:
+      `a_promoted_same_as_changes_the_proposal_and_not_the_checkers_inputs`
+      drives a real `GeometricPlanner` twice over one scenario differing only in
+      whether an operator promoted the relation. The proposal differs; the
+      corridor and object slice are the SAME BORROW (`ptr::eq`), re-borrowed by
+      production planner code; the contract identity is unreachable from this
+      path by construction. The promotion is built through the real chain —
+      matcher proposes, operator adjudicates — not hand-written into the
+      projection.
+
+      **Found while building it, recorded because it was discovered rather than
+      designed:** "selects, never invents" is also STRUCTURAL. `preferred`
+      borrows from `candidates`, so two attempts to mutate the rescue into
+      choosing a non-candidate were refused by the borrow checker. The honest
+      claim is *the obvious mutation does not compile*, not *this is
+      impossible* — a restructure could own the value, which is why the
+      behavioural control carries the guarantee.
+
+      **The boundedness gate caught the test, not the code.** Rule 5 fired on the
+      non-vacuity check reaching `store.related` directly; it now goes through
+      `QueryEngine` like every other domain consumer. A test asking a domain
+      question is still a domain consumer.
 
 - [x] **2c — Deterministic resolution over promoted identity. DONE 2026-08-20.**
       `kirra_world::adjudication::promote_confirmed_same_as` is the join: it asks
