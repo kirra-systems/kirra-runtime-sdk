@@ -2342,6 +2342,12 @@ jobs:
         run: npm run typecheck
       - name: Lint
         run: npm run lint
+      # The cross-language contract. `contracts/world_relations_v1.json` is
+      # emitted by a Rust test and decoded here by the hand-written TypeScript
+      # contract, so a Rust field rename reds one test on each side rather than
+      # rendering wrong in production.
+      - name: Contract conformance — the World relations fixture decodes
+        run: npm run test:contract
       - name: Production build
         run: npm run build
       - name: Install smoke browser

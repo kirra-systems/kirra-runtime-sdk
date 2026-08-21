@@ -5594,3 +5594,96 @@ some seventh way would satisfy them all while naming the wrong axis.
   — meaningless, but hashed into the reference's identity, so two references for
   the same query would compare unequal. They share `QueryKind`,
   `SemanticVersions`, the refusal ordering and the reproducibility horizon.
+
+### The console is the second `Related` consumer — 2026-08-21
+
+`mission_context` was the first, and it is invisible: it ranks proposals and
+nobody sees the identity context that moved the ranking. The operator console is
+the first place a human reads a World answer directly, which makes it the first
+place a *presentation* can be wrong in a way no Rust test would catch.
+
+**Topology.** `Browser → Next.js server route → kirra-world-explain-service
+(loopback) → QueryEngine`. The browser never speaks to Kirra World. The
+alternative — pointing the browser at the World service — requires setting
+`KIRRA_WORLD_EXPLAIN_ALLOW_NONLOCAL=1`, and that flag exists precisely because
+the World process has no authentication of its own; flipping it converts an
+on-box service into an exposed one to save a network hop. The console already
+owns browser-facing auth, session handling, origin policy and future access
+control, so the proxy is where that ownership is exercised rather than a layer
+of ceremony over a direct call.
+
+#### A second definition of the contract, and what pays for it
+
+`console/lib/world/relations.ts` is a hand-written TypeScript restatement of
+types whose source of truth is Rust. That is a real duplication and the usual
+answer is codegen. Codegen was deliberately deferred: it adds a subsystem before
+anyone knows whether Kirra World will have one JS consumer or twenty, and the
+fixture buys the property that matters now — **a Rust change that adds, removes,
+renames or reshapes a field reds a test** — at a fraction of the machinery.
+
+`contracts/world_relations_v1.json` sits at the repository root because neither
+tree owns it: a Rust test writes it, a Node test reads it, and neither reaches
+into the other's directory.
+
+Two properties make it load-bearing rather than decorative, and both were built
+only after checking that the obvious version of the fixture did **not** have
+them:
+
+* **Every provenance state.** The first draft hand-wrote four rows next to a
+  four-arm match. Adding a fifth `ProvenanceStanding` variant in Rust red
+  nothing: the fixture kept its four rows, the console kept its four
+  presentations, and the new state would have reached the browser at runtime —
+  where the decoder throws, which is honest but is a production failure, not a
+  build failure. A macro now writes the row list and the exhaustive match from
+  one invocation, so a new variant fails to compile in the file that says what
+  to do about it, and the row it forces in moves the fixture, which reds the
+  console.
+* **Every outcome variant.** The same hole one level up: the fixture pinned only
+  `related`, leaving `not_an_entity` and `unavailable` free to drift. Those two
+  are exactly the answers that must never be rendered as *related to nothing*,
+  so they are the two whose wire shape the console can least afford to get
+  wrong. Same macro treatment, same compile-time break.
+
+The decoder **fails closed** in both directions. An unknown provenance state
+throws rather than mapping to a fallback, because every available fallback is a
+stronger or a weaker claim than the truth in at least one direction. An unknown
+outcome tag throws for the same reason. Unknown extra *fields* are tolerated —
+`deny_unknown_fields` governs what the producer accepts, whereas an extra field
+arriving here means the producer is merely ahead of the console, and refusing to
+render a relation because an unused field appeared would take the console down
+for an additive change.
+
+#### The UI invariant
+
+> **The console may simplify presentation, but it may never collapse a weaker
+> provenance state into a stronger one.**
+
+`Degraded` may not render as `Resolved`; `Dangling` may not render as merely "no
+details"; `Plural` may not display one carrier as if it were authoritative. Each
+state therefore carries its own label, its own glyph and its own sentence, and
+**colour is not the carrier of the distinction** — it does not survive
+greyscale, a screenshot, or a reader who cannot separate the hues. The
+conformance test asserts the four labels and the four glyphs are distinct as
+text, and asserts the specific sentences that refuse each collapse.
+
+The Rust and TypeScript halves of the contract check different things on
+purpose. Rust checks that the fixture is what the types serialize to; the
+console checks that every shape in the fixture has somewhere to go. Neither
+alone is sufficient: a fully-propagated Rust rename leaves the Rust tree green
+and is caught only by the console, and a console presentation deleted for a
+state Rust still emits is caught only by the console.
+
+#### The mutation battery
+
+| Mutation | Result |
+|---|---|
+| rename `decision_marker` in Rust, propagate every Rust caller, regenerate the fixture | Rust green; **console red**, naming the field |
+| add a fifth `ProvenanceStanding` variant | **compile error** in the fixture generator |
+| …then add its fixture row, as the author would | fixture moves; **console red** — no presentation for it |
+| drop an outcome variant from the fixture macro | **compile error** — the match is non-exhaustive |
+| drop the `unavailable` document from the fixture on disk | **console red** on two tests |
+
+The first row is the one worth keeping in mind: a rename carried carefully
+through every Rust caller produces a completely green Rust workspace. The
+console is the only thing that notices, which is the whole argument for the
+fixture existing.

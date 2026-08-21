@@ -1,11 +1,13 @@
-import { LayoutDashboard, Globe, Boxes, ShieldCheck, Activity, Radio, Route, Rss, Brain, Bell, AlertTriangle, FileCheck2, BarChart3, Database, FileText, Settings, Crosshair } from 'lucide-react'
+import { LayoutDashboard, Globe, Boxes, ShieldCheck, Activity, Radio, Route, Rss, Brain, Bell, AlertTriangle, FileCheck2, BarChart3, Database, FileText, Settings, Crosshair, Link2 } from 'lucide-react'
 import type { LucideIcon } from 'lucide-react'
 
 // `preview: true` marks a route whose screen renders bundled mock data (no live
 // verifier endpoint behind it). The sidebar renders a small "preview" tag so the
 // live-backed routes stand out — the nav-level complement to the per-page
 // DemoBadge ("SIMULATED DATA"). Live-backed routes (live/fleet/oversight/events/
-// incidents/compliance) carry no flag.
+// incidents/identity/compliance) carry no flag. `/identity` is unflagged because
+// it never renders mock data: with no World service configured it reports the
+// answer as unavailable rather than inventing one.
 export interface NavItem { href: string; label: string; icon: LucideIcon; preview?: boolean }
 export interface NavGroup { label: string; items: NavItem[] }
 
@@ -31,6 +33,7 @@ export const navGroups: NavGroup[] = [
       { href: '/doer-bound', label: 'Doer Bound', icon: Crosshair, preview: true },
       { href: '/events', label: 'Events', icon: Bell },
       { href: '/incidents', label: 'Incident Review', icon: AlertTriangle },
+      { href: '/identity', label: 'Asset Identity', icon: Link2 },
       { href: '/compliance', label: 'Compliance', icon: FileCheck2 },
     ],
   },
