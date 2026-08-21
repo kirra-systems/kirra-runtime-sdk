@@ -3812,7 +3812,7 @@ recollection:
 | Semantic projections — relationships, capabilities, map layers | **missing**, with an unwired predecessor | `Related` / `Capabilities` / `ImportMapLayer` / `MapVersionActivated`: 0 hits. Identity relations exist (Tier 2 `same_as_*`) but `kirra_world::same_as_adjudication` is *itself* still a baselined orphan awaiting 2c |
 | Retention policy driver | **partially built** — §8's residual scope is accurate | `kirra_world::retention` (deciding) LIVE; `retention_driver` + `retention_sweeper` exist but are BOTH baselined orphans, referenced only by their own `pub mod` lines. Nothing schedules a pass |
 | CQRS — 9 commands | **missing as a surface** | No command dispatch anywhere. `MergeEntities`/`SplitEntity`/`ForgetEntity` match 10–13 files each, but they are Tier 2 DOMAIN types in `kirra_world::adjudication`, not commands. The other six absent |
-| CQRS — 8 queries | **partially built** | 6 typed requests live (`Ask`, `AskAsOf`, `History`, `SubjectSummary`, `Lineage`, `ReplayAnswer`). `Explain` is live but NOT through `QueryEngine`. `ChangesSince`/`Freshness`/`Resolve` exist as store or module capabilities, not typed queries. `WhatIsAt`/`Related`/`Capabilities` absent |
+| CQRS — 8 queries | **partially built** | 6 typed requests live (`Ask`, `AskAsOf`, `History`, `SubjectSummary`, `Lineage`, `ReplayAnswer`). `Explain` is live but NOT through `QueryEngine`. `ChangesSince`/`Freshness`/`Resolve` exist as store or module capabilities, not typed queries. `WhatIsAt`/`Related`/`Capabilities` absent — *superseded 2026-08-21: `Related` landed, and the re-audit at the end of this section reads the eight as SIGNATURES rather than names* |
 | CQRS — 10 emitted events | **prose only** | All ten appear exclusively in doc comments. There is **no emission mechanism anywhere** in `kirra-world*` |
 | Operator teaching surface | **missing, and the citation was wrong** | `AssertEntity`: 0 hits. §8 cited "§17" — **this document has no §17**; the teaching surface is `WORLD_MODEL_ARCHITECTURE.md` §17, with the command in its §14.1 and the operator row in its §15 |
 
@@ -3885,11 +3885,14 @@ Before any code:
    `kirra_world_store::retention_driver` and `::retention_sweeper` HEALED and
    their baseline entries retired in the same PR, which is the witness this box
    was chosen for.
-4. ~~Revisit semantic projections.~~ **relationships half done 2026-08-20** —
-   `relationship_projection`, over the real 2a/2b/2c chain. The **consumer**
-   half of rule 1 is NOT yet paid: the next two steps are the typed `Related`
-   query through `QueryEngine` and then a consumer that asks it. Capabilities
-   and map layers remain unstarted and still gated on a consumer.
+4. ~~Revisit semantic projections.~~ **relationships half done 2026-08-20,
+   its rule-1 debt PAID 2026-08-21** — `relationship_projection`, over the real
+   2a/2b/2c chain; then the typed `Related` query through `QueryEngine`; then
+   two consumers that ask it — `mission_context` (symbolic proposal context) and
+   the operator console (`/identity`). The projection was deliberately two boxes
+   ahead of its consumer and that debt was recorded here rather than treated as
+   paid; this line records it settled. Capabilities and map layers remain
+   unstarted and still gated on a consumer.
 5. Design commands (5c.1).
 6. Complete the missing typed queries (5c.2).
 7. Rule event emission — before any event code (5c.3).
@@ -5687,3 +5690,65 @@ The first row is the one worth keeping in mind: a rename carried carefully
 through every Rust caller produces a completely green Rust workspace. The
 console is the only thing that notices, which is the whole argument for the
 fixture existing.
+
+### §8 re-audited against the merged tree — 2026-08-21
+
+The audit table above was run 2026-08-19 at `95e9eda3`. Six PRs later two of
+its rows are stale as FACT, and re-reading the CQRS query list against the
+rulings made since exposed something the first pass did not look for. Evidence,
+not recollection, at `775c5b2e`:
+
+| §8 obligation | 08-19 verdict | 08-21 state |
+|---|---|---|
+| Semantic projections — relationships | missing, predecessor unwired | **done AND consumed** — the projection, the typed `Related` query, and two consumers (`mission_context`, the operator console) |
+| Semantic projections — capabilities / map layers | missing | unchanged. `EntityKind::Capability` is the only hit; both stay gated on a consumer per rule 1 |
+| Retention policy driver | partially built, both halves orphaned | **done**; both baseline entries retired |
+| CQRS — commands | missing as a surface | unchanged. No `WorldCommand`, no dispatch, nothing |
+| CQRS — queries | 6 typed families | **7** — `Related` landed |
+| CQRS — events | prose only | unchanged, and still blocked on the ten-part ruling |
+| Operator teaching | missing | unchanged, blocked on ruling |
+
+Two corrections that need no ruling and are made here: the table's `Related`
+row said absent, and the Tier 5 order's step 4 said *"the consumer half of rule
+1 is NOT yet paid"*. Both were true when written; neither is true now.
+
+`kirra_world::kind` is the only World-side entry left in the orphan baseline.
+
+#### The eight blueprint queries, against the rulings made since
+
+`WORLD_MODEL_ARCHITECTURE.md` §14.2 lists eight query signatures. The 08-19
+audit counted them. Counting them was the mistake — the same one
+`KIRRA-WM-TIER5-CQRS-001` named for the ten events: **a checklist inherited
+from a blueprint written before the rulings existed is a note about what an
+older design expected, not a requirement.** Read as signatures rather than as
+names, three of the eight cannot be built as written without undoing a ruling:
+
+| Blueprint signature | State | Finding |
+|---|---|---|
+| `WhereIs(EntityRef, At)` | **live** | `Ask` / `AskAsOf` |
+| `Related(EntityRef, Predicate, Depth, At)` | **live, deliberately narrower** | shipped as `Related { entity }`. `Depth` is the conflict: walking `same_as` to depth > 1 synthesizes `a=c` from `a=b`,`b=c` at READ time, which is what `KIRRA-WM-TRANSITIVITY-001` forbids at write time. A ban that holds on one side and not the other is not a ban. `Predicate` is absent because v1 promotes `same_as` only; `At` is absent but NOT in conflict — `relationships_in_effect_at` already supports it |
+| `Explain(FactHandle)` | **live as an operation** | has no callable form from outside the boundary. `KIRRA-WM-EXPLAIN-NEUTRALITY` guarantees no external party ever holds a World coordinate, so nobody outside can hold a `FactHandle` to pass in. `explain_current_subject` takes a subject NAME and chooses every bound itself — and its module doc gives the reason a request type would undo: *"there is no argument a caller could set to make the work larger, so there is nothing to abuse"* |
+| `Freshness(FieldRef, At)` | **live as a classifier** | `KIRRA-WM-FRESHNESS-POLICY-001` rules freshness centrally by claim kind and rides it on every answer. A `Freshness` query would be a SECOND place freshness is decided, and the ruling exists because the first one was decided by nobody |
+| `WhatIsAt(FrameRef, Region, At)` | absent | spatial; no consumer |
+| `Resolve(NameOrAlias, Context)` | absent | name/alias resolution, reusing the destination-resolver contract. Not to be confused with the `pub(crate)` `resolve` methods on `AnswerRef`/`LineageRef`, which are the visibility pins rule 5 depends on and must stay private |
+| `ChangesSince(Instant, Filter)` | absent as a query | `WorldStore::changed_since` exists and is classified **`unbounded`** in `ci/store_boundedness_baseline.json` — *"the result grows with how long ago the caller asks about"*. Its SQL carries no `LIMIT`. It is correctly fenced today (rule 5 forbids consumer crates from calling it, and none does), so there is no live hole — but a typed `ChangesSince` cannot wrap it. It would have to be a NEW bounded family with a page and a cursor, like `History` |
+| `Capabilities(AgentRef, At)` | absent | no consumer |
+
+So 5c.2 is materially smaller than eight-minus-seven suggests, and three of its
+apparent gaps would be **harmful to close as specified**. The remaining real
+candidates are `WhatIsAt`, `Resolve`, `Capabilities` and a newly-designed
+`ChangesSince` — and the first three are gated on a consumer by rule 1, which
+is the rule this tier exists to stop violating.
+
+**Open for ruling** (recorded, deliberately not decided here):
+
+1. Are `Explain` and `Freshness` **discharged in another form** — an operation
+   and a classifier respectively — rather than outstanding queries?
+2. Is `Related` **complete at v1** without `Predicate`/`Depth`, with `Depth`
+   ruled permanently out under `KIRRA-WM-TRANSITIVITY-001` and `At` left as an
+   additive extension when a consumer needs history?
+3. Does `ChangesSince` get designed as a bounded family now, or stay gated on a
+   consumer with `changed_since` remaining fenced-and-unbounded?
+
+Until those are ruled, the honest state of 5c.2 is *"four candidates, three of
+them waiting on a consumer"* — not *"one of eight queries done"*.
