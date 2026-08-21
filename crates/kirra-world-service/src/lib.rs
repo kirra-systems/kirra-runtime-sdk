@@ -39,6 +39,7 @@ pub mod freshness;
 pub mod lineage;
 pub mod query;
 pub mod read_view;
+pub mod relations;
 pub mod semantics;
 
 // Both edges exercised, so the proposed three-node graph is genuinely built and

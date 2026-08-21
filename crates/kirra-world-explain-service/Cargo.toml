@@ -60,3 +60,16 @@ kirra-world-service = { path = "../kirra-world-service" }
 kirra-world-store = { path = "../kirra-world-store" }
 kirra-explain-types = { path = "../kirra-explain-types" }
 serde_json = "1"
+
+[dev-dependencies]
+# The relationship-endpoint tests build their promoted pair through the REAL
+# chain -- the matcher proposes, an operator adjudicates -- rather than writing
+# a projection row. An endpoint proven only over hand-made data would prove it
+# serves data no producer can create. Dev-only: the producer itself depends on
+# neither at runtime.
+kirra-world-ingest = { path = "../kirra-world-ingest" }
+kirra-world = { path = "../kirra-world" }
+# `test-support` for `query_scalar_for_test`: the compaction test needs the
+# candidate's generation, and inferring it from insertion order would bake in
+# "generations are dense" -- which compaction itself makes false.
+kirra-world-store = { path = "../kirra-world-store", features = ["test-support"] }

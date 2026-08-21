@@ -46,8 +46,12 @@
 //! outcome is always the tagged [`ExplainOutcome`] in the body, and a client
 //! decodes exactly one type.
 
-use kirra_explain_types::{ExplainCurrentSubject, ExplainOutcome, EXPLAIN_CURRENT_SUBJECT_PATH};
+use kirra_explain_types::{
+    ExplainCurrentSubject, ExplainOutcome, RelationsOutcome, EXPLAIN_CURRENT_SUBJECT_PATH,
+    RELATIONS_PATH_PREFIX,
+};
 use kirra_world_service::explain_subject::{explain_current_subject, ExplainError};
+use kirra_world_service::relations::{current_relations, RelationsError};
 use kirra_world_store::WorldStore;
 
 /// The contract version this service serves, echoed on `/health`.
@@ -112,6 +116,29 @@ pub fn dispatch(store: &WorldStore, method: &str, path: &str, body: &[u8]) -> Re
                 .to_string(),
             ),
         },
+        // The relationship view. A GET with the subject in the PATH, which is
+        // the one place this service accepts a caller-supplied value in a URL
+        // -- see `subject_from_path` for why the parse is fail-closed rather
+        // than forgiving.
+        ("GET", p) if p.starts_with(RELATIONS_PATH_PREFIX) => match subject_from_path(p) {
+            Some(subject) => relations(store, subject),
+            None => Response::relations(
+                "400 Bad Request",
+                &RelationsOutcome::NotAnEntity {
+                    reason: "the path segment after /relations/ must be one non-empty \
+                             subject with no encoding and no further segments"
+                        .to_string(),
+                },
+            ),
+        },
+        // A known prefix with the wrong verb. READ-ONLY is the whole contract,
+        // so a POST or DELETE here is worth naming rather than 404-ing as an
+        // unknown route -- a client that thinks it can write should be told it
+        // cannot, not told the road does not exist.
+        (_, p) if p.starts_with(RELATIONS_PATH_PREFIX) => Response::json(
+            "405 Method Not Allowed",
+            format!("{{\"error\":\"use GET {RELATIONS_PATH_PREFIX}{{subject}} — this service is read-only\"}}"),
+        ),
         // A known path with the wrong verb is a distinct mistake from an
         // unknown one, and saying so costs nothing.
         (_, EXPLAIN_CURRENT_SUBJECT_PATH) => Response::json(
@@ -119,6 +146,60 @@ pub fn dispatch(store: &WorldStore, method: &str, path: &str, body: &[u8]) -> Re
             format!("{{\"error\":\"use POST {EXPLAIN_CURRENT_SUBJECT_PATH}\"}}"),
         ),
         _ => Response::json("404 Not Found", "{\"error\":\"unknown route\"}".to_string()),
+    }
+}
+
+/// Encode a relationship outcome, with [`Response::outcome`]'s failure rule: a
+/// serializer error becomes a literal `unavailable` body rather than a panic or
+/// an empty `{}`, because this process must never answer with something a
+/// consumer could read as an answer.
+impl Response {
+    fn relations(status: &'static str, outcome: &RelationsOutcome) -> Self {
+        match serde_json::to_string(outcome) {
+            Ok(body) => Self::json(status, body),
+            Err(_) => Self::json(
+                "500 Internal Server Error",
+                "{\"outcome\":\"unavailable\",\"reason\":\"the relationship view could not be encoded\"}"
+                    .to_string(),
+            ),
+        }
+    }
+}
+
+/// The subject from `/relations/{subject}`, or `None` if the path is not that.
+///
+/// **Fail-closed, and deliberately not a URL decoder.** A percent-escape or a
+/// further path segment is REFUSED rather than half-interpreted: this service
+/// has no encoding contract, and guessing one means two spellings of a subject
+/// could reach the store as different strings — or worse, the same one. A
+/// caller with an exotic subject id gets a clear refusal instead of a silently
+/// wrong answer, and adding an encoding later is a contract decision rather
+/// than a bug fix.
+fn subject_from_path(path: &str) -> Option<&str> {
+    let rest = path.strip_prefix(RELATIONS_PATH_PREFIX)?;
+    if rest.is_empty() || rest.contains('/') || rest.contains('%') || rest.contains('?') {
+        return None;
+    }
+    Some(rest)
+}
+
+/// The relationship view, with every failure mapped to a case a caller matches.
+fn relations(store: &WorldStore, subject: &str) -> Response {
+    match current_relations(store, subject) {
+        // A subject related to nothing is an ANSWER, and 200. Encoding it as a
+        // 404 is how clients learn to read "the service is down" and "no
+        // relations" as the same thing.
+        Ok(view) => Response::relations("200 OK", &RelationsOutcome::Related { view }),
+        Err(RelationsError::NotAnEntity { detail }) => Response::relations(
+            "400 Bad Request",
+            &RelationsOutcome::NotAnEntity { reason: detail },
+        ),
+        Err(e) => Response::relations(
+            "503 Service Unavailable",
+            &RelationsOutcome::Unavailable {
+                reason: e.to_string(),
+            },
+        ),
     }
 }
 

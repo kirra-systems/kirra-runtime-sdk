@@ -550,3 +550,138 @@ mod tests {
         assert!(empty.root().is_none());
     }
 }
+
+// ---------------------------------------------------------------------------
+// Relationship status — the read-only identity view.
+// ---------------------------------------------------------------------------
+
+/// The contract version for the relationship view.
+///
+/// Versioned SEPARATELY from [`EXPLANATION_ARTIFACT_VERSION`]. They describe
+/// different things and will change for different reasons; one number for both
+/// would force a lockstep bump on every consumer of either.
+pub const RELATIONS_VIEW_VERSION: u32 = 1;
+
+/// The route prefix the relationship view is served on.
+///
+/// A PREFIX rather than a whole path, because the subject travels in the path.
+/// Shared so the producer's route table and any client agree by construction
+/// rather than by two string literals that match today.
+pub const RELATIONS_PATH_PREFIX: &str = "/relations/";
+
+/// How well the evidence behind a relation still resolves.
+///
+/// The four cases are not a severity scale and must not be collapsed into one.
+/// `KIRRA-WM-EVIDENCE-RETENTION-001` ruled that compaction may degrade the
+/// ability to explain WHY a promotion was made but never WHETHER it holds — so
+/// every variant here describes the EXPLANATION, and none of them qualifies the
+/// relation itself.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProvenanceStanding {
+    /// Exactly one visible record carries the cited evidence.
+    Resolved,
+    /// The evidence is gone and a compacted span could have held it. The
+    /// relation stands; its explanation has decayed.
+    ///
+    /// Distinct from [`Self::Dangling`], and ADR-0041 §11.3 forbids collapsing
+    /// them: *whatever carried this was deleted* and *nothing ever carried
+    /// this* are different findings about the record.
+    Degraded,
+    /// No visible record carries it, and no compaction could explain that.
+    /// Something is wrong with the citation itself.
+    Dangling,
+    /// Several records carry the cited id, so the evidence cannot be attributed
+    /// to one. Reported rather than reduced — picking the newest would name one
+    /// record as the source of something the store cannot attribute.
+    Plural,
+}
+
+/// One pair this subject is currently adjudicated the same as.
+///
+/// # What is deliberately absent
+///
+/// **No outcome field.** Every pair in this view is related BY PROMOTION —
+/// `KIRRA-WM-ADJUDICATION-PRECEDENCE-001` means a withdrawn pair is simply not
+/// here. An `outcome` could therefore only ever read `promoted`, and a constant
+/// field invites a consumer to branch on something that cannot vary.
+///
+/// **No adjudicator class.** For the same reason: `KIRRA-WM-PROMOTION-001` v1
+/// authorizes `SourceClass::Operator` and nothing else, so a class field is a
+/// second constant. Every `adjudicator` below is a human operator, and that is
+/// a property of the ruling rather than of the row.
+///
+/// **No queryable handle.** No `AnswerRef`, no cursor, no generation as a
+/// number — see [`Self::decision_marker`].
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct RelatedPair {
+    /// The canonical pair's low entity.
+    pub low: String,
+    /// The canonical pair's high entity.
+    pub high: String,
+    /// The OTHER entity — the one that is not the subject asked about.
+    ///
+    /// Derivable from the pair, and provided anyway: deriving it means asking
+    /// *was my subject the low or the high* at every call site, and getting
+    /// that backwards silently answers with the entity the caller already had.
+    pub other: String,
+    /// Who decided. An operator identity, never a service account: see the
+    /// type's note on the absent class field.
+    pub adjudicator: String,
+    /// **An opaque marker for the decision that put this row here.**
+    ///
+    /// Stated precisely, because "opaque" is easy to overclaim. It is derived
+    /// from the deciding record's log coordinate and is stable for a given
+    /// decision, so an operator CAN correlate it with the audit record — which
+    /// is the point of serving it at all.
+    ///
+    /// What the contract does not promise: that it is a number, that it orders,
+    /// or that any endpoint accepts it. No route on this service takes a
+    /// decision marker as input, which is what keeps it from becoming the
+    /// queryable handle `KIRRA-WM-EXPLAIN-NEUTRALITY` forbids — a client cannot
+    /// use it to ask for anything.
+    pub decision_marker: String,
+    /// How well the evidence behind this relation still resolves.
+    pub provenance: ProvenanceStanding,
+}
+
+/// What one subject is currently adjudicated the same as.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct RelationsView {
+    /// The subject asked about, echoed so a stored response is self-describing.
+    pub subject: String,
+    /// The pairs currently in effect, ascending by the other entity.
+    pub related: Vec<RelatedPair>,
+    /// Whether more relations exist than one page carries.
+    ///
+    /// Carried rather than inferred from the length: a full page and a
+    /// cut-short page are the same length and mean different things.
+    pub truncated: bool,
+}
+
+/// The tagged outcome of a relationship request.
+///
+/// Always the thing in the body, for [`ExplainOutcome`]'s reason: a client
+/// decodes exactly one type, and *the service is down* never looks like *this
+/// subject is related to nothing*.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "outcome", rename_all = "snake_case")]
+pub enum RelationsOutcome {
+    /// The question was answered. `related` may be empty — that is an answer.
+    Related {
+        /// The view.
+        view: RelationsView,
+    },
+    /// The subject is not an askable entity identity. A REFUSAL, distinct from
+    /// an empty answer: told the latter, a caller concludes the entity exists.
+    NotAnEntity {
+        /// Why it was not admissible.
+        reason: String,
+    },
+    /// The producer could not answer. Never confusable with "related to
+    /// nothing".
+    Unavailable {
+        /// What went wrong, in operator-readable terms.
+        reason: String,
+    },
+}
