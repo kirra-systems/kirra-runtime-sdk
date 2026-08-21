@@ -2651,6 +2651,7 @@ name = "kirra-world-ingest"
 version = "0.1.0"
 dependencies = [
  "kirra-world",
+ "kirra-world-service",
  "kirra-world-store",
 ]
 

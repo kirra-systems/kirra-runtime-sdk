@@ -5752,3 +5752,147 @@ is the rule this tier exists to stop violating.
 
 Until those are ruled, the honest state of 5c.2 is *"four candidates, three of
 them waiting on a consumer"* — not *"one of eight queries done"*.
+
+### KIRRA-WM-RELATED-V1-001 — `Related` is complete at v1 — 2026-08-21
+
+Ruled, closing open question 2 from the §8 re-audit:
+
+> **`Related` answers the currently promoted DIRECT relationship state. It does
+> not compute transitive depth or closure. Historical `At` is an additive future
+> extension, not part of v1 completeness.**
+
+The reasoning, recorded because the ruling reads as a narrowing and is not one:
+
+* **`Depth` is refused, permanently.** It would imply semantics the architecture
+  explicitly declined to infer. `KIRRA-WM-TRANSITIVITY-001` bans deriving
+  `a=c` from `a=b`,`b=c` when evidence is written; a depth-walking `Related`
+  would derive exactly that when it is read. The blueprint signature
+  `Related(EntityRef, Predicate, Depth, At)` predates that ruling.
+* **`At` is additive, not missing.** `relationships_in_effect_at` already
+  supports the query, and `KIRRA-WM-ADJUDICATION-PRECEDENCE-001` already defines
+  what an historical answer means. Adding it later changes nothing about what a
+  command layer wraps today, which is why waiting for it would have been waiting
+  for nothing.
+* **`Predicate` is absent because v1 promotes `same_as` only.** A predicate
+  parameter over a one-element domain is a parameter that cannot vary.
+
+The operational consequence, and the reason the ruling was needed when it was:
+**5c.1 could not start against a moving operation set.** `KIRRA-WM-TIER5-CQRS-001`
+requires commands to wrap the EXISTING domain operations with no new semantics,
+so "which operations exist" has to be settled before the wrapper is designed.
+It is now.
+
+### 5c.1 closed: the write side gets the door the read side had — 2026-08-21
+
+Box 3d gave reads one sanctioned way in. This is the write half, and the
+symmetry is the design: `crates/kirra-world-service/src/command.rs` holds a
+sealed [`WorldCommand`] trait and a [`CommandEngine`] with compile-time outcome
+types, exactly as `query.rs` does.
+
+#### What the box forbade, and how that was made structural
+
+`KIRRA-WM-TIER5-CQRS-001` allows a command surface over existing operations and
+forbids one thing — *"no new semantics hidden inside command wrappers"*. Three
+decisions carry that rather than a promise of care:
+
+1. **A command carries an already-constructed domain value, never its parts.**
+   `RecordMerge` takes a `MergeEntities`, not `sources` and `into`.
+   `MergeEntities::new` is where a merge is judged well-formed — empty sources,
+   duplicate source, merge-into-self — and a command taking raw parts would make
+   that judgement a second time. The wrapper **cannot** validate differently
+   because it never sees anything to validate.
+2. **No `CommandError`.** The blueprint's `| Refused` invites a flattened
+   refusal enum, which would destroy information: `StoreError` already
+   distinguishes *no such candidate* from *not a candidate* from *unauthorized
+   adjudicator*, and an operator told the wrong one looks in the wrong place.
+3. **Authority is carried, never re-checked.** `AdjudicationAuthority` refuses
+   any class but `Operator` at construction, so a held authority is an
+   authorized one. A check in the command layer would be a second place
+   authority is decided.
+
+#### The control, and why it is not a reading of the code
+
+The property is about what the wrapper does NOT do, and the usual test for that
+is to read it and agree it looks harmless. The control here is **differential**:
+each command runs against one store while the domain operation it wraps runs
+against a second from the identical state, and the two `head_chain()` digests
+are compared. That digest covers the canonical bytes of every event, so the
+assertion is not *"both succeeded"* but *"the log the command produced is
+indistinguishable from the log the domain call produced"*.
+
+`a_divergent_wrapper_is_caught_by_the_digest` runs the same comparison across a
+deliberately different write and asserts the digests DIFFER — without it, every
+equality above would also hold against a `head_chain` returning a constant.
+
+| Mutation | Caught by |
+|---|---|
+| the wrapper overrides `writer_class` | `record_merge_writes_exactly_what_append_adjudication_writes` |
+| the wrapper stamps its own `source` | `propose_same_as_writes_exactly_what_the_domain_door_writes` |
+| a command records an `Assert` | `no_command_can_record_an_assert_because_5d_is_unruled` |
+| `RecordMerge` grows an authority field | `a_merge_command_carries_no_authority_and_that_is_the_open_finding` |
+
+The fourth was run twice. The first attempt added the field without updating the
+test's construction site, so it failed to COMPILE — a red build, but not
+evidence the fence fires. Redone the way an author would, fixing the
+construction site, it failed on the fence. The first result was discarded.
+
+#### Rule 1 paid in the same PR, by the gate's insistence
+
+`check_orphan_cores` flagged `kirra_world_service::command` as `[NEW]` the
+moment it existed. That is rule 1 working: a command surface nobody calls is a
+declaration with no production consumer, and 5a's projection had already spent
+two boxes carrying exactly that debt.
+
+It was paid rather than baselined. `kirra-world-ingest` — the production writer
+from box 2a — now proposes through `CommandEngine::execute(ProposeSameAs { .. })`
+instead of calling `append_same_as_candidate` directly, the same migration
+`mission_context` made for reads. **All 44 ingest tests pass unchanged**, which
+is the evidence the migration is behaviour-preserving; the differential control
+is the evidence it is *structurally* so.
+
+#### The asymmetry this box surfaced and deliberately did not fix
+
+Auditing every write door to build the surface found **two routes to canonical
+identity change, only one gated**:
+
+| Door | Authority |
+|---|---|
+| `append_same_as_candidate` | pins `Derivation`/`Candidate` — structurally cannot promote |
+| `adjudicate_same_as` | requires `AdjudicationAuthority` — `Operator` only, per `KIRRA-WM-PROMOTION-001` |
+| `append_adjudication` (Merge / Split / Forget) | **none** |
+
+A `Merge` reaches `Lifecycle::Merged { into }`, the entity projection, and
+identity resolution — the same canonical-identity effect a promoted `same_as`
+has, by a route carrying no adjudicator at all.
+
+**The command layer did not close it, and the restraint is the finding.**
+Requiring an authority token at the wrapper that the domain does not require is
+precisely the new-semantics-in-a-wrapper the box forbids: it would look fixed
+while leaving the ungated domain call available to anyone holding
+`&mut WorldStore`. The fix belongs in `kirra_world::adjudication` and needs a
+ruling — **may an identity adjudication be recorded without an authorized
+adjudicator?** Pinned by
+`a_merge_command_carries_no_authority_and_that_is_the_open_finding`, which is
+written to FAIL when the ruling lands.
+
+Not a live hole today: `append_adjudication` has no production caller at all —
+its callers are tests, in four crates.
+
+#### What is wrapped, and what is not
+
+Five of §14.1's nine commands have a domain operation behind them and are
+wrapped: `ProposeSameAs`, `AdjudicateSameAs`, `RecordMerge`, `RecordSplit`,
+`RecordForget`. The other four are refusals with reasons, not a to-do list:
+
+* **`AssertEntity`** — box 5d, blocked on ruling. `IdentityAdjudication` has
+  four verbs and this surface wraps three; one wide `RecordIdentityAdjudication`
+  taking any variant would have carried `Assert` in as a side effect and
+  unblocked 5d by accident. Three narrow commands instead of one wide one.
+* **`RecordObservation`** — the underlying `WorldStore::append` takes
+  `writer_class` and `claim_status` as free parameters. A wrapper either passes
+  them through (an alias, not a command) or chooses them (deciding the two
+  fields the whole trust model rests on, inside a wrapper).
+* **`ConfirmEntity` / `CorrectObservation` / `RetractAssertion`** — no domain
+  operation exists. Writing the command first would put the semantics in the
+  wrapper by definition, there being nowhere else for them to live.
+* **`ImportMapLayer`** — map layers unstarted, gated on a consumer.

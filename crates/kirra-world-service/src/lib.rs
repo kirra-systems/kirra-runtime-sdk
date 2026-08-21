@@ -31,6 +31,7 @@
 #![warn(missing_docs)]
 
 pub mod answer_ref;
+pub mod command;
 pub mod cursor;
 pub mod explain;
 pub mod explain_labels;
