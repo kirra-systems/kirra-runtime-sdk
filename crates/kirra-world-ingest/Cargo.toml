@@ -41,6 +41,14 @@ publish = false  # proprietary (see COPYRIGHT) — not for crates.io
 kirra-world-store = { path = "../kirra-world-store" }
 # SameAsCandidate, MatcherIdentity, Confidence — the domain types the door takes.
 kirra-world = { path = "../kirra-world" }
+# The 5c.1 command surface. This crate is the production WRITER, so it goes
+# through the sanctioned write door rather than calling the store method behind
+# it -- the same migration `mission_context` made for reads in box 3d.
+#
+# `kirra-world-service` carries this crate as a DEV-dependency (box 5b's
+# end-to-end test drives a real ingest pass). Cargo permits a dev-dependency
+# cycle, and this is one: the runtime edge goes one way only, writer -> door.
+kirra-world-service = { path = "../kirra-world-service" }
 
 [dev-dependencies]
 # `test-support` for `head_generation_for_test`: box 2b's provenance-walk tests

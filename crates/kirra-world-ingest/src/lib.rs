@@ -16,7 +16,7 @@
 //!
 //! # The shape: a pure proposer, a thin pass
 //!
-//! [`propose_from_claims`] is a pure function of the evidence it is given. It
+//! [`propose_from_agreements`] is a pure function of the evidence it is given. It
 //! reads nothing and writes nothing, so what a matcher WOULD propose is
 //! testable without a store — and the tests that matter (all-pairs, the group
 //! ceiling, the identifier rule) are written against it directly.
@@ -29,12 +29,19 @@
 //! # It cannot confirm, structurally
 //!
 //! The only door this crate uses is
-//! [`WorldStore::append_same_as_candidate`](kirra_world_store::WorldStore::append_same_as_candidate),
-//! which takes no `writer_class` and no `claim_status` from its caller. There is
-//! no argument here that could carry `Confirmed`, so "the matcher does not
-//! self-confirm" is not a property of this code's care — it is a property of the
-//! only API it can reach. Schema v8's trigger is the independent second half,
-//! covering a producer written later against the same store.
+//! [`ProposeSameAs`](kirra_world_service::command::ProposeSameAs), the box 5c.1
+//! command over
+//! [`WorldStore::append_same_as_candidate`](kirra_world_store::WorldStore::append_same_as_candidate).
+//! That door takes no `writer_class` and no `claim_status` from its caller.
+//! There is no argument here that could carry `Confirmed`, so "the matcher does
+//! not self-confirm" is not a property of this code's care — it is a property of
+//! the only API it can reach. Schema v8's trigger is the independent second
+//! half, covering a producer written later against the same store.
+//!
+//! The command layer does not weaken that: 5c.1's differential control proves
+//! `ProposeSameAs` writes exactly what the store method writes, so the argument
+//! above is about the same door it always was — now reached through the one
+//! sanctioned write surface rather than around it.
 
 #![warn(missing_docs)]
 #![forbid(unsafe_code)]
@@ -387,16 +394,23 @@ pub fn run_ingest_pass(
             continue;
         }
         let (event_id, observation_id) = mint();
-        store.append_same_as_candidate(
-            &CandidateRow {
-                event_id: &event_id,
-                observation_id: &observation_id,
-                txn_time_ms: now_ms,
-                valid_from_ms: now_ms,
-                source: rule.matcher().producer(),
-                source_version: rule.matcher().version(),
+        // Through the command surface, not the store method under it. The
+        // engine is rebound per candidate because the existence check above
+        // borrows the store immutably; binding it once outside the loop would
+        // hold `&mut` across that read for no gain -- `CommandEngine` is a
+        // borrow and a vtable, not a resource.
+        kirra_world_service::command::CommandEngine::new(store).execute(
+            kirra_world_service::command::ProposeSameAs {
+                row: CandidateRow {
+                    event_id: &event_id,
+                    observation_id: &observation_id,
+                    txn_time_ms: now_ms,
+                    valid_from_ms: now_ms,
+                    source: rule.matcher().producer(),
+                    source_version: rule.matcher().version(),
+                },
+                candidate,
             },
-            &candidate,
         )?;
         report.proposed += 1;
     }
