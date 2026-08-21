@@ -1082,6 +1082,71 @@ does not describe is how a residue disappears.
       exist to be loaded. The decoder's check stays because `decode_candidate` is
       public and total and a future non-SQLite backend has no v8 trigger.
 
+- [x] **`KIRRA-WM-ADJUDICATION-PRECEDENCE-001` — RULED 2026-08-21.** For a pair
+      with several adjudications over time, **the latest applicable decision
+      determines current identity**, ordered by GENERATION — the order the log
+      recorded them.
+
+      > `Promoted` establishes the relation. A later `Rejected` or `Unresolved`
+      > withdraws it. A relation dates from the earliest promotion in its
+      > current unbroken run, so re-affirming does not move its start and a
+      > withdrawal resets it. Historical queries still reproduce the state that
+      > held at an earlier coordinate.
+
+      **What it replaced was a contradiction, not a gap.**
+      `confirmed_relations` held that one `Promoted` anywhere confirmed a pair
+      forever; the relationship projection held that the newest decision
+      governs. Two deterministic readings of one operator history, and they
+      cannot both be authoritative. The projection's reading was adopted: the
+      alternative makes an operator's rejection unable to undo their own
+      promotion.
+
+      **Generation, not `decided_at`, and the reasons are of three kinds** —
+      separated because one is an implementation constraint and should not be
+      dressed as a semantic argument. *Semantic:* an adjudication is an ACT on
+      the record, not an observation of the world, so unlike a claim (where
+      valid time leads) a backdated decision must not override one already
+      recorded and acted upon. *Totality:* generation is total and always
+      present, while `DomainInstant` rightly refuses cross-domain comparison.
+      *Implementation:* an incremental fold requires the ordering key to BE the
+      fold order — under `decided_at`, an out-of-order arrival would force a
+      rebuild from generation 0 every time.
+
+      **`AOU-ADJUDICATION-ORDER-001`**, the cost accepted rather than hidden: a
+      decision reaching the log out of decision order — an offline console
+      syncing later — takes precedence over decisions recorded before it. A
+      deployment queueing decisions offline must record them in decision order
+      or accept that the record's order is the authority.
+
+      **Both sides now derive from it, by two different mechanisms**, because
+      the rule has two halves and only one can be shared. The EFFECT half is
+      `same_as_adjudication::leaves_pair_related`, called by the domain walk AND
+      by the store's fold — that drift is now impossible rather than tested for.
+      The ORDERING half cannot be shared (one side folds incrementally, the
+      other walks a whole history), so it is proven by a conformance corpus of
+      nine histories asserted against the ruling — **not merely against each
+      other**, since a shared predicate makes both-wrong-together easy; verified
+      by flipping the shared predicate and watching the corpus expectation fire
+      rather than the agreement assertion.
+
+      **Corroboration counts relations IN EFFECT**, not "ever promoted" — a
+      withdrawn decision propping up a trust grade is the same inflation
+      `KIRRA-WM-PROMOTION-001` bars, by a slower route.
+
+      **Acceptance:** `precedence_governs_the_present_and_leaves_the_past_intact`
+      — T1 promote, T2 reject, current is withdrawn, and
+      `relationships_in_effect_at(T1)` still shows the promotion. The historical
+      half is what makes the ruling a reading of the record rather than a
+      rewrite of it.
+
+      **Scope note, corrected from an earlier overstatement.** The contradiction
+      was LATENT, not live: `confirmed_relations` was reachable only from tests
+      (`promote_confirmed_same_as` has no production caller, and the entity fold
+      consumes a different `kind`), while the projection reading is live via 5c.
+      The pinned test recorded that accurately; a session summary did not. The
+      ruling is still worth making before a third surface — an operator console
+      — is built on either reading.
+
 - [x] **`KIRRA-WM-IDENTITY-FRESHNESS-001` — RULED 2026-08-20.** An adjudicated
       identity decision is **`Timeless`**.
 

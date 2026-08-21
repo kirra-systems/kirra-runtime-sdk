@@ -98,7 +98,7 @@ use std::collections::BTreeMap;
 
 use kirra_world::observation::DomainInstant;
 use kirra_world::reference::EntityId;
-use kirra_world::same_as_adjudication::Outcome;
+use kirra_world::same_as_adjudication::leaves_pair_related;
 use kirra_world::same_as_candidate::CandidatePair;
 
 use crate::same_as_adjudication_record::StoredAdjudication;
@@ -204,28 +204,32 @@ pub fn fold_same_as_adjudication(
     generation: i64,
 ) {
     let key = pair_key(&decision.pair);
-    // Exhaustive, no wildcard: a new `Outcome` variant must be a COMPILE error
-    // here rather than silently taking whichever arm a `_` fell into. Adding
-    // one is a ruling about what it does to a standing promotion.
-    match decision.outcome {
-        Outcome::Promoted => {
-            acc.insert(
-                key,
-                ProjectedRelationship {
-                    pair: decision.pair.clone(),
-                    decided_generation: generation,
-                    candidate_observation_id: decision.candidate_observation_id.clone(),
-                    adjudicator: decision.adjudicator.clone(),
-                    decided_at: decision.decided_at,
-                },
-            );
-        }
-        // Both WITHDRAW a standing promotion, and on a pair that was never
-        // promoted both are no-ops. See the module docs for why `Unresolved`
-        // is a withdrawal rather than an abstention.
-        Outcome::Rejected | Outcome::Unresolved => {
-            acc.remove(&key);
-        }
+    // THE RULE IS NOT WRITTEN HERE. `leaves_pair_related` is
+    // `KIRRA-WM-ADJUDICATION-PRECEDENCE-001`'s single definition, in the domain
+    // crate, and this fold calls it rather than matching on `Outcome` itself.
+    //
+    // That indirection is the whole point and it is not stylistic. Until the
+    // ruling, this fold matched `Outcome` here while
+    // `same_as_adjudication::confirmed_relations` matched it there — and the two
+    // disagreed, one saying the latest decision governs and the other saying any
+    // historical promotion confirms forever. Two deterministic readings of one
+    // operator history. A shared predicate makes that particular drift
+    // impossible rather than merely tested for; the conformance corpus covers
+    // the ORDERING half, which cannot be shared because one side folds
+    // incrementally and the other walks a whole history.
+    if leaves_pair_related(decision.outcome) {
+        acc.insert(
+            key,
+            ProjectedRelationship {
+                pair: decision.pair.clone(),
+                decided_generation: generation,
+                candidate_observation_id: decision.candidate_observation_id.clone(),
+                adjudicator: decision.adjudicator.clone(),
+                decided_at: decision.decided_at,
+            },
+        );
+    } else {
+        acc.remove(&key);
     }
 }
 

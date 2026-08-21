@@ -45,7 +45,7 @@
 //! Rulings: `KIRRA-WM-CLUSTERING-001`, `KIRRA-WM-TRANSITIVITY-001`,
 //! `KIRRA-WM-PROMOTION-001`.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::observation::{DomainInstant, SourceClass};
 use crate::reference::ObservationId;
@@ -287,30 +287,172 @@ impl SameAsAdjudication {
     }
 }
 
-/// The relations **confirmed** by a set of adjudications.
+// PRECEDENCE-RULE-BEGIN
+//
+// `KIRRA-WM-ADJUDICATION-PRECEDENCE-001`. Everything between these markers is
+// the ONE definition of which adjudication governs a pair. Both the
+// whole-history view below and `kirra_world_store::relationship_projection`'s
+// incremental fold call into it, so the two cannot answer differently.
+
+/// **Does the decision in effect leave the pair related?**
 ///
-/// Promoted pairs only, deduplicated. There is deliberately no closure sibling:
+/// The effect half of `KIRRA-WM-ADJUDICATION-PRECEDENCE-001`, and the one place
+/// it is written. The store's incremental fold calls this rather than matching
+/// on [`Outcome`] itself — which is what stops the two sides drifting, as they
+/// had by 5c: this layer said *one `Promoted` anywhere confirms forever* while
+/// the projection said *the latest decision governs*, and both claimed to be
+/// reading the same operator history.
+///
+/// Exhaustive with no wildcard, deliberately: a new [`Outcome`] variant becomes
+/// a COMPILE error here, in one place, instead of silently taking whichever arm
+/// a `_` fell into in two.
+#[must_use]
+pub fn leaves_pair_related(outcome: Outcome) -> bool {
+    match outcome {
+        Outcome::Promoted => true,
+        // Both WITHDRAW. `Unresolved` withdrawing rather than abstaining is the
+        // choice box 5a recorded: the log does not say which the operator
+        // meant, so abstaining would make the answer depend on a distinction
+        // nothing wrote down while continuing to assert an identity the newest
+        // authorized decision declined to affirm.
+        Outcome::Rejected | Outcome::Unresolved => false,
+    }
+}
+
+/// **The promotions currently supporting each related pair.**
+///
+/// The ordering half of `KIRRA-WM-ADJUDICATION-PRECEDENCE-001`: decisions are
+/// applied in **generation** order, and a pair is related when its most recent
+/// run of decisions since the last withdrawal contains at least one promotion.
+///
+/// Only currently-related pairs appear. The `Vec` is that pair's **unbroken run
+/// of promotions since the last withdrawal**, in generation order — which is
+/// what lets a caller answer *when did this begin* and *on what evidence*
+/// without walking the history a second time under a different rule.
+///
+/// # Two questions, one walk
+///
+/// *Which pairs are related* is decided by the latest decision. *When the
+/// relation began* is the earliest promotion in the CURRENT run — so
+/// re-affirming a pair does not move its start date, while a rejection resets
+/// it. Both fall out of one pass, which is the point: the alternative is two
+/// passes under two rules that can disagree, and that is the defect this ruling
+/// exists to close.
+///
+/// Evidence follows the same line. A promotion that was later withdrawn does
+/// not support the current relation, so its citations are dropped when the run
+/// resets — citing them would be citing evidence for a decision an operator
+/// un-made.
+///
+/// # Why generation and not `decided_at`
+///
+/// `decided_at` is on the record and is NOT the precedence key. That is
+/// surprising enough to justify, and the reasons are of three different kinds —
+/// worth separating, because one is an implementation constraint rather than a
+/// semantic argument and should not be dressed as one.
+///
+/// **Semantic.** An adjudication is an ACT on the record by an authorized
+/// party, not an observation of the world. `crate::projection`'s claim fold
+/// orders on valid time precisely because a claim is about the world — when the
+/// fact held matters more than when we heard it. A decision is the opposite: an
+/// operator cannot retroactively un-make a decision already recorded and acted
+/// upon, so a backdated decision arriving today must not silently override this
+/// morning's.
+///
+/// **Totality.** Generation is a total order and always present.
+/// [`DomainInstant`] refuses cross-domain comparison — correctly — so a
+/// `decided_at` rule would have to refuse a pair whose decisions sit on
+/// different clocks, turning an ordinary question into an error.
+///
+/// **Implementation, stated as such.** An incremental fold requires the
+/// ordering key to BE the fold order. Under `decided_at`, an out-of-order
+/// arrival would change the answer for a pair already folded, forcing a rebuild
+/// from generation 0 every time — so `decided_at` precedence is not merely a
+/// different rule, it is incompatible with the projection's design.
+///
+/// # The limitation this accepts, recorded rather than hidden
+///
+/// **AOU-ADJUDICATION-ORDER-001.** An adjudication reaching the log out of
+/// decision order — an offline operator console syncing later — takes
+/// precedence over decisions recorded before it, even though it was decided
+/// earlier. A deployment that queues decisions offline must either record them
+/// in decision order or accept that the record's order is the authority. A real
+/// cost of the rule, not a defect in it.
+pub fn promotions_in_effect<'a, I>(
+    history: I,
+) -> BTreeMap<CandidatePair, Vec<&'a SameAsAdjudication>>
+where
+    I: IntoIterator<Item = (i64, &'a SameAsAdjudication)>,
+{
+    let mut ordered: Vec<(i64, &'a SameAsAdjudication)> = history.into_iter().collect();
+    // Sorted rather than assumed: this is the whole-history entry point and a
+    // caller may hand it a log slice in any order. The store's fold takes its
+    // ordering from `ORDER BY generation ASC` instead, and the two agreeing on
+    // arbitrary histories is what the conformance corpus checks.
+    ordered.sort_by_key(|(generation, _)| *generation);
+
+    let mut runs: BTreeMap<CandidatePair, Vec<&'a SameAsAdjudication>> = BTreeMap::new();
+    for (_, decision) in ordered {
+        let run = runs.entry(decision.pair().clone()).or_default();
+        if leaves_pair_related(decision.outcome()) {
+            run.push(decision);
+        } else {
+            // The withdrawal resets the run. Kept as an EMPTY entry rather than
+            // removed, so the two states stay distinguishable inside this walk;
+            // the empty ones are dropped below.
+            run.clear();
+        }
+    }
+    runs.retain(|_, run| !run.is_empty());
+    runs
+}
+
+// PRECEDENCE-RULE-END
+
+/// The relations that **currently hold**.
+///
+/// Deduplicated, and governed by `KIRRA-WM-ADJUDICATION-PRECEDENCE-001`: a pair
+/// is related when the decision IN EFFECT for it is `Promoted`, not when any
+/// historical decision was.
+///
+/// # What changed, and why the old reading was wrong
+///
+/// This used to be `filter(is_confirmed)` across every record — one `Promoted`
+/// anywhere confirmed the pair however many rejections followed. That put it in
+/// direct contradiction with the relationship projection, which has always let
+/// the newest authorized decision govern. Two deterministic readings of one
+/// operator history cannot both be authoritative, and this was the wrong one:
+/// it made an operator's rejection unable to undo their own promotion.
+///
+/// There is deliberately no closure sibling:
 /// `KIRRA-WM-TRANSITIVITY-001` permits resolution (2c) to traverse accepted
 /// merges transitively, but forbids this layer from *emitting* the traversed
 /// relation as evidence. `A=B` and `B=C` yield two confirmed relations here,
 /// never three.
 #[must_use]
-pub fn confirmed_relations(adjudications: &[SameAsAdjudication]) -> BTreeSet<CandidatePair> {
-    adjudications
-        .iter()
-        .filter(|a| a.is_confirmed())
-        .map(|a| a.pair().clone())
-        .collect()
+pub fn confirmed_relations<'a, I>(history: I) -> BTreeSet<CandidatePair>
+where
+    I: IntoIterator<Item = (i64, &'a SameAsAdjudication)>,
+{
+    promotions_in_effect(history).into_keys().collect()
 }
 
-/// `Corroboration(n)` — **distinct confirmed relations**.
+/// `Corroboration(n)` — **distinct relations currently in effect**.
 ///
 /// Not adjudication records, and not candidate votes. Counting records would
 /// let re-adjudicating one pair inflate trust; counting votes would let a
 /// matcher do it, which `KIRRA-WM-PROMOTION-001` bars outright.
+///
+/// Under `KIRRA-WM-ADJUDICATION-PRECEDENCE-001` this counts relations that
+/// currently HOLD — a promoted-then-rejected pair contributes nothing. Counting
+/// "ever promoted" would let a withdrawn decision keep propping up a trust
+/// grade, which is the same inflation by a slower route.
 #[must_use]
-pub fn corroboration_count(adjudications: &[SameAsAdjudication]) -> usize {
-    confirmed_relations(adjudications).len()
+pub fn corroboration_count<'a, I>(history: I) -> usize
+where
+    I: IntoIterator<Item = (i64, &'a SameAsAdjudication)>,
+{
+    confirmed_relations(history).len()
 }
 
 #[cfg(test)]
@@ -319,6 +461,21 @@ mod tests {
     use crate::observation::{ClockDomain, Confidence, ConfidenceBasis};
     use crate::reference::EntityId;
     use crate::same_as_candidate::{MatcherIdentity, SameAsCandidate};
+
+    /// Attach generations in slice order — the order a log would have recorded
+    /// these decisions.
+    ///
+    /// Every test below reads as a HISTORY now rather than a bag, which is the
+    /// visible consequence of `KIRRA-WM-ADJUDICATION-PRECEDENCE-001`: the order
+    /// decisions were recorded in is part of the question, so a caller cannot
+    /// ask it without saying what that order was.
+    fn in_order(records: &[SameAsAdjudication]) -> Vec<(i64, &SameAsAdjudication)> {
+        records
+            .iter()
+            .enumerate()
+            .map(|(i, a)| (i as i64 + 1, a))
+            .collect()
+    }
 
     const OBS_A: &str = "01ARZ3NDEKTSV4RRFFQ69G5FAV";
     const OBS_B: &str = "01ARZ3NDEKTSV4RRFFQ69G5FAW";
@@ -425,7 +582,7 @@ mod tests {
         assert_eq!(rejection.cited(), &[obs(OBS_A)]);
         assert_eq!(c, before, "the candidate survives its own rejection");
         assert_eq!(c.support(), &[obs(OBS_A)], "and still carries its evidence");
-        assert_eq!(corroboration_count(&[rejection]), 0);
+        assert_eq!(corroboration_count(in_order(&[rejection])), 0);
     }
 
     /// **`A=B` and `B=C` do not produce `A=C`.**
@@ -441,7 +598,7 @@ mod tests {
             Outcome::Promoted,
             OBS_B,
         );
-        let confirmed = confirmed_relations(&[ab, bc]);
+        let confirmed = confirmed_relations(in_order(&[ab, bc]));
 
         assert_eq!(confirmed.len(), 2, "exactly the two promoted pairs");
         let ac = CandidatePair::new(ent("robot-a"), ent("robot-c")).expect("distinct");
@@ -460,7 +617,7 @@ mod tests {
         let third = decide(&c, Outcome::Promoted, OBS_C);
 
         assert_eq!(
-            corroboration_count(&[first, again, third]),
+            corroboration_count(in_order(&[first, again, third])),
             1,
             "three promotions of one relation is one corroborated relation"
         );
@@ -479,7 +636,7 @@ mod tests {
             decide(&cd, Outcome::Rejected, OBS_B),
             decide(&ef, Outcome::Unresolved, OBS_C),
         ];
-        assert_eq!(corroboration_count(&records), 1);
+        assert_eq!(corroboration_count(in_order(&records)), 1);
 
         // The candidates themselves still contribute nothing, whatever happened
         // to them — 2a's bar is not relaxed by 2b existing.
@@ -534,7 +691,7 @@ mod tests {
                 OBS_C,
             ),
         ];
-        let keys = confirmed_relations(&records);
+        let keys = confirmed_relations(in_order(&records));
         assert_eq!(
             keys.len(),
             3,
@@ -547,7 +704,7 @@ mod tests {
             );
         }
         // And the count agrees with the set: no path counts records instead.
-        assert_eq!(corroboration_count(&records), keys.len());
+        assert_eq!(corroboration_count(in_order(&records)), keys.len());
     }
 
     /// Pair order does not create a second confirmed relation, since `same_as`
@@ -564,6 +721,6 @@ mod tests {
             Outcome::Promoted,
             OBS_B,
         );
-        assert_eq!(corroboration_count(&[ab, ba]), 1);
+        assert_eq!(corroboration_count(in_order(&[ab, ba])), 1);
     }
 }
