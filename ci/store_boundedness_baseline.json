@@ -212,6 +212,10 @@
       "class": "bounded",
       "why": "Tier 5 box 5a. Three bounded steps and no scan: the point read above, then `carriers` (capped at MAX_CARRIERS + a truncation flag) and `compacted_spans` (capped at MAX_COMPACTED_SPANS), both of which box 4b already bounds and classifies. Answers whether ONE relationship's cited candidate is still visible; it cannot be used to enumerate anything."
     },
+    "relationships_in_effect_at": {
+      "class": "operational",
+      "why": "Tier 2 box 2b's precedence ruling. A HISTORICAL replay: folds every confirmed same_as adjudication at or below a generation cut, from empty, to reproduce the relationships that held there. Whole-prefix by construction and deliberately so -- the ruling's historical half is 'what did the record say then', which cannot be answered from a page. Classified operational rather than bounded for the same reason `identity_view_at`'s whole-graph sibling is: it is a replay, not an interactive read, and no request path calls it. A bounded historical relationship query would need its own cursor design and is not owed until a consumer asks for one."
+    },
     "same_as_candidate_exists": {
       "class": "operational",
       "why": "Box 2a's producer-side idempotence point-read. EXISTS over one canonical pair plus matcher version, so it returns at most one row by construction; operational for the same reason as identifier_agreements -- a producer asking 'have I already said this', not a consumer asking what is true."

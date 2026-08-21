@@ -3308,6 +3308,87 @@ impl WorldStore {
         Ok(out)
     }
 
+    /// **The relationships that held as of a past generation** — the historical
+    /// half of `KIRRA-WM-ADJUDICATION-PRECEDENCE-001`.
+    ///
+    /// A promotion later withdrawn is gone from the CURRENT projection, and it
+    /// must still be visible at the coordinate where it held — otherwise the
+    /// ruling would not merely reorder the present, it would erase the past.
+    ///
+    /// # Folded from EMPTY, and from the LOG
+    ///
+    /// Both halves matter and each has a wrong version that compiles.
+    ///
+    /// From the **log**, not `relationships_projection`: that table is a cache
+    /// of one point on the temporal surface — latest known — and every other
+    /// point has to be replayed. `WorldStore::identity_view_at` carries the same
+    /// note for identity, and relationships are not an exception to it.
+    ///
+    /// From **empty**, not from the stored rows.
+    /// [`WorldStore::fold_relationship_range`] seeds from the projection because
+    /// an incremental fold's withdrawal sweep needs to know what it is
+    /// withdrawing. Seeding a HISTORICAL fold that way would start it from
+    /// today's state and apply an old prefix on top — leaving every relationship
+    /// promoted after the cut already present, which is precisely what this
+    /// query exists to prevent, arriving through the one line that looks like
+    /// reuse.
+    ///
+    /// # Errors
+    ///
+    /// [`StoreError::CorruptRelationshipProjectionRow`] if a log row cannot be
+    /// decoded, or [`StoreError::Sqlite`] on storage failure.
+    pub fn relationships_in_effect_at(
+        &self,
+        at_generation: i64,
+    ) -> Result<
+        std::collections::BTreeMap<
+            relationship_projection::PairKey,
+            relationship_projection::ProjectedRelationship,
+        >,
+        StoreError,
+    > {
+        let mut acc = std::collections::BTreeMap::new();
+        let mut stmt = self.conn.prepare(
+            "SELECT generation, writer_class, claim_status, kind, predicate,
+                    subject, object, payload, payload_schema
+             FROM world_events
+             WHERE generation <= ?1 AND claim_status = 'confirmed' AND kind = ?2
+             ORDER BY generation ASC",
+        )?;
+        let mut rows = stmt.query(params![
+            at_generation,
+            same_as_adjudication_record::SAME_AS_ADJUDICATION_KIND
+        ])?;
+        while let Some(r) = rows.next()? {
+            let generation: i64 = r.get(0)?;
+            let writer_class: String = r.get(1)?;
+            let claim_status: String = r.get(2)?;
+            let kind: String = r.get(3)?;
+            let predicate: Option<String> = r.get(4)?;
+            let subject: String = r.get(5)?;
+            let object: Option<String> = r.get(6)?;
+            let payload: String = r.get(7)?;
+            let payload_schema: i64 = r.get(8)?;
+            let decision = same_as_adjudication_record::decode_same_as_adjudication(
+                &same_as_adjudication_record::StoredAdjudicationRow {
+                    writer_class: writer_class.as_str(),
+                    claim_status: claim_status.as_str(),
+                    kind: kind.as_str(),
+                    predicate: predicate.as_deref(),
+                    subject: subject.as_str(),
+                    object: object.as_deref(),
+                    payload: payload.as_str(),
+                    payload_schema,
+                },
+            )
+            .map_err(|e| StoreError::CorruptRelationshipProjectionRow {
+                detail: format!("generation {generation}: {e}"),
+            })?;
+            relationship_projection::fold_same_as_adjudication(&mut acc, &decision, generation);
+        }
+        Ok(acc)
+    }
+
     /// A digest over the relationship projection, in key order.
     ///
     /// # Errors

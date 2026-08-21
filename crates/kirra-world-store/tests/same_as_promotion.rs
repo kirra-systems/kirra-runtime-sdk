@@ -166,8 +166,12 @@ fn resolved(s: &WorldStore, id: &str) -> ResolutionOutcome {
 /// here asserts that a module is reachable.
 #[test]
 fn a_confirmed_same_as_changes_what_b_resolves_to() {
-    let promoted = promote_confirmed_same_as(&[decide(&candidate("a", "b"), Outcome::Promoted, 5)])
-        .expect("promotion");
+    let promoted = promote_confirmed_same_as(&numbered([decide(
+        &candidate("a", "b"),
+        Outcome::Promoted,
+        5,
+    )]))
+    .expect("promotion");
     assert_eq!(promoted.len(), 1, "one confirmed pair, one merge");
 
     // WITHOUT the promotion: `b` is its own entity.
@@ -193,10 +197,10 @@ fn a_confirmed_same_as_changes_what_b_resolves_to() {
 /// and `Outcome` would be decoration.
 #[test]
 fn a_rejected_pair_does_not_move_identity() {
-    let promoted = promote_confirmed_same_as(&[
+    let promoted = promote_confirmed_same_as(&numbered([
         decide(&candidate("c", "d"), Outcome::Rejected, 5),
         decide(&candidate("e", "f"), Outcome::Unresolved, 6),
-    ])
+    ]))
     .expect("promotion");
     assert!(
         promoted.is_empty(),
@@ -219,10 +223,18 @@ fn a_rejected_pair_does_not_move_identity() {
 /// requirement as a test rather than a comment.
 #[test]
 fn promotion_does_not_depend_on_which_side_was_named_first() {
-    let one = promote_confirmed_same_as(&[decide(&candidate("a", "b"), Outcome::Promoted, 5)])
-        .expect("promotion");
-    let other = promote_confirmed_same_as(&[decide(&candidate("b", "a"), Outcome::Promoted, 5)])
-        .expect("promotion");
+    let one = promote_confirmed_same_as(&numbered([decide(
+        &candidate("a", "b"),
+        Outcome::Promoted,
+        5,
+    )]))
+    .expect("promotion");
+    let other = promote_confirmed_same_as(&numbered([decide(
+        &candidate("b", "a"),
+        Outcome::Promoted,
+        5,
+    )]))
+    .expect("promotion");
     assert_eq!(
         one, other,
         "canonical pairing must make the order irrelevant"
@@ -244,7 +256,7 @@ fn the_promoted_merge_cites_the_adjudications_evidence() {
     )
     .expect("adjudication");
 
-    let promoted = promote_confirmed_same_as(&[adj]).expect("promotion");
+    let promoted = promote_confirmed_same_as(&numbered([adj])).expect("promotion");
     let IdentityAdjudication::Merge(m) = &promoted[0] else {
         panic!("expected a merge, got {:?}", promoted[0]);
     };
@@ -268,10 +280,10 @@ fn the_promoted_merge_cites_the_adjudications_evidence() {
 #[test]
 fn re_affirming_a_pair_keeps_the_earliest_beginning() {
     let c = candidate("a", "b");
-    let promoted = promote_confirmed_same_as(&[
+    let promoted = promote_confirmed_same_as(&numbered([
         decide(&c, Outcome::Promoted, 90),
         decide(&c, Outcome::Promoted, 20),
-    ])
+    ]))
     .expect("promotion");
 
     assert_eq!(promoted.len(), 1, "one pair, one merge: {promoted:?}");
@@ -282,120 +294,304 @@ fn re_affirming_a_pair_keeps_the_earliest_beginning() {
     );
 }
 
-/// **A pair promoted and then rejected is STILL promoted today.** Recorded, not
-/// endorsed.
+/// **A pair promoted and then rejected is NOT promoted** — the ruling, at 2c.
 ///
-/// `confirmed_relations` filters `is_confirmed()` across every record and
-/// applies no precedence, so one `Promoted` anywhere in the history confirms the
-/// pair however many rejections follow. Box 2c consumes that verdict rather than
-/// re-deriving it — whether a re-adjudicated pair stays confirmed is box 2b's
-/// question, and answering it here would create a second answer that drifts.
+/// This test used to assert the opposite, under the name
+/// `promoted_then_rejected_still_promotes_today_which_is_a_ruling_2b_owes`. It
+/// existed to record a behaviour nobody endorsed and to fail the moment someone
+/// ruled, so the ruling could not be made by accident. It has now done exactly
+/// that: `KIRRA-WM-ADJUDICATION-PRECEDENCE-001` adopted latest-decision-wins,
+/// this test broke, and its expectation was changed deliberately rather than
+/// deleted to make a build green.
 ///
-/// This test exists so the behaviour cannot change by accident before someone
-/// rules on it. If last-write-wins is the intent, this test is the one that
-/// should fail first, and it should be changed deliberately in 2b.
-///
-/// **Box 5a has since answered the same question the other way for its own
-/// projection** — see
-/// `the_two_precedence_rules_disagree_and_only_one_has_a_production_consumer`
-/// immediately below, which pins the disagreement rather than leaving it to be
-/// discovered by whoever wires the next consumer.
+/// 2c gets this for free — `promote_confirmed_same_as` asks
+/// `promotions_in_effect` rather than filtering on `Outcome::Promoted` itself,
+/// which is why one ruling moved both layers.
 #[test]
-fn promoted_then_rejected_still_promotes_today_which_is_a_ruling_2b_owes() {
+fn a_promotion_the_operator_withdrew_does_not_reach_the_identity_path() {
     let c = candidate("a", "b");
-    let promoted = promote_confirmed_same_as(&[
+    let promoted = promote_confirmed_same_as(&numbered([
         decide(&c, Outcome::Promoted, 10),
         decide(&c, Outcome::Rejected, 20),
-    ])
+    ]))
     .expect("promotion");
 
-    assert_eq!(
-        promoted.len(),
-        1,
-        "today a later rejection does not un-confirm: {promoted:?}"
+    assert!(
+        promoted.is_empty(),
+        "the newest authorized decision governs, so no merge is emitted: {promoted:?}"
     );
 }
 
-/// **The two precedence rules over `same_as` decisions DISAGREE.** Recorded,
-/// not endorsed — and measured, not inferred.
+/// **A withdrawal RESETS when the identity began.**
 ///
-/// Two rules now read the same adjudication history and answer differently
-/// about a pair that was promoted and later rejected:
+/// The second half of the ruling, and the one a latest-decision-wins rule does
+/// not settle on its own. `promote_confirmed_same_as` dates an identity from
+/// the EARLIEST promotion in its current unbroken run — so re-affirming a pair
+/// does not move its start date, while a rejection followed by a fresh
+/// promotion does.
 ///
-/// | Rule | Promoted-then-rejected | Consumer |
-/// |---|---|---|
-/// | `confirmed_relations` (2c, pure) | **still confirmed** — no precedence, one `Promoted` anywhere confirms | tests only |
-/// | `relationship_projection::fold_all` (5a) | **withdrawn** — last decision wins | `relationships_projection` |
-///
-/// # This is latent, not live, and the distinction is load-bearing
-///
-/// Stating it precisely because "two projections disagree" would be a much
-/// more serious claim than what is actually true, and the difference was
-/// established by running it rather than by reading:
-///
-/// * `promote_confirmed_same_as` has **no production caller** — every call site
-///   in the tree is a test.
-/// * The entity fold consumes `kind = "identity_adjudication"`, while
-///   `WorldStore::adjudicate_same_as` writes `kind = "same_as_adjudication"`.
-///   Different kinds, so the store's entity projection never sees a `same_as`
-///   decision at all: after a promote-then-reject, `resolve` answers `Unknown`,
-///   not a stale merge.
-///
-/// So no shipped path today can be asked the same question twice and get two
-/// answers. What exists is a **trap for the next step**: the typed `Related`
-/// query has to choose a source of truth, and the two available sources do not
-/// agree. Choosing by accident is exactly how the second answer that drifts
-/// gets created — which is the hazard 2c's own docs name and decline to create.
-///
-/// This test fails the moment either rule changes, so whoever rules on 2b's
-/// owed question has to confront both halves at once instead of one.
+/// Without this, "earliest promotion wins" would reach back across a withdrawal
+/// and date the identity from a decision the operator had already un-made.
 #[test]
-fn the_two_precedence_rules_disagree_and_only_one_has_a_production_consumer() {
+fn a_re_promotion_after_a_withdrawal_is_dated_from_the_new_run() {
+    let c = candidate("a", "b");
+    let promoted = promote_confirmed_same_as(&numbered([
+        decide(&c, Outcome::Promoted, 10),
+        decide(&c, Outcome::Rejected, 20),
+        decide(&c, Outcome::Promoted, 30),
+        decide(&c, Outcome::Promoted, 40),
+    ]))
+    .expect("promotion");
+
+    assert_eq!(promoted.len(), 1);
+    let IdentityAdjudication::Merge(merge) = &promoted[0] else {
+        panic!("expected a merge, got {:?}", promoted[0]);
+    };
+    assert_eq!(
+        merge.at(),
+        at(30),
+        "the identity began at the first promotion of the CURRENT run, not the \
+         withdrawn one at 10 and not the re-affirmation at 40"
+    );
+}
+
+/// Persist one candidate, then promote it and reject it, through the REAL doors.
+///
+/// Returns the generations of the two adjudications, which are the T1 and T2
+/// coordinates the historical query is asked at. Taken from the store rather
+/// than counted, because generations are not dense once compaction has run.
+/// Attach generations in recorded order.
+///
+/// Every call reads as a HISTORY rather than a bag now, which is the visible
+/// consequence of `KIRRA-WM-ADJUDICATION-PRECEDENCE-001`: the order decisions
+/// were recorded in is part of the question, so a caller cannot ask without
+/// saying what that order was.
+fn numbered(
+    records: impl IntoIterator<Item = SameAsAdjudication>,
+) -> Vec<(i64, SameAsAdjudication)> {
+    records
+        .into_iter()
+        .enumerate()
+        .map(|(i, a)| (i as i64 + 1, a))
+        .collect()
+}
+
+fn promote_then_reject(store: &mut WorldStore) -> (i64, i64) {
+    use kirra_world::observation::{Confidence, ConfidenceBasis, SourceClass};
+    use kirra_world::same_as_candidate::{MatcherIdentity, SameAsCandidate};
+    use kirra_world_store::candidate_record::CandidateRow;
+    use kirra_world_store::same_as_adjudication_record::SameAsAdjudicationRequest;
+
+    let cand_event = EventId::new("cand-ev-1").expect("id");
+    let cand_obs = ObservationId::new("cand-obs-1").expect("id");
+    let proposal = SameAsCandidate::propose(
+        CandidatePair::new(eid("a"), eid("b")).expect("distinct"),
+        MatcherIdentity::new("world-ingest", "exact-identifier", "1.0.0").expect("matcher"),
+        Confidence::new(None, ConfidenceBasis::Unspecified, None).expect("confidence"),
+        vec![obs(OBS)],
+    )
+    .expect("candidate");
+    store
+        .append_same_as_candidate(
+            &CandidateRow {
+                event_id: &cand_event,
+                observation_id: &cand_obs,
+                txn_time_ms: 1,
+                valid_from_ms: 1,
+                source: "world-ingest",
+                source_version: "1.0.0",
+            },
+            &proposal,
+        )
+        .expect("persist the candidate");
+
+    let mut decide_through_the_door = |tag: &str, outcome: Outcome, ms: u64| -> i64 {
+        let event_id = EventId::new(format!("adj-ev-{tag}")).expect("id");
+        let observation_id = ObservationId::new(format!("adj-obs-{tag}")).expect("id");
+        store
+            .adjudicate_same_as(&SameAsAdjudicationRequest {
+                event_id: &event_id,
+                observation_id: &observation_id,
+                candidate_observation_id: "cand-obs-1",
+                cited: vec![obs(OBS)],
+                authority: AdjudicationAuthority::new(SourceClass::Operator, "console-operator")
+                    .expect("authority"),
+                outcome,
+                decided_at: at(ms),
+                txn_time_ms: ms as i64,
+                source: "operator-console",
+                source_version: "1.0.0",
+            })
+            .expect("an operator judging a persisted candidate");
+        store.head_generation_for_test().expect("head")
+    };
+
+    let t1 = decide_through_the_door("1", Outcome::Promoted, 10);
+    let t2 = decide_through_the_door("2", Outcome::Rejected, 20);
+    (t1, t2)
+}
+
+/// **THE CONFORMANCE PROOF — both precedence rules, one answer.**
+///
+/// `KIRRA-WM-ADJUDICATION-PRECEDENCE-001` replaced a contradiction. Until it
+/// was ruled, two deterministic readings of one operator history disagreed:
+///
+/// | Rule | Promoted-then-rejected (before the ruling) |
+/// |---|---|
+/// | `confirmed_relations` (2c, pure) | still confirmed — one `Promoted` anywhere confirmed forever |
+/// | `relationship_projection::fold_all` (5a) | withdrawn — the latest decision governs |
+///
+/// The ruling adopted the second reading and made both sides derive from it:
+/// the EFFECT half is `leaves_pair_related`, called by both, so it cannot drift
+/// at all. The ORDERING half cannot be shared — one side folds incrementally
+/// and the other walks a whole history — so it is proven here instead, over a
+/// corpus chosen so each row discriminates something.
+///
+/// This test replaces the pin that used to assert the two DISAGREED. That pin
+/// did its job: it made whoever ruled confront both halves at once.
+#[test]
+fn both_precedence_rules_agree_on_every_history_in_the_corpus() {
     use kirra_world::same_as_adjudication::confirmed_relations;
     use kirra_world_store::relationship_projection;
     use kirra_world_store::same_as_adjudication_record::StoredAdjudication;
 
-    let c = candidate("a", "b");
-    let history = [
-        decide(&c, Outcome::Promoted, 10),
-        decide(&c, Outcome::Rejected, 20),
+    // Each row is (label, the decisions in RECORDED order, does the pair end up
+    // related). The `related` column IS the ruling, written as data.
+    let corpus: &[(&str, &[Outcome], bool)] = &[
+        ("promoted", &[Outcome::Promoted], true),
+        ("rejected", &[Outcome::Rejected], false),
+        ("unresolved", &[Outcome::Unresolved], false),
+        // The historic disagreement, now agreed.
+        (
+            "promoted_then_rejected",
+            &[Outcome::Promoted, Outcome::Rejected],
+            false,
+        ),
+        (
+            "promoted_then_unresolved",
+            &[Outcome::Promoted, Outcome::Unresolved],
+            false,
+        ),
+        // Order matters, and this row is what proves it: the same two decisions
+        // as the row above, reversed, give the opposite answer. A rule that
+        // ignored order entirely would answer both identically.
+        (
+            "rejected_then_promoted",
+            &[Outcome::Rejected, Outcome::Promoted],
+            true,
+        ),
+        (
+            "promoted_rejected_repromoted",
+            &[Outcome::Promoted, Outcome::Rejected, Outcome::Promoted],
+            true,
+        ),
+        (
+            "promoted_twice",
+            &[Outcome::Promoted, Outcome::Promoted],
+            true,
+        ),
+        (
+            "promoted_rejected_then_unresolved",
+            &[Outcome::Promoted, Outcome::Rejected, Outcome::Unresolved],
+            false,
+        ),
     ];
 
-    // Rule 1 -- 2c's pure promotion path. No precedence.
-    assert_eq!(
-        confirmed_relations(&history).len(),
-        1,
-        "2c: one Promoted anywhere confirms the pair, however many rejections follow"
-    );
+    let c = candidate("a", "b");
+    for (label, outcomes, expected_related) in corpus {
+        let history: Vec<SameAsAdjudication> = outcomes
+            .iter()
+            .enumerate()
+            .map(|(i, o)| decide(&c, *o, 10 + i as u64))
+            .collect();
+        let numbered: Vec<(i64, &SameAsAdjudication)> = history
+            .iter()
+            .enumerate()
+            .map(|(i, a)| (i as i64 + 1, a))
+            .collect();
 
-    // Rule 2 -- 5a's fold, over the SAME decisions in the same order.
-    let stored: Vec<StoredAdjudication> = history
-        .iter()
-        .map(|a| StoredAdjudication {
-            pair: a.pair().clone(),
-            outcome: a.outcome(),
-            candidate_observation_id: a.candidate_observation_id().as_str().to_owned(),
-            adjudicator: a.authority().adjudicator().to_owned(),
-            decided_at: a.decided_at(),
-        })
-        .collect();
-    let folded = relationship_projection::fold_all(
-        stored.iter().enumerate().map(|(i, d)| (i as i64 + 1, d)),
-    );
+        // Side 1 -- the domain's whole-history walk.
+        let domain_related = !confirmed_relations(numbered.iter().copied()).is_empty();
+
+        // Side 2 -- the store's incremental fold, over the SAME order.
+        let stored: Vec<StoredAdjudication> = history
+            .iter()
+            .map(|a| StoredAdjudication {
+                pair: a.pair().clone(),
+                outcome: a.outcome(),
+                candidate_observation_id: a.candidate_observation_id().as_str().to_owned(),
+                adjudicator: a.authority().adjudicator().to_owned(),
+                decided_at: a.decided_at(),
+            })
+            .collect();
+        let folded = relationship_projection::fold_all(
+            stored.iter().enumerate().map(|(i, d)| (i as i64 + 1, d)),
+        );
+        let store_related = !folded.is_empty();
+
+        // Both must match the RULING, not merely each other. Asserting only
+        // agreement would pass if both sides were wrong in the same direction,
+        // which is exactly what a shared helper makes easy to do.
+        assert_eq!(
+            domain_related, *expected_related,
+            "{label}: the domain rule disagrees with the ruling"
+        );
+        assert_eq!(
+            store_related, *expected_related,
+            "{label}: the store fold disagrees with the ruling"
+        );
+        assert_eq!(
+            domain_related, store_related,
+            "{label}: the two rules disagree with each other"
+        );
+    }
+}
+
+/// **T1/T2 — the ruling changes the present without erasing the past.**
+///
+/// The acceptance shape the ruling was scoped to:
+///
+/// ```text
+///   T1  Promote(A,B)          -> current: related
+///   T2  Reject(A,B)           -> current: NOT related  (the ruled precedence)
+///       query as of T1        -> STILL related         (history is intact)
+/// ```
+///
+/// The third line is the one that makes the ruling honest rather than merely
+/// decisive. Precedence reorders what holds NOW; a promotion that genuinely
+/// held between T1 and T2 must still be visible at a coordinate inside that
+/// window, or the ruling would be rewriting the record instead of reading it.
+#[test]
+fn precedence_governs_the_present_and_leaves_the_past_intact() {
+    let path = tmp("t1-t2");
+    let mut store = WorldStore::open(&path).expect("open");
+    let (t1, t2) = promote_then_reject(&mut store);
+
+    // --- the present, under the ruled precedence ------------------------
+    store.fold_relationship_projection().expect("fold");
     assert!(
-        folded.is_empty(),
-        "5a: the newest authorized decision governs, so the pair is withdrawn: {folded:?}"
+        store
+            .load_relationship_projection()
+            .expect("load")
+            .is_empty(),
+        "T2: the newest authorized decision governs, so the pair is withdrawn"
     );
 
-    // The disagreement itself, asserted rather than left implicit in the two
-    // numbers above -- so the failure message says what is wrong, not just that
-    // a count moved.
-    assert_ne!(
-        confirmed_relations(&history).len(),
-        folded.len(),
-        "if these ever agree, one of the two precedence rules changed; retire this \
-         pin deliberately rather than deleting it to make a build green"
+    // --- the past, unchanged --------------------------------------------
+    let at_t1 = store.relationships_in_effect_at(t1).expect("historical");
+    assert_eq!(
+        at_t1.len(),
+        1,
+        "as of T1 the promotion held, and the ruling must not erase that"
     );
+    let at_t2 = store.relationships_in_effect_at(t2).expect("historical");
+    assert!(
+        at_t2.is_empty(),
+        "as of T2 the rejection had landed, so the pair is withdrawn there too"
+    );
+
+    drop(store);
+    let _ = std::fs::remove_file(&path);
 }
 
 // ---------------------------------------------------------------------------
@@ -418,10 +614,10 @@ fn the_two_precedence_rules_disagree_and_only_one_has_a_production_consumer() {
 #[test]
 fn a_cross_domain_re_affirmation_is_refused_rather_than_ordered() {
     let c = candidate("a", "b");
-    let err = promote_confirmed_same_as(&[
+    let err = promote_confirmed_same_as(&numbered([
         decide_on(&c, Outcome::Promoted, 90, ClockDomain::System),
         decide_on(&c, Outcome::Promoted, 20, ClockDomain::Boundary),
-    ])
+    ]))
     .expect_err("two clock domains must not be ordered");
 
     let AdjudicationError::PromotionDomainsDiffer { pair } = err else {
@@ -444,10 +640,10 @@ fn a_cross_domain_re_affirmation_is_refused_rather_than_ordered() {
 #[test]
 fn the_only_thing_that_refuses_it_is_only_the_domains() {
     let c = candidate("a", "b");
-    let promoted = promote_confirmed_same_as(&[
+    let promoted = promote_confirmed_same_as(&numbered([
         decide_on(&c, Outcome::Promoted, 90, ClockDomain::Boundary),
         decide_on(&c, Outcome::Promoted, 20, ClockDomain::Boundary),
-    ])
+    ]))
     .expect("one clock domain orders fine");
 
     assert_eq!(promoted.len(), 1, "one pair, one merge: {promoted:?}");
@@ -482,8 +678,9 @@ fn feeding_the_same_adjudications_in_either_order_yields_the_same_merges() {
     let ab = decide(&candidate("a", "b"), Outcome::Promoted, 5);
     let cd = decide(&candidate("c", "d"), Outcome::Promoted, 7);
 
-    let forward = promote_confirmed_same_as(&[ab.clone(), cd.clone()]).expect("promotion");
-    let reversed = promote_confirmed_same_as(&[cd, ab]).expect("promotion");
+    let forward =
+        promote_confirmed_same_as(&numbered([ab.clone(), cd.clone()])).expect("promotion");
+    let reversed = promote_confirmed_same_as(&numbered([cd, ab])).expect("promotion");
 
     assert_eq!(forward.len(), 2, "two pairs, two merges: {forward:?}");
     assert_eq!(

@@ -105,7 +105,7 @@ use crate::observation::DomainInstant;
 use crate::reference::EntityId;
 use crate::reference::ObservationId;
 // Box 2c: the promotion boundary consumes 2b's verdict and 2a's canonical pair.
-use crate::same_as_adjudication::{confirmed_relations, SameAsAdjudication};
+use crate::same_as_adjudication::{promotions_in_effect, SameAsAdjudication};
 use crate::same_as_candidate::CandidatePair;
 use core::cmp::Ordering;
 
@@ -974,12 +974,12 @@ impl IdentityAdjudication {
 ///   cross-domain comparison and this refuses with it: picking one would be
 ///   confidently wrong about when an identity began.
 pub fn promote_confirmed_same_as(
-    adjudications: &[SameAsAdjudication],
+    history: &[(i64, SameAsAdjudication)],
 ) -> Result<Vec<IdentityAdjudication>, AdjudicationError> {
-    // BTreeSet iteration order is the canonical pair order, so WHICH merges come
-    // out, in what order, and in which direction do not depend on how
-    // `adjudications` is arranged. The citation order INSIDE a merge does --
-    // it is first-seen across the slice.
+    // BTreeMap iteration order is the canonical pair order, so WHICH merges come
+    // out, in what order, and in which direction do not depend on how `history`
+    // is arranged. The citation order INSIDE a merge does -- it is first-seen
+    // across the pair's in-effect run.
     //
     // That asymmetry is deliberate, not an oversight. `Justification` preserves
     // recorded order on purpose ("a constructor that tidied it would be editing
@@ -988,26 +988,33 @@ pub fn promote_confirmed_same_as(
     // that the same log yield the same IDENTITY -- which entity resolves to
     // which -- and that half IS arrangement-independent. Citation order is
     // provenance, not identity.
-    let confirmed = confirmed_relations(adjudications);
-    let mut promoted = Vec::with_capacity(confirmed.len());
+    //
+    // `promotions_in_effect` is the authority on WHICH pairs and on WHICH
+    // promotions support them, under KIRRA-WM-ADJUDICATION-PRECEDENCE-001.
+    // Deliberately not re-derived here by filtering on `Outcome::Promoted`:
+    // that is exactly the second answer that drifted, and this layer asking 2b
+    // rather than restating it is what stops it drifting again.
+    let in_effect = promotions_in_effect(history.iter().map(|(g, a)| (*g, a)));
+    let mut promoted = Vec::with_capacity(in_effect.len());
 
-    for pair in &confirmed {
+    for (pair, run) in &in_effect {
         let mut cited: Vec<ObservationId> = Vec::new();
         let mut began: Option<DomainInstant> = None;
 
-        for a in adjudications
-            .iter()
-            .filter(|a| a.is_confirmed() && a.pair() == pair)
-        {
+        // The pair's UNBROKEN run of promotions since the last withdrawal, not
+        // every promotion in history. A promotion an operator later withdrew
+        // does not support the current identity, so neither does its evidence
+        // and neither does its date.
+        for a in run {
             for observation in a.cited() {
                 if !cited.contains(observation) {
                     cited.push(observation.clone());
                 }
             }
-            // EARLIEST promotion wins: re-affirming a pair does not move when it
-            // became identity. Compared through `DomainInstant::compare`, which
-            // refuses across clock domains rather than ordering by raw
-            // milliseconds.
+            // EARLIEST promotion in the current run wins: re-affirming a pair
+            // does not move when it became identity, while a withdrawal resets
+            // it. Compared through `DomainInstant::compare`, which refuses
+            // across clock domains rather than ordering by raw milliseconds.
             began = Some(match began {
                 None => a.decided_at(),
                 Some(prev) => match a.decided_at().compare(&prev) {
@@ -1022,8 +1029,8 @@ pub fn promote_confirmed_same_as(
             });
         }
 
-        // Unreachable: `confirmed_relations` only yields pairs some record
-        // promoted. Skipped rather than unwrapped so a future change to 2b's
+        // Unreachable: `promotions_in_effect` yields only pairs whose run is
+        // non-empty. Skipped rather than unwrapped so a future change to 2b's
         // predicate degrades to "promotes nothing" instead of a panic in the
         // identity path.
         let Some(at) = began else { continue };

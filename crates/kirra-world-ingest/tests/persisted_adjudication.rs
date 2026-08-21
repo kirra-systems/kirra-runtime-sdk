@@ -513,8 +513,18 @@ fn re_adjudicating_the_same_persisted_pair_does_not_inflate_corroboration() {
     }
 
     assert_eq!(decisions.len(), 3, "three records were genuinely written");
+    // Numbered in the order they were written, because
+    // `KIRRA-WM-ADJUDICATION-PRECEDENCE-001` makes that order part of the
+    // question. Three PROMOTIONS with nothing between them leave one relation
+    // in effect, so the answer is unchanged by the ruling — which is the point
+    // of keeping this case: precedence must not disturb re-affirmation.
+    let history: Vec<(i64, &SameAsAdjudication)> = decisions
+        .iter()
+        .enumerate()
+        .map(|(i, a)| (i as i64 + 1, a))
+        .collect();
     assert_eq!(
-        corroboration_count(&decisions),
+        corroboration_count(history),
         1,
         "but one pair is one corroboration, however many times it is affirmed"
     );
