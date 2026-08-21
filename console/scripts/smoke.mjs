@@ -20,7 +20,7 @@ const PORT = 8899
 const ROUTES = [
   '', 'live', 'global', 'fleet', 'fleet/r1', 'safety', 'runtime', 'telemetry',
   'missions', 'oversight', 'doer-bound', 'events', 'incidents', 'compliance',
-  'analytics', 'explorer', 'reports', 'settings',
+  'analytics', 'explorer', 'reports', 'settings', 'identity',
 ]
 
 const server = spawn('npx', ['next', 'start', '-p', String(PORT)], { stdio: 'ignore' })

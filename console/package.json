@@ -8,7 +8,8 @@
     "start": "next start",
     "lint": "next lint",
     "typecheck": "tsc --noEmit",
-    "smoke": "node scripts/smoke.mjs"
+    "smoke": "node scripts/smoke.mjs",
+    "test:contract": "node --test lib/world/*.test.mjs"
   },
   "dependencies": {
     "clsx": "^2.1.1",

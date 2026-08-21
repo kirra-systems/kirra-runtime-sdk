@@ -1,0 +1,51 @@
+[
+  {
+    "outcome": "related",
+    "view": {
+      "subject": "track-a",
+      "related": [
+        {
+          "low": "track-a",
+          "high": "track-b",
+          "other": "track-b",
+          "adjudicator": "yard-supervisor",
+          "decision_marker": "d-41",
+          "provenance": "resolved"
+        },
+        {
+          "low": "track-a",
+          "high": "track-c",
+          "other": "track-c",
+          "adjudicator": "night-shift-lead",
+          "decision_marker": "d-57",
+          "provenance": "degraded"
+        },
+        {
+          "low": "track-a",
+          "high": "track-d",
+          "other": "track-d",
+          "adjudicator": "yard-supervisor",
+          "decision_marker": "d-63",
+          "provenance": "dangling"
+        },
+        {
+          "low": "track-a",
+          "high": "track-e",
+          "other": "track-e",
+          "adjudicator": "depot-manager",
+          "decision_marker": "d-70",
+          "provenance": "plural"
+        }
+      ],
+      "truncated": true
+    }
+  },
+  {
+    "outcome": "not_an_entity",
+    "reason": "\"track-�\" is not an askable entity identity"
+  },
+  {
+    "outcome": "unavailable",
+    "reason": "the relationship projection could not be read"
+  }
+]
