@@ -2363,6 +2363,9 @@ dependencies = [
  "kirra-core",
  "kirra-planner",
  "kirra-proposal-context",
+ "kirra-world",
+ "kirra-world-ingest",
+ "kirra-world-service",
  "kirra-world-store",
 ]
 
