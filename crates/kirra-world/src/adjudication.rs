@@ -105,7 +105,9 @@ use crate::observation::DomainInstant;
 use crate::reference::EntityId;
 use crate::reference::ObservationId;
 // Box 2c: the promotion boundary consumes 2b's verdict and 2a's canonical pair.
-use crate::same_as_adjudication::{promotions_in_effect, SameAsAdjudication};
+use crate::same_as_adjudication::{
+    promotions_in_effect, AdjudicationAuthority, SameAsAdjudication,
+};
 use crate::same_as_candidate::CandidatePair;
 use core::cmp::Ordering;
 
@@ -379,6 +381,7 @@ impl RetirementReason {
 pub struct MergeEntities {
     sources: Vec<EntityId>,
     into: EntityId,
+    authority: AdjudicationAuthority,
     justification: Justification,
     at: DomainInstant,
 }
@@ -406,6 +409,7 @@ impl MergeEntities {
     pub fn new(
         sources: impl IntoIterator<Item = EntityId>,
         into: EntityId,
+        authority: AdjudicationAuthority,
         justification: Justification,
         at: DomainInstant,
     ) -> Result<Self, AdjudicationError> {
@@ -424,6 +428,7 @@ impl MergeEntities {
         Ok(Self {
             sources,
             into,
+            authority,
             justification,
             at,
         })
@@ -445,6 +450,15 @@ impl MergeEntities {
     #[must_use]
     pub fn justification(&self) -> &Justification {
         &self.justification
+    }
+
+    /// Who was authorized to make this judgement.
+    ///
+    /// `KIRRA-WM-IDENTITY-AUTHORITY-001`. A value of this type exists only for
+    /// an authorized adjudicator, so holding one of these IS the check.
+    #[must_use]
+    pub fn authority(&self) -> &AdjudicationAuthority {
+        &self.authority
     }
 
     /// When the adjudication was made, on a clock that names itself.
@@ -501,6 +515,7 @@ pub struct SplitEntity {
     source: EntityId,
     shape: SplitShape,
     into: Vec<EntityId>,
+    authority: AdjudicationAuthority,
     justification: Justification,
     at: DomainInstant,
 }
@@ -526,6 +541,7 @@ impl SplitEntity {
     pub fn partition(
         source: EntityId,
         into: impl IntoIterator<Item = EntityId>,
+        authority: AdjudicationAuthority,
         justification: Justification,
         at: DomainInstant,
     ) -> Result<Self, AdjudicationError> {
@@ -533,7 +549,14 @@ impl SplitEntity {
         if into.len() < 2 {
             return Err(AdjudicationError::SplitTooNarrow { found: into.len() });
         }
-        Self::build(source, SplitShape::Partition, into, justification, at)
+        Self::build(
+            source,
+            SplitShape::Partition,
+            into,
+            authority,
+            justification,
+            at,
+        )
     }
 
     /// **Subtraction** — pieces were separated out of a source that survives.
@@ -556,6 +579,7 @@ impl SplitEntity {
     pub fn subtract(
         source: EntityId,
         separated: impl IntoIterator<Item = EntityId>,
+        authority: AdjudicationAuthority,
         justification: Justification,
         at: DomainInstant,
     ) -> Result<Self, AdjudicationError> {
@@ -567,6 +591,7 @@ impl SplitEntity {
             source,
             SplitShape::Subtraction,
             separated,
+            authority,
             justification,
             at,
         )
@@ -578,6 +603,7 @@ impl SplitEntity {
         source: EntityId,
         shape: SplitShape,
         into: Vec<EntityId>,
+        authority: AdjudicationAuthority,
         justification: Justification,
         at: DomainInstant,
     ) -> Result<Self, AdjudicationError> {
@@ -593,6 +619,7 @@ impl SplitEntity {
             source,
             shape,
             into,
+            authority,
             justification,
             at,
         })
@@ -626,6 +653,15 @@ impl SplitEntity {
     #[must_use]
     pub fn justification(&self) -> &Justification {
         &self.justification
+    }
+
+    /// Who was authorized to make this judgement.
+    ///
+    /// `KIRRA-WM-IDENTITY-AUTHORITY-001`. A value of this type exists only for
+    /// an authorized adjudicator, so holding one of these IS the check.
+    #[must_use]
+    pub fn authority(&self) -> &AdjudicationAuthority {
+        &self.authority
     }
 
     /// When the adjudication was made, on a clock that names itself.
@@ -664,6 +700,7 @@ impl SplitEntity {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AssertIdentity {
     entity: EntityId,
+    authority: AdjudicationAuthority,
     justification: Justification,
     at: DomainInstant,
 }
@@ -687,9 +724,15 @@ impl AssertIdentity {
     /// event in the log, which is the store's to answer and is enforced there
     /// by the mint's never-reuse guarantee.
     #[must_use]
-    pub fn new(entity: EntityId, justification: Justification, at: DomainInstant) -> Self {
+    pub fn new(
+        entity: EntityId,
+        authority: AdjudicationAuthority,
+        justification: Justification,
+        at: DomainInstant,
+    ) -> Self {
         Self {
             entity,
+            authority,
             justification,
             at,
         }
@@ -705,6 +748,15 @@ impl AssertIdentity {
     #[must_use]
     pub fn justification(&self) -> &Justification {
         &self.justification
+    }
+
+    /// Who was authorized to make this judgement.
+    ///
+    /// `KIRRA-WM-IDENTITY-AUTHORITY-001`. A value of this type exists only for
+    /// an authorized adjudicator, so holding one of these IS the check.
+    #[must_use]
+    pub fn authority(&self) -> &AdjudicationAuthority {
+        &self.authority
     }
 
     /// When the assertion was made.
@@ -730,6 +782,7 @@ impl AssertIdentity {
 pub struct ForgetEntity {
     entity: EntityId,
     reason: RetirementReason,
+    authority: AdjudicationAuthority,
     justification: Justification,
     at: DomainInstant,
 }
@@ -747,12 +800,14 @@ impl ForgetEntity {
     pub fn new(
         entity: EntityId,
         reason: RetirementReason,
+        authority: AdjudicationAuthority,
         justification: Justification,
         at: DomainInstant,
     ) -> Self {
         Self {
             entity,
             reason,
+            authority,
             justification,
             at,
         }
@@ -774,6 +829,15 @@ impl ForgetEntity {
     #[must_use]
     pub fn justification(&self) -> &Justification {
         &self.justification
+    }
+
+    /// Who was authorized to make this judgement.
+    ///
+    /// `KIRRA-WM-IDENTITY-AUTHORITY-001`. A value of this type exists only for
+    /// an authorized adjudicator, so holding one of these IS the check.
+    #[must_use]
+    pub fn authority(&self) -> &AdjudicationAuthority {
+        &self.authority
     }
 
     /// When the adjudication was made, on a clock that names itself.
@@ -812,6 +876,20 @@ impl IdentityAdjudication {
             Self::Merge(m) => m.at(),
             Self::Split(s) => s.at(),
             Self::Forget(f) => f.at(),
+        }
+    }
+
+    /// Who was authorized to make this judgement, whichever verb it is.
+    ///
+    /// `KIRRA-WM-IDENTITY-AUTHORITY-001`: every route to canonical identity
+    /// carries one, so there is no verb for which the question has no answer.
+    #[must_use]
+    pub fn authority(&self) -> &AdjudicationAuthority {
+        match self {
+            Self::Assert(a) => a.authority(),
+            Self::Merge(m) => m.authority(),
+            Self::Split(s) => s.authority(),
+            Self::Forget(f) => f.authority(),
         }
     }
 
@@ -999,7 +1077,14 @@ pub fn promote_confirmed_same_as(
 
     for (pair, run) in &in_effect {
         let mut cited: Vec<ObservationId> = Vec::new();
-        let mut began: Option<DomainInstant> = None;
+        // The instant and the AUTHORITY travel together, deliberately.
+        // `KIRRA-WM-IDENTITY-AUTHORITY-001` makes a derived merge carry an
+        // adjudicator, and the only defensible one is the adjudicator of the
+        // promotion that ESTABLISHED the run -- the same decision `began`
+        // names. Tracking them in one binding is what stops "when it became
+        // identity" and "who made it identity" being answered by two different
+        // records after some later edit to one of the two selections.
+        let mut began: Option<(DomainInstant, &AdjudicationAuthority)> = None;
 
         // The pair's UNBROKEN run of promotions since the last withdrawal, not
         // every promotion in history. A promotion an operator later withdrew
@@ -1016,9 +1101,9 @@ pub fn promote_confirmed_same_as(
             // it. Compared through `DomainInstant::compare`, which refuses
             // across clock domains rather than ordering by raw milliseconds.
             began = Some(match began {
-                None => a.decided_at(),
-                Some(prev) => match a.decided_at().compare(&prev) {
-                    Ok(Ordering::Less) => a.decided_at(),
+                None => (a.decided_at(), a.authority()),
+                Some(prev) => match a.decided_at().compare(&prev.0) {
+                    Ok(Ordering::Less) => (a.decided_at(), a.authority()),
                     Ok(_) => prev,
                     Err(_) => {
                         return Err(AdjudicationError::PromotionDomainsDiffer {
@@ -1033,11 +1118,19 @@ pub fn promote_confirmed_same_as(
         // non-empty. Skipped rather than unwrapped so a future change to 2b's
         // predicate degrades to "promotes nothing" instead of a panic in the
         // identity path.
-        let Some(at) = began else { continue };
+        let Some((at, authority)) = began else {
+            continue;
+        };
 
         promoted.push(IdentityAdjudication::Merge(MergeEntities::new(
             [pair.high().clone()],
             pair.low().clone(),
+            // NOT a fresh authority minted here. The derived merge inherits the
+            // one 2b already checked when the promotion was recorded, so this
+            // path adds no adjudicator that was not authorized upstream --
+            // which is the whole reason a derivation is allowed to produce an
+            // identity change at all.
+            authority.clone(),
             Justification::new(cited)?,
             at,
         )?));
@@ -1057,6 +1150,13 @@ mod tests {
 
     fn oid(s: &str) -> ObservationId {
         ObservationId::new(s).expect("test id")
+    }
+
+    /// `KIRRA-WM-IDENTITY-AUTHORITY-001`: every identity adjudication names an
+    /// authorized adjudicator, so every fixture below does too.
+    fn who() -> AdjudicationAuthority {
+        AdjudicationAuthority::new(crate::observation::SourceClass::Operator, "test-operator")
+            .expect("authority")
     }
 
     fn just() -> Justification {
@@ -1125,7 +1225,8 @@ mod tests {
 
     #[test]
     fn a_merge_folds_every_source_into_the_survivor() {
-        let m = MergeEntities::new([eid("a"), eid("b")], eid("keep"), just(), T0).expect("valid");
+        let m = MergeEntities::new([eid("a"), eid("b")], eid("keep"), who(), just(), T0)
+            .expect("valid");
         let adj = IdentityAdjudication::Merge(m);
 
         assert_eq!(
@@ -1139,7 +1240,7 @@ mod tests {
 
     #[test]
     fn the_survivor_of_a_merge_gets_no_transition() {
-        let m = MergeEntities::new([eid("a")], eid("keep"), just(), T0).expect("valid");
+        let m = MergeEntities::new([eid("a")], eid("keep"), who(), just(), T0).expect("valid");
         let adj = IdentityAdjudication::Merge(m);
         assert!(
             !adj.resulting_lifecycles()
@@ -1151,7 +1252,7 @@ mod tests {
 
     #[test]
     fn a_merge_into_one_of_its_own_sources_is_refused() {
-        let err = MergeEntities::new([eid("a"), eid("keep")], eid("keep"), just(), T0)
+        let err = MergeEntities::new([eid("a"), eid("keep")], eid("keep"), who(), just(), T0)
             .expect_err("refused");
         assert_eq!(
             err,
@@ -1164,7 +1265,7 @@ mod tests {
     #[test]
     fn a_merge_with_no_sources_is_refused() {
         assert_eq!(
-            MergeEntities::new([], eid("keep"), just(), T0).expect_err("refused"),
+            MergeEntities::new([], eid("keep"), who(), just(), T0).expect_err("refused"),
             AdjudicationError::EmptyMerge
         );
     }
@@ -1172,7 +1273,8 @@ mod tests {
     #[test]
     fn a_source_listed_twice_is_refused() {
         assert_eq!(
-            MergeEntities::new([eid("a"), eid("a")], eid("keep"), just(), T0).expect_err("refused"),
+            MergeEntities::new([eid("a"), eid("a")], eid("keep"), who(), just(), T0)
+                .expect_err("refused"),
             AdjudicationError::DuplicateSource { entity: eid("a") }
         );
     }
@@ -1181,8 +1283,14 @@ mod tests {
 
     #[test]
     fn a_split_marks_every_piece_with_its_origin() {
-        let s = SplitEntity::partition(eid("pallet"), [eid("box-1"), eid("box-2")], just(), T0)
-            .expect("valid");
+        let s = SplitEntity::partition(
+            eid("pallet"),
+            [eid("box-1"), eid("box-2")],
+            who(),
+            just(),
+            T0,
+        )
+        .expect("valid");
         let adj = IdentityAdjudication::Split(s);
 
         assert_eq!(
@@ -1216,7 +1324,8 @@ mod tests {
     #[test]
     fn a_split_into_one_is_refused_because_it_is_not_a_split() {
         assert_eq!(
-            SplitEntity::partition(eid("pallet"), [eid("box-1")], just(), T0).expect_err("refused"),
+            SplitEntity::partition(eid("pallet"), [eid("box-1")], who(), just(), T0)
+                .expect_err("refused"),
             AdjudicationError::SplitTooNarrow { found: 1 }
         );
     }
@@ -1224,7 +1333,7 @@ mod tests {
     #[test]
     fn a_split_into_nothing_is_refused_because_that_would_be_destruction() {
         assert_eq!(
-            SplitEntity::partition(eid("pallet"), [], just(), T0).expect_err("refused"),
+            SplitEntity::partition(eid("pallet"), [], who(), just(), T0).expect_err("refused"),
             AdjudicationError::SplitTooNarrow { found: 0 },
             "erasure is a Redact with its own ADR, and this module cannot express it"
         );
@@ -1232,8 +1341,14 @@ mod tests {
 
     #[test]
     fn a_split_naming_its_own_source_as_a_piece_is_refused() {
-        let err = SplitEntity::partition(eid("pallet"), [eid("box-1"), eid("pallet")], just(), T0)
-            .expect_err("refused");
+        let err = SplitEntity::partition(
+            eid("pallet"),
+            [eid("box-1"), eid("pallet")],
+            who(),
+            just(),
+            T0,
+        )
+        .expect_err("refused");
         assert_eq!(
             err,
             AdjudicationError::SplitIntoSelf {
@@ -1245,7 +1360,7 @@ mod tests {
     #[test]
     fn a_destination_listed_twice_is_refused() {
         assert_eq!(
-            SplitEntity::partition(eid("pallet"), [eid("b"), eid("b")], just(), T0)
+            SplitEntity::partition(eid("pallet"), [eid("b"), eid("b")], who(), just(), T0)
                 .expect_err("refused"),
             AdjudicationError::DuplicateDestination { entity: eid("b") }
         );
@@ -1267,16 +1382,22 @@ mod tests {
         // You believed one pallet. There is a pallet with a box on it. The
         // pallet did not stop existing.
         let carve_off_a_piece =
-            SplitEntity::partition(eid("pallet"), [eid("box")], just(), T0).expect_err("refused");
+            SplitEntity::partition(eid("pallet"), [eid("box")], who(), just(), T0)
+                .expect_err("refused");
         assert_eq!(
             carve_off_a_piece,
             AdjudicationError::SplitTooNarrow { found: 1 },
             "naming only the new piece is refused for being too narrow"
         );
 
-        let name_the_survivor =
-            SplitEntity::partition(eid("pallet"), [eid("pallet"), eid("box")], just(), T0)
-                .expect_err("refused");
+        let name_the_survivor = SplitEntity::partition(
+            eid("pallet"),
+            [eid("pallet"), eid("box")],
+            who(),
+            just(),
+            T0,
+        )
+        .expect_err("refused");
         assert_eq!(
             name_the_survivor,
             AdjudicationError::SplitIntoSelf {
@@ -1295,8 +1416,14 @@ mod tests {
     /// split, which would make it evidence of nothing.
     #[test]
     fn the_partition_shape_of_the_same_split_is_admitted() {
-        SplitEntity::partition(eid("pallet"), [eid("pallet-deck"), eid("box")], just(), T0)
-            .expect("two successors, neither of them the source");
+        SplitEntity::partition(
+            eid("pallet"),
+            [eid("pallet-deck"), eid("box")],
+            who(),
+            just(),
+            T0,
+        )
+        .expect("two successors, neither of them the source");
     }
 
     /// **The undecided consequence is reported, not omitted.**
@@ -1313,7 +1440,7 @@ mod tests {
     /// proposal should find the old test's disappearance explained here.
     #[test]
     fn a_partition_supersedes_its_source() {
-        let s = SplitEntity::partition(eid("pallet"), [eid("b1"), eid("b2")], just(), T0)
+        let s = SplitEntity::partition(eid("pallet"), [eid("b1"), eid("b2")], who(), just(), T0)
             .expect("valid");
         let adj = IdentityAdjudication::Split(s);
 
@@ -1340,7 +1467,7 @@ mod tests {
     /// constructor, and the source takes NO transition — it did not move.
     #[test]
     fn a_subtraction_leaves_its_source_alive() {
-        let s = SplitEntity::subtract(eid("pallet"), [eid("box-1")], just(), T0)
+        let s = SplitEntity::subtract(eid("pallet"), [eid("box-1")], who(), just(), T0)
             .expect("one piece is a valid subtraction");
         assert_eq!(s.shape(), SplitShape::Subtraction);
         let adj = IdentityAdjudication::Split(s);
@@ -1362,8 +1489,8 @@ mod tests {
     #[test]
     fn neither_shape_admits_the_source_among_its_destinations() {
         for r in [
-            SplitEntity::partition(eid("p"), [eid("p"), eid("b")], just(), T0),
-            SplitEntity::subtract(eid("p"), [eid("p")], just(), T0),
+            SplitEntity::partition(eid("p"), [eid("p"), eid("b")], who(), just(), T0),
+            SplitEntity::subtract(eid("p"), [eid("p")], who(), just(), T0),
         ] {
             assert!(
                 matches!(r, Err(AdjudicationError::SplitIntoSelf { .. })),
@@ -1372,11 +1499,11 @@ mod tests {
         }
         // ...and a partition still needs two, while a subtraction needs one.
         assert!(matches!(
-            SplitEntity::partition(eid("p"), [eid("b")], just(), T0),
+            SplitEntity::partition(eid("p"), [eid("b")], who(), just(), T0),
             Err(AdjudicationError::SplitTooNarrow { found: 1 })
         ));
         assert!(matches!(
-            SplitEntity::subtract(eid("p"), [], just(), T0),
+            SplitEntity::subtract(eid("p"), [], who(), just(), T0),
             Err(AdjudicationError::SplitTooNarrow { found: 0 })
         ));
     }
@@ -1384,11 +1511,12 @@ mod tests {
     #[test]
     fn a_merge_and_a_retirement_leave_nothing_undecided() {
         let m = IdentityAdjudication::Merge(
-            MergeEntities::new([eid("a")], eid("keep"), just(), T0).expect("valid"),
+            MergeEntities::new([eid("a")], eid("keep"), who(), just(), T0).expect("valid"),
         );
         let f = IdentityAdjudication::Forget(ForgetEntity::new(
             eid("gone"),
             RetirementReason::new("shelf removed").expect("reason"),
+            who(),
             just(),
             T0,
         ));
@@ -1407,6 +1535,7 @@ mod tests {
         let f = IdentityAdjudication::Forget(ForgetEntity::new(
             eid("old-dock"),
             RetirementReason::new("bay decommissioned").expect("reason"),
+            who(),
             just(),
             T0,
         ));
@@ -1460,20 +1589,22 @@ mod tests {
     #[test]
     fn every_stated_consequence_is_a_transition_the_lifecycle_permits() {
         let cases = [
-            IdentityAdjudication::Assert(AssertIdentity::new(eid("new"), just(), T0)),
+            IdentityAdjudication::Assert(AssertIdentity::new(eid("new"), who(), just(), T0)),
             IdentityAdjudication::Merge(
-                MergeEntities::new([eid("a"), eid("b")], eid("keep"), just(), T0).expect("valid"),
-            ),
-            IdentityAdjudication::Split(
-                SplitEntity::partition(eid("p"), [eid("b1"), eid("b2")], just(), T0)
+                MergeEntities::new([eid("a"), eid("b")], eid("keep"), who(), just(), T0)
                     .expect("valid"),
             ),
             IdentityAdjudication::Split(
-                SplitEntity::subtract(eid("s"), [eid("off")], just(), T0).expect("valid"),
+                SplitEntity::partition(eid("p"), [eid("b1"), eid("b2")], who(), just(), T0)
+                    .expect("valid"),
+            ),
+            IdentityAdjudication::Split(
+                SplitEntity::subtract(eid("s"), [eid("off")], who(), just(), T0).expect("valid"),
             ),
             IdentityAdjudication::Forget(ForgetEntity::new(
                 eid("gone"),
                 RetirementReason::new("decommissioned").expect("reason"),
+                who(),
                 just(),
                 T0,
             )),
@@ -1523,7 +1654,8 @@ mod tests {
     /// fail. The empty vec is the only honest answer, and the walk below is why.
     #[test]
     fn an_assertion_states_no_transition_because_it_creates() {
-        let adj = IdentityAdjudication::Assert(AssertIdentity::new(eid("new-1"), just(), T0));
+        let adj =
+            IdentityAdjudication::Assert(AssertIdentity::new(eid("new-1"), who(), just(), T0));
         assert!(
             adj.resulting_lifecycles().is_empty(),
             "creation is not a transition"
@@ -1550,7 +1682,8 @@ mod tests {
     /// module exists to prevent.
     #[test]
     fn an_assertion_rests_on_evidence_like_every_other_verb() {
-        let adj = IdentityAdjudication::Assert(AssertIdentity::new(eid("new-1"), just(), T0));
+        let adj =
+            IdentityAdjudication::Assert(AssertIdentity::new(eid("new-1"), who(), just(), T0));
         assert!(
             !adj.justification().observations().is_empty(),
             "never empty, whichever verb it is"
@@ -1602,7 +1735,7 @@ mod tests {
     fn an_already_merged_entity_cannot_be_adjudicated_again() {
         let merged = Lifecycle::Merged { into: eid("keep") };
         let adj = IdentityAdjudication::Merge(
-            MergeEntities::new([eid("a")], eid("other"), just(), T0).expect("valid"),
+            MergeEntities::new([eid("a")], eid("other"), who(), just(), T0).expect("valid"),
         );
         for (_, next) in adj.resulting_lifecycles() {
             assert!(
@@ -1626,7 +1759,7 @@ mod tests {
     /// the failure §6.3 describes.
     #[test]
     fn an_adjudication_is_immutable_once_constructed() {
-        let m = MergeEntities::new([eid("a")], eid("keep"), just(), T0).expect("valid");
+        let m = MergeEntities::new([eid("a")], eid("keep"), who(), just(), T0).expect("valid");
         assert_eq!(m.sources(), &[eid("a")]);
         assert_eq!(m.into_entity(), &eid("keep"));
         assert_eq!(m.at(), T0);
@@ -1639,15 +1772,22 @@ mod tests {
     fn every_verb_carries_a_justification_and_a_time() {
         let cases = [
             IdentityAdjudication::Merge(
-                MergeEntities::new([eid("a")], eid("keep"), just(), T0).expect("valid"),
+                MergeEntities::new([eid("a")], eid("keep"), who(), just(), T0).expect("valid"),
             ),
             IdentityAdjudication::Split(
-                SplitEntity::partition(eid("p"), [eid("b1"), eid("b2")], just(), at(T0_MS + 1))
-                    .expect("valid"),
+                SplitEntity::partition(
+                    eid("p"),
+                    [eid("b1"), eid("b2")],
+                    who(),
+                    just(),
+                    at(T0_MS + 1),
+                )
+                .expect("valid"),
             ),
             IdentityAdjudication::Forget(ForgetEntity::new(
                 eid("gone"),
                 RetirementReason::new("decommissioned").expect("reason"),
+                who(),
                 just(),
                 at(T0_MS + 2),
             )),
@@ -1675,12 +1815,12 @@ mod tests {
             domain: ClockDomain::Boundary,
         };
         let stamped = IdentityAdjudication::Merge(
-            MergeEntities::new([eid("a")], eid("keep"), just(), boundary).expect("valid"),
+            MergeEntities::new([eid("a")], eid("keep"), who(), just(), boundary).expect("valid"),
         );
         assert_eq!(stamped.at().domain, ClockDomain::Boundary, "verbatim");
 
         let on_system = IdentityAdjudication::Merge(
-            MergeEntities::new([eid("b")], eid("keep"), just(), at(T0_MS)).expect("valid"),
+            MergeEntities::new([eid("b")], eid("keep"), who(), just(), at(T0_MS)).expect("valid"),
         );
         assert_eq!(
             stamped.at().compare(&on_system.at()),
@@ -1702,7 +1842,7 @@ mod tests {
 
     #[test]
     fn the_errors_name_the_offending_value() {
-        let err = MergeEntities::new([eid("dup"), eid("dup")], eid("keep"), just(), T0)
+        let err = MergeEntities::new([eid("dup"), eid("dup")], eid("keep"), who(), just(), T0)
             .expect_err("refused");
         let shown = err.to_string();
         assert!(

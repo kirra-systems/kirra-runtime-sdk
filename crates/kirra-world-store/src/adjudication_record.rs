@@ -61,8 +61,9 @@ use kirra_world::adjudication::{
     AssertIdentity, ForgetEntity, IdentityAdjudication, Justification, MergeEntities,
     RetirementReason, SplitEntity, SplitShape,
 };
-use kirra_world::observation::{ClockDomain, DomainInstant};
+use kirra_world::observation::{ClockDomain, DomainInstant, SourceClass};
 use kirra_world::reference::{EntityId, ObservationId};
+use kirra_world::same_as_adjudication::AdjudicationAuthority;
 
 use crate::WriterClass;
 
@@ -89,7 +90,20 @@ pub const ADJUDICATION_KIND: &str = "identity_adjudication";
 pub const ADJUDICATION_RETENTION_CLASS: &str = "adjudication";
 
 /// Version of the payload encoding below.
-pub const ADJUDICATION_PAYLOAD_SCHEMA: i64 = 1;
+///
+/// **v2 — `KIRRA-WM-IDENTITY-AUTHORITY-001`.** Every verb now carries the
+/// `adjudicator` who was authorized to make the judgement. A v1 payload has no
+/// such field, and the decoder REFUSES it through the existing
+/// [`AdjudicationDecodeError::UnsupportedSchema`] path rather than defaulting
+/// one: inventing an adjudicator for a record that names none would be
+/// fabricating the very fact the ruling exists to require.
+///
+/// No migration accompanies the bump, and that is a statement about the data
+/// rather than an omission: `WorldStore::append_adjudication` has never had a
+/// production caller, so no deployed store can hold a v1 adjudication row.
+/// Should one be found, it is a row nothing wrote, and refusing to read it is
+/// the correct outcome.
+pub const ADJUDICATION_PAYLOAD_SCHEMA: i64 = 2;
 
 /// Why a stored adjudication could not be read back.
 ///
@@ -281,12 +295,14 @@ pub fn encode_adjudication(a: &IdentityAdjudication) -> String {
         IdentityAdjudication::Assert(x) => serde_json::json!({
             "verb": "assert",
             "entity": x.entity().as_str(),
+            "adjudicator": a.authority().adjudicator(),
             "at": instant_json(x.at()),
         }),
         IdentityAdjudication::Merge(m) => serde_json::json!({
             "verb": "merge",
             "sources": ids_json(m.sources()),
             "into": m.into_entity().as_str(),
+            "adjudicator": a.authority().adjudicator(),
             "at": instant_json(m.at()),
         }),
         IdentityAdjudication::Split(s) => serde_json::json!({
@@ -297,12 +313,14 @@ pub fn encode_adjudication(a: &IdentityAdjudication) -> String {
             },
             "source": s.source().as_str(),
             "into": ids_json(s.destinations()),
+            "adjudicator": a.authority().adjudicator(),
             "at": instant_json(s.at()),
         }),
         IdentityAdjudication::Forget(f) => serde_json::json!({
             "verb": "forget",
             "entity": f.entity().as_str(),
             "reason": f.reason().as_str(),
+            "adjudicator": a.authority().adjudicator(),
             "at": instant_json(f.at()),
         }),
     };
@@ -448,15 +466,27 @@ pub fn decode_adjudication(
     let justification = Justification::new(cited).map_err(inadmissible)?;
     let at = instant_field(o, "at")?;
 
+    // `KIRRA-WM-IDENTITY-AUTHORITY-001`. The CLASS is not stored and is not
+    // guessed: it is re-established as the one class the ruling admits, which
+    // is faithful precisely because no other class could have produced a stored
+    // adjudication -- `AdjudicationAuthority::new` refuses them at the write
+    // side. What IS read back is the adjudicator's name, because that is the
+    // part a record can carry and a reader cannot derive.
+    let authority =
+        AdjudicationAuthority::new(SourceClass::Operator, str_field(o, "adjudicator")?.as_str())
+            .map_err(inadmissible)?;
+
     match str_field(o, "verb")?.as_str() {
         "assert" => Ok(IdentityAdjudication::Assert(AssertIdentity::new(
             entity_field(o, "entity")?,
+            authority,
             justification,
             at,
         ))),
         "merge" => MergeEntities::new(
             entity_list_field(o, "sources")?,
             entity_field(o, "into")?,
+            authority,
             justification,
             at,
         )
@@ -466,8 +496,8 @@ pub fn decode_adjudication(
             let source = entity_field(o, "source")?;
             let into = entity_list_field(o, "into")?;
             let built = match str_field(o, "shape")?.as_str() {
-                "partition" => SplitEntity::partition(source, into, justification, at),
-                "subtraction" => SplitEntity::subtract(source, into, justification, at),
+                "partition" => SplitEntity::partition(source, into, authority, justification, at),
+                "subtraction" => SplitEntity::subtract(source, into, authority, justification, at),
                 other => {
                     return Err(AdjudicationDecodeError::UnknownSplitShape {
                         token: other.to_owned(),
@@ -481,6 +511,7 @@ pub fn decode_adjudication(
             Ok(IdentityAdjudication::Forget(ForgetEntity::new(
                 entity_field(o, "entity")?,
                 reason,
+                authority,
                 justification,
                 at,
             )))

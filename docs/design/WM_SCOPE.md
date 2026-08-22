@@ -5875,6 +5875,9 @@ adjudicator?** Pinned by
 `a_merge_command_carries_no_authority_and_that_is_the_open_finding`, which is
 written to FAIL when the ruling lands.
 
+> **Settled 2026-08-22** by `KIRRA-WM-IDENTITY-AUTHORITY-001`, recorded below.
+> The pin did NOT fail when the ruling landed, and why is worth reading.
+
 Not a live hole today: `append_adjudication` has no production caller at all —
 its callers are tests, in four crates.
 
@@ -5896,3 +5899,99 @@ wrapped: `ProposeSameAs`, `AdjudicateSameAs`, `RecordMerge`, `RecordSplit`,
   operation exists. Writing the command first would put the semantics in the
   wrapper by definition, there being nowhere else for them to live.
 * **`ImportMapLayer`** — map layers unstarted, gated on a consumer.
+
+### KIRRA-WM-IDENTITY-AUTHORITY-001 — every route to identity names an adjudicator — 2026-08-22
+
+Ruled, closing the finding 5c.1 surfaced:
+
+> **An `IdentityAdjudication` may not be recorded without an authorized
+> adjudicator. `Merge`, `Split`, `Forget` and `Assert` each carry an
+> `AdjudicationAuthority` on the DOMAIN VALUE, so a constructed adjudication is
+> always an authorized one.**
+
+#### The gap, stated precisely
+
+Before this, `AdjudicationAuthority` gated `same_as` promotion only. The other
+route to canonical identity — `append_adjudication`, which a `Merge` rides to
+`Lifecycle::Merged { into }`, the entity projection and identity resolution —
+required nothing. The one constraint that did exist is SD-2: `append` refuses
+`LlmCandidate` writing `Confirmed`, so an LLM could not author an adjudication.
+**`Sensor` and `Derivation` could.** That was the hole: two routes to the same
+effect, one admitting `Operator` only and the other admitting three classes.
+
+#### Why the value and not the door
+
+The alternative was a class check inside `append_adjudication`. It was rejected
+for one reason: the domain value would still travel unauthorized, so a second
+write door added later needs its own check and nothing reminds the author. On
+the value, the refusal **cannot be reached around** — which is the property
+`AdjudicationAuthority` was built for and already provides for `same_as`.
+
+What this does NOT buy is stated exactly, because an earlier draft of the
+authority's own doc overclaimed it and was corrected: the constructor accepts
+any `SourceClass` and refuses every one but `Operator` **at runtime**. It
+constrains the declared class, never the credential. "Operator only" remains
+exactly as strong as the authentication on the write path — the assumption of
+use already recorded with `KIRRA-WM-PROMOTION-001`. What the type buys is that
+the refusal cannot be forgotten downstream.
+
+#### The derived path inherits rather than mints
+
+`promote_confirmed_same_as` turns confirmed `same_as` promotions into merges. It
+does not mint an authority: it carries the one 2b already checked, so a
+derivation adds no adjudicator that was not authorized upstream. The instant and
+the authority are tracked in **one binding**, deliberately — the adjudicator of
+the promotion that established the run is the same decision `began` names, and
+one binding is what stops *when it became identity* and *who made it identity*
+being answered by two different records after a later edit to one selection.
+
+#### The payload had to grow, and old rows are refused
+
+An adjudicator that is not persisted is not an adjudicator: the decoder would
+have to invent one. So the payload schema went to **v2** with a required
+`adjudicator` field, and a v1 payload is refused through the existing
+`UnsupportedSchema` path rather than defaulted.
+
+No migration accompanies the bump, and that is a claim about the data rather
+than an omission: `append_adjudication` has never had a production caller, so no
+deployed store can hold a v1 adjudication row. Should one be found, it is a row
+nothing wrote, and refusing to read it is correct.
+
+#### The pin that did not fire
+
+5c.1 left `a_merge_command_carries_no_authority_and_that_is_the_open_finding`
+pinned to this question, documented as *"the thing that should fail and be
+rewritten"* when the ruling landed.
+
+**It did not fail.** It asserted that `RecordMerge` had grown no `authority`
+FIELD; the ruling put the authority inside `MergeEntities` instead. The fence
+went on passing while the thing it guarded had already changed underneath it —
+a guard written against one shape of a change, satisfied by a different shape of
+the same change. This is the third time in this tier a textual guard has been
+found to be shaped around the wrong axis, and the replacement is behavioural for
+that reason: `two_merges_differing_only_in_adjudicator_are_different_records`
+asserts that two merges identical but for WHO decided produce different logs.
+That fails if the command drops the authority, if the payload does not persist
+it, or if the encoding writes a constant — and no reshaping satisfies it by
+accident.
+
+#### Controls
+
+| Mutation | Caught by |
+|---|---|
+| the encoder writes a constant adjudicator | `two_merges_differing_only_in_adjudicator_are_different_records` |
+| a v1 payload is read instead of refused | `a_v1_adjudication_payload_is_refused_rather_than_read_without_an_adjudicator` |
+| a v2 payload with no adjudicator is accepted | the same test's second half, which is also its non-vacuity control |
+
+Constructing any of the four verbs without an authority is a **compile** error,
+which is why there is no test for it: a test that cannot be written in the
+language it is testing is a test asserting the compiler works.
+
+#### Scope note
+
+`Assert` gained the requirement with the other three, because the field is on
+the domain value and `IdentityAdjudication` has four arms. That does **not**
+unblock box 5d: operator teaching remains blocked on what writer class an
+operator assertion carries and whether it may outrank sensed evidence, and no
+command records an `Assert` — still pinned by
+`no_command_can_record_an_assert_because_5d_is_unruled`.

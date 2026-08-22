@@ -304,6 +304,16 @@ mod tests {
         EntityId::new(s).expect("entity id")
     }
 
+    /// `KIRRA-WM-IDENTITY-AUTHORITY-001`: every identity adjudication names an
+    /// authorized adjudicator, so the fixtures do too.
+    fn who() -> kirra_world::same_as_adjudication::AdjudicationAuthority {
+        kirra_world::same_as_adjudication::AdjudicationAuthority::new(
+            kirra_world::observation::SourceClass::Operator,
+            "test-operator",
+        )
+        .expect("authority")
+    }
+
     fn just() -> Justification {
         Justification::new([ObservationId::new("obs-1").expect("obs")]).expect("justification")
     }
@@ -316,7 +326,7 @@ mod tests {
     }
 
     fn assert_id(e: &str) -> IdentityAdjudication {
-        IdentityAdjudication::Assert(AssertIdentity::new(eid(e), just(), at()))
+        IdentityAdjudication::Assert(AssertIdentity::new(eid(e), who(), just(), at()))
     }
 
     fn merge(sources: &[&str], into: &str) -> IdentityAdjudication {
@@ -324,6 +334,7 @@ mod tests {
             MergeEntities::new(
                 sources.iter().map(|s| eid(s)).collect::<Vec<_>>(),
                 eid(into),
+                who(),
                 just(),
                 at(),
             )
@@ -336,6 +347,7 @@ mod tests {
             SplitEntity::partition(
                 eid(source),
                 into.iter().map(|s| eid(s)).collect::<Vec<_>>(),
+                who(),
                 just(),
                 at(),
             )
@@ -347,6 +359,7 @@ mod tests {
         IdentityAdjudication::Forget(ForgetEntity::new(
             eid(e),
             RetirementReason::new("decommissioned").expect("reason"),
+            who(),
             just(),
             at(),
         ))

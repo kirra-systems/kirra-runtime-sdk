@@ -57,6 +57,7 @@ fn merge(sources: &[&str], into: &str) -> IdentityAdjudication {
         MergeEntities::new(
             sources.iter().map(|s| eid(s)).collect::<Vec<_>>(),
             eid(into),
+            who(),
             just(),
             at(),
         )
@@ -87,16 +88,17 @@ fn seed(s: &mut WorldStore, adjudications: &[IdentityAdjudication]) {
 
 fn scenario() -> Vec<IdentityAdjudication> {
     vec![
-        IdentityAdjudication::Assert(AssertIdentity::new(eid("a"), just(), at())),
-        IdentityAdjudication::Assert(AssertIdentity::new(eid("b"), just(), at())),
+        IdentityAdjudication::Assert(AssertIdentity::new(eid("a"), who(), just(), at())),
+        IdentityAdjudication::Assert(AssertIdentity::new(eid("b"), who(), just(), at())),
         merge(&["a"], "b"),
         IdentityAdjudication::Split(
-            SplitEntity::partition(eid("b"), [eid("b1"), eid("b2")], just(), at())
+            SplitEntity::partition(eid("b"), [eid("b1"), eid("b2")], who(), just(), at())
                 .expect("partition"),
         ),
         IdentityAdjudication::Forget(ForgetEntity::new(
             eid("b1"),
             RetirementReason::new("decommissioned").expect("reason"),
+            who(),
             just(),
             at(),
         )),
@@ -487,10 +489,10 @@ fn the_two_folds_share_one_checkpoint_table() {
 /// neighbour; `d` is a lone established entity (a dead end); `e` is absent.
 fn chain_scenario() -> Vec<IdentityAdjudication> {
     vec![
-        IdentityAdjudication::Assert(AssertIdentity::new(eid("a"), just(), at())),
-        IdentityAdjudication::Assert(AssertIdentity::new(eid("b"), just(), at())),
-        IdentityAdjudication::Assert(AssertIdentity::new(eid("c"), just(), at())),
-        IdentityAdjudication::Assert(AssertIdentity::new(eid("d"), just(), at())),
+        IdentityAdjudication::Assert(AssertIdentity::new(eid("a"), who(), just(), at())),
+        IdentityAdjudication::Assert(AssertIdentity::new(eid("b"), who(), just(), at())),
+        IdentityAdjudication::Assert(AssertIdentity::new(eid("c"), who(), just(), at())),
+        IdentityAdjudication::Assert(AssertIdentity::new(eid("d"), who(), just(), at())),
         merge(&["a"], "b"),
         merge(&["b"], "c"),
     ]
@@ -626,11 +628,11 @@ fn under_fetching_a_reachable_entity_breaks_agreement() {
 /// changing `b1` and `b2`.
 fn historical_scenario() -> Vec<IdentityAdjudication> {
     vec![
-        IdentityAdjudication::Assert(AssertIdentity::new(eid("a"), just(), at())),
-        IdentityAdjudication::Assert(AssertIdentity::new(eid("b"), just(), at())),
+        IdentityAdjudication::Assert(AssertIdentity::new(eid("a"), who(), just(), at())),
+        IdentityAdjudication::Assert(AssertIdentity::new(eid("b"), who(), just(), at())),
         merge(&["a"], "b"),
         IdentityAdjudication::Split(
-            SplitEntity::partition(eid("b"), [eid("b1"), eid("b2")], just(), at())
+            SplitEntity::partition(eid("b"), [eid("b1"), eid("b2")], who(), just(), at())
                 .expect("partition"),
         ),
     ]
@@ -704,6 +706,7 @@ fn bounded_historical_resolution_agrees_with_whole_log_resolution() {
     scenario.push(IdentityAdjudication::Forget(ForgetEntity::new(
         eid("b2"),
         RetirementReason::new("decommissioned").expect("reason"),
+        who(),
         just(),
         at(),
     )));
@@ -822,4 +825,14 @@ fn backfill_agrees_with_append_time_indexing() {
         "a backfilled store and an append-time-indexed store must answer \
          identically, or migrating changes history"
     );
+}
+
+/// `KIRRA-WM-IDENTITY-AUTHORITY-001`: every identity adjudication names an
+/// authorized adjudicator, so the fixtures do too.
+fn who() -> kirra_world::same_as_adjudication::AdjudicationAuthority {
+    kirra_world::same_as_adjudication::AdjudicationAuthority::new(
+        kirra_world::observation::SourceClass::Operator,
+        "test-operator",
+    )
+    .expect("authority")
 }

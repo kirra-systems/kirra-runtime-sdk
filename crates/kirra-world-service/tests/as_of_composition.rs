@@ -152,7 +152,7 @@ fn store_where_the_graph_moved_after_the_cut(name: &str) -> (WorldStore, std::pa
         &mut store,
         "assert-alpha",
         T0,
-        &IdentityAdjudication::Assert(AssertIdentity::new(eid("dock_alpha"), just(), at())),
+        &IdentityAdjudication::Assert(AssertIdentity::new(eid("dock_alpha"), who(), just(), at())),
     );
     claim_pointing_at(&mut store, "claim", "dock_alpha", CUT);
 
@@ -161,15 +161,21 @@ fn store_where_the_graph_moved_after_the_cut(name: &str) -> (WorldStore, std::pa
         &mut store,
         "assert-beta",
         T0 + 2,
-        &IdentityAdjudication::Assert(AssertIdentity::new(eid("dock_beta"), just(), at())),
+        &IdentityAdjudication::Assert(AssertIdentity::new(eid("dock_beta"), who(), just(), at())),
     );
     adjudicate(
         &mut store,
         "merge",
         T0 + 3,
         &IdentityAdjudication::Merge(
-            MergeEntities::new(vec![eid("dock_alpha")], eid("dock_beta"), just(), at())
-                .expect("merge"),
+            MergeEntities::new(
+                vec![eid("dock_alpha")],
+                eid("dock_beta"),
+                who(),
+                just(),
+                at(),
+            )
+            .expect("merge"),
         ),
     );
 
@@ -315,7 +321,7 @@ fn a_cut_before_any_adjudication_does_not_borrow_todays_graph() {
         &mut store,
         "assert-alpha",
         T0 + 5,
-        &IdentityAdjudication::Assert(AssertIdentity::new(eid("dock_alpha"), just(), at())),
+        &IdentityAdjudication::Assert(AssertIdentity::new(eid("dock_alpha"), who(), just(), at())),
     );
     store.fold().expect("fold");
     store.fold_entity_projection().expect("fold entities");
@@ -357,7 +363,7 @@ fn a_split_before_the_cut_reports_ambiguous_with_its_successors() {
         &mut store,
         "assert-alpha",
         T0,
-        &IdentityAdjudication::Assert(AssertIdentity::new(eid("dock_alpha"), just(), at())),
+        &IdentityAdjudication::Assert(AssertIdentity::new(eid("dock_alpha"), who(), just(), at())),
     );
     claim_pointing_at(&mut store, "claim", "dock_alpha", T0);
     adjudicate(
@@ -368,6 +374,7 @@ fn a_split_before_the_cut_reports_ambiguous_with_its_successors() {
             SplitEntity::partition(
                 eid("dock_alpha"),
                 [eid("dock_x"), eid("dock_y")],
+                who(),
                 just(),
                 at(),
             )
@@ -415,7 +422,7 @@ fn a_historically_ambiguous_object_is_not_matchable() {
         &mut store,
         "assert-alpha",
         T0,
-        &IdentityAdjudication::Assert(AssertIdentity::new(eid("dock_alpha"), just(), at())),
+        &IdentityAdjudication::Assert(AssertIdentity::new(eid("dock_alpha"), who(), just(), at())),
     );
     claim_pointing_at(&mut store, "claim", "dock_alpha", T0);
     adjudicate(
@@ -426,6 +433,7 @@ fn a_historically_ambiguous_object_is_not_matchable() {
             SplitEntity::partition(
                 eid("dock_alpha"),
                 [eid("dock_x"), eid("dock_y")],
+                who(),
                 just(),
                 at(),
             )
@@ -593,27 +601,33 @@ fn ask_resolves_an_object_two_merges_deep() {
         &mut store,
         "a1",
         T0,
-        &IdentityAdjudication::Assert(AssertIdentity::new(eid("dock_alpha"), just(), at())),
+        &IdentityAdjudication::Assert(AssertIdentity::new(eid("dock_alpha"), who(), just(), at())),
     );
     adjudicate(
         &mut store,
         "a2",
         T0 + 1,
-        &IdentityAdjudication::Assert(AssertIdentity::new(eid("dock_beta"), just(), at())),
+        &IdentityAdjudication::Assert(AssertIdentity::new(eid("dock_beta"), who(), just(), at())),
     );
     adjudicate(
         &mut store,
         "a3",
         T0 + 2,
-        &IdentityAdjudication::Assert(AssertIdentity::new(eid("dock_gamma"), just(), at())),
+        &IdentityAdjudication::Assert(AssertIdentity::new(eid("dock_gamma"), who(), just(), at())),
     );
     adjudicate(
         &mut store,
         "m1",
         T0 + 3,
         &IdentityAdjudication::Merge(
-            MergeEntities::new(vec![eid("dock_alpha")], eid("dock_beta"), just(), at())
-                .expect("merge"),
+            MergeEntities::new(
+                vec![eid("dock_alpha")],
+                eid("dock_beta"),
+                who(),
+                just(),
+                at(),
+            )
+            .expect("merge"),
         ),
     );
     adjudicate(
@@ -621,8 +635,14 @@ fn ask_resolves_an_object_two_merges_deep() {
         "m2",
         T0 + 4,
         &IdentityAdjudication::Merge(
-            MergeEntities::new(vec![eid("dock_beta")], eid("dock_gamma"), just(), at())
-                .expect("merge"),
+            MergeEntities::new(
+                vec![eid("dock_beta")],
+                eid("dock_gamma"),
+                who(),
+                just(),
+                at(),
+            )
+            .expect("merge"),
         ),
     );
     claim_pointing_at(&mut store, "c1", "dock_alpha", T0 + 5);
@@ -651,4 +671,14 @@ fn ask_resolves_an_object_two_merges_deep() {
          loader reports a dangling redirect here, which looks like a broken \
          graph rather than a truncated read"
     );
+}
+
+/// `KIRRA-WM-IDENTITY-AUTHORITY-001`: every identity adjudication names an
+/// authorized adjudicator, so the fixtures do too.
+fn who() -> kirra_world::same_as_adjudication::AdjudicationAuthority {
+    kirra_world::same_as_adjudication::AdjudicationAuthority::new(
+        kirra_world::observation::SourceClass::Operator,
+        "test-operator",
+    )
+    .expect("authority")
 }

@@ -78,7 +78,7 @@ fn assert_identity(s: &mut WorldStore, tag: &str, entity: &str, at_ms: i64) {
             source_version: "1.0.0",
             writer_class: WriterClass::Operator,
         },
-        &IdentityAdjudication::Assert(AssertIdentity::new(eid(entity), justification, at)),
+        &IdentityAdjudication::Assert(AssertIdentity::new(eid(entity), who(), justification, at)),
     )
     .expect("append adjudication");
 }
@@ -370,4 +370,14 @@ fn the_coordinate_reports_a_digest_for_a_folded_projection() {
 
     drop(s);
     cleanup(&path);
+}
+
+/// `KIRRA-WM-IDENTITY-AUTHORITY-001`: every identity adjudication names an
+/// authorized adjudicator, so the fixtures do too.
+fn who() -> kirra_world::same_as_adjudication::AdjudicationAuthority {
+    kirra_world::same_as_adjudication::AdjudicationAuthority::new(
+        kirra_world::observation::SourceClass::Operator,
+        "test-operator",
+    )
+    .expect("authority")
 }
