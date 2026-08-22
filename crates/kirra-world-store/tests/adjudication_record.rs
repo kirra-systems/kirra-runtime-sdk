@@ -75,25 +75,27 @@ fn every_verb() -> Vec<(&'static str, IdentityAdjudication)> {
     vec![
         (
             "assert",
-            IdentityAdjudication::Assert(AssertIdentity::new(eid("e-new"), just(), at())),
+            IdentityAdjudication::Assert(AssertIdentity::new(eid("e-new"), who(), just(), at())),
         ),
         (
             "merge",
             IdentityAdjudication::Merge(
-                MergeEntities::new([eid("a"), eid("b")], eid("keep"), just(), at()).expect("merge"),
+                MergeEntities::new([eid("a"), eid("b")], eid("keep"), who(), just(), at())
+                    .expect("merge"),
             ),
         ),
         (
             "split/partition",
             IdentityAdjudication::Split(
-                SplitEntity::partition(eid("p"), [eid("p1"), eid("p2")], just(), at())
+                SplitEntity::partition(eid("p"), [eid("p1"), eid("p2")], who(), just(), at())
                     .expect("partition"),
             ),
         ),
         (
             "split/subtraction",
             IdentityAdjudication::Split(
-                SplitEntity::subtract(eid("s"), [eid("off")], just(), at()).expect("subtract"),
+                SplitEntity::subtract(eid("s"), [eid("off")], who(), just(), at())
+                    .expect("subtract"),
             ),
         ),
         (
@@ -101,6 +103,7 @@ fn every_verb() -> Vec<(&'static str, IdentityAdjudication)> {
             IdentityAdjudication::Forget(ForgetEntity::new(
                 eid("gone"),
                 RetirementReason::new("decommissioned").expect("reason"),
+                who(),
                 just(),
                 at(),
             )),
@@ -158,7 +161,7 @@ fn every_verb_round_trips_through_a_real_row() {
 /// observation ids this claim rests on".
 #[test]
 fn the_justification_travels_in_the_provenance_column() {
-    let adj = IdentityAdjudication::Assert(AssertIdentity::new(eid("e-1"), just(), at()));
+    let adj = IdentityAdjudication::Assert(AssertIdentity::new(eid("e-1"), who(), just(), at()));
     let payload = encode_adjudication(&adj);
 
     assert!(
@@ -203,7 +206,7 @@ fn the_subject_is_the_entity_the_judgement_is_about() {
 /// becomes a `Lifecycle::Superseded` for the resolver to meet.
 #[test]
 fn a_stored_partition_into_one_destination_is_refused() {
-    let payload = r#"{"verb":"split","shape":"partition","source":"p","into":["only"],
+    let payload = r#"{"verb":"split","shape":"partition","source":"p","into":["only"],"adjudicator":"test-operator",
                       "at":{"ms":1,"domain":"system"}}"#;
     let err = decode_adjudication(payload, ADJUDICATION_PAYLOAD_SCHEMA, &["obs-1".to_owned()])
         .expect_err("a partition into one is not a partition");
@@ -216,7 +219,7 @@ fn a_stored_partition_into_one_destination_is_refused() {
 /// And the empty case, which is the one the resolver refuses outright.
 #[test]
 fn a_stored_partition_into_nothing_is_refused() {
-    let payload = r#"{"verb":"split","shape":"partition","source":"p","into":[],
+    let payload = r#"{"verb":"split","shape":"partition","source":"p","into":[],"adjudicator":"test-operator",
                       "at":{"ms":1,"domain":"system"}}"#;
     assert!(matches!(
         decode_adjudication(payload, ADJUDICATION_PAYLOAD_SCHEMA, &["obs-1".to_owned()]),
@@ -228,7 +231,7 @@ fn a_stored_partition_into_nothing_is_refused() {
 /// `MergeEntities::new` refuses, refused again on the way back in.
 #[test]
 fn a_stored_self_merge_is_refused() {
-    let payload = r#"{"verb":"merge","sources":["a","b"],"into":"a",
+    let payload = r#"{"verb":"merge","sources":["a","b"],"into":"a","adjudicator":"test-operator",
                       "at":{"ms":1,"domain":"system"}}"#;
     assert!(matches!(
         decode_adjudication(payload, ADJUDICATION_PAYLOAD_SCHEMA, &["obs-1".to_owned()]),
@@ -256,7 +259,7 @@ fn a_row_citing_no_evidence_is_refused() {
 /// merged-away id resolving to itself, which §6.3 forbids.
 #[test]
 fn an_unknown_verb_is_refused_rather_than_degraded() {
-    let payload = r#"{"verb":"annihilate","entity":"e-1","at":{"ms":1,"domain":"system"}}"#;
+    let payload = r#"{"verb":"annihilate","entity":"e-1","adjudicator":"test-operator","at":{"ms":1,"domain":"system"}}"#;
     assert_eq!(
         decode_adjudication(payload, ADJUDICATION_PAYLOAD_SCHEMA, &["obs-1".to_owned()]),
         Err(AdjudicationDecodeError::UnknownVerb {
@@ -271,7 +274,7 @@ fn an_unknown_verb_is_refused_rather_than_degraded() {
 /// destructive of the two readings from a token nobody wrote.
 #[test]
 fn an_unknown_split_shape_is_refused_not_defaulted() {
-    let payload = r#"{"verb":"split","shape":"bisect","source":"p","into":["a","b"],
+    let payload = r#"{"verb":"split","shape":"bisect","source":"p","into":["a","b"],"adjudicator":"test-operator",
                       "at":{"ms":1,"domain":"system"}}"#;
     assert_eq!(
         decode_adjudication(payload, ADJUDICATION_PAYLOAD_SCHEMA, &["obs-1".to_owned()]),
@@ -301,7 +304,7 @@ fn an_unknown_clock_domain_is_refused_rather_than_assumed() {
 /// A newer payload schema is refused, matching `assert_schema_not_future`.
 #[test]
 fn a_future_payload_schema_is_refused() {
-    let adj = IdentityAdjudication::Assert(AssertIdentity::new(eid("e-1"), just(), at()));
+    let adj = IdentityAdjudication::Assert(AssertIdentity::new(eid("e-1"), who(), just(), at()));
     let payload = encode_adjudication(&adj);
     assert_eq!(
         decode_adjudication(
@@ -390,7 +393,7 @@ fn an_llm_cannot_author_an_adjudication() {
     let event_id = EventId::new("ev-llm").expect("event id");
     let observation_id = oid("obs-llm");
     let adj = IdentityAdjudication::Merge(
-        MergeEntities::new([eid("a"), eid("b")], eid("keep"), just(), at()).expect("merge"),
+        MergeEntities::new([eid("a"), eid("b")], eid("keep"), who(), just(), at()).expect("merge"),
     );
 
     let err = s
@@ -428,7 +431,7 @@ fn an_adjudication_row_makes_its_window_uncompactable() {
     let mut s = WorldStore::open(&path).expect("open");
     let event_id = EventId::new("ev-stamp").expect("event id");
     let observation_id = oid("obs-stamp");
-    let adj = IdentityAdjudication::Assert(AssertIdentity::new(eid("e-1"), just(), at()));
+    let adj = IdentityAdjudication::Assert(AssertIdentity::new(eid("e-1"), who(), just(), at()));
 
     let generation = s
         .append_adjudication(
@@ -489,4 +492,57 @@ fn an_adjudication_row_makes_its_window_uncompactable() {
         "an ordinary raw row must be compactable, or the assertion above proves nothing"
     );
     cleanup(&path);
+}
+
+/// `KIRRA-WM-IDENTITY-AUTHORITY-001`: every identity adjudication names an
+/// authorized adjudicator, so the fixtures do too.
+fn who() -> kirra_world::same_as_adjudication::AdjudicationAuthority {
+    kirra_world::same_as_adjudication::AdjudicationAuthority::new(
+        kirra_world::observation::SourceClass::Operator,
+        "test-operator",
+    )
+    .expect("authority")
+}
+
+/// **A v1 payload is refused, not read optimistically.**
+///
+/// `KIRRA-WM-IDENTITY-AUTHORITY-001` made the adjudicator a required field and
+/// bumped the payload schema to 2. A v1 row names no adjudicator, and the only
+/// two things a reader could do with it are refuse it or invent one. Inventing
+/// one would fabricate exactly the fact the ruling exists to require, so the
+/// existing `UnsupportedSchema` path takes it.
+///
+/// No migration accompanies the bump because no deployed store can hold a v1
+/// adjudication row: `append_adjudication` has never had a production caller.
+/// Should one be found, it is a row nothing wrote.
+#[test]
+fn a_v1_adjudication_payload_is_refused_rather_than_read_without_an_adjudicator() {
+    // A well-formed v1 assert: everything the OLD encoding required, and
+    // nothing more. It would decode cleanly but for the version.
+    let v1 = r#"{"verb":"assert","entity":"e-1","at":{"ms":1,"domain":"system"}}"#;
+
+    assert!(
+        matches!(
+            decode_adjudication(v1, 1, &["obs-1".to_owned()]),
+            Err(AdjudicationDecodeError::UnsupportedSchema {
+                found: 1,
+                supported: 2
+            })
+        ),
+        "a v1 payload must be refused by version, before anything reads its body"
+    );
+
+    // Non-vacuity: the SAME body, declared v2, is refused for the reason that
+    // actually matters -- it names no adjudicator. Without this the assertion
+    // above would also hold if the decoder refused every payload.
+    assert!(
+        matches!(
+            decode_adjudication(v1, ADJUDICATION_PAYLOAD_SCHEMA, &["obs-1".to_owned()]),
+            Err(AdjudicationDecodeError::Field {
+                key: "adjudicator",
+                ..
+            })
+        ),
+        "a v2 payload with no adjudicator must name the missing field"
+    );
 }

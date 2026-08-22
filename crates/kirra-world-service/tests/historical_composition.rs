@@ -149,7 +149,7 @@ fn store_where_the_graph_moved_after_the_pin(name: &str) -> (WorldStore, std::pa
         &mut store,
         "assert-alpha",
         T0,
-        &IdentityAdjudication::Assert(AssertIdentity::new(eid("dock_alpha"), just(), at())),
+        &IdentityAdjudication::Assert(AssertIdentity::new(eid("dock_alpha"), who(), just(), at())),
     );
     claim_pointing_at(&mut store, "claim", "dock_alpha", T0 + 1);
     store.fold().expect("fold");
@@ -166,15 +166,21 @@ fn store_where_the_graph_moved_after_the_pin(name: &str) -> (WorldStore, std::pa
         &mut store,
         "assert-beta",
         T0 + 2,
-        &IdentityAdjudication::Assert(AssertIdentity::new(eid("dock_beta"), just(), at())),
+        &IdentityAdjudication::Assert(AssertIdentity::new(eid("dock_beta"), who(), just(), at())),
     );
     adjudicate(
         &mut store,
         "merge",
         T0 + 3,
         &IdentityAdjudication::Merge(
-            MergeEntities::new(vec![eid("dock_alpha")], eid("dock_beta"), just(), at())
-                .expect("merge"),
+            MergeEntities::new(
+                vec![eid("dock_alpha")],
+                eid("dock_beta"),
+                who(),
+                just(),
+                at(),
+            )
+            .expect("merge"),
         ),
     );
     store.fold().expect("fold");
@@ -431,4 +437,14 @@ fn a_lagging_entity_checkpoint_does_not_refuse_a_reproducible_generation() {
 
     drop(store);
     cleanup(&path);
+}
+
+/// `KIRRA-WM-IDENTITY-AUTHORITY-001`: every identity adjudication names an
+/// authorized adjudicator, so the fixtures do too.
+fn who() -> kirra_world::same_as_adjudication::AdjudicationAuthority {
+    kirra_world::same_as_adjudication::AdjudicationAuthority::new(
+        kirra_world::observation::SourceClass::Operator,
+        "test-operator",
+    )
+    .expect("authority")
 }

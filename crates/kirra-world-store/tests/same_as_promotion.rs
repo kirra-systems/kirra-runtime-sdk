@@ -124,7 +124,7 @@ fn store_with(name: &str, entities: &[&str], extra: &[IdentityAdjudication]) -> 
     let mut s = WorldStore::open(&path).expect("open");
     let mut all: Vec<IdentityAdjudication> = entities
         .iter()
-        .map(|e| IdentityAdjudication::Assert(AssertIdentity::new(eid(e), just(), at(1))))
+        .map(|e| IdentityAdjudication::Assert(AssertIdentity::new(eid(e), who(), just(), at(1))))
         .collect();
     all.extend(extra.iter().cloned());
 
@@ -687,4 +687,14 @@ fn feeding_the_same_adjudications_in_either_order_yields_the_same_merges() {
         forward, reversed,
         "the merge list must not depend on the arrangement of the input"
     );
+}
+
+/// `KIRRA-WM-IDENTITY-AUTHORITY-001`: every identity adjudication names an
+/// authorized adjudicator, so the fixtures do too.
+fn who() -> kirra_world::same_as_adjudication::AdjudicationAuthority {
+    kirra_world::same_as_adjudication::AdjudicationAuthority::new(
+        kirra_world::observation::SourceClass::Operator,
+        "test-operator",
+    )
+    .expect("authority")
 }

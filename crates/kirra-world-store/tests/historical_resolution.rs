@@ -58,7 +58,7 @@ fn at() -> DomainInstant {
 }
 
 fn assert_id(e: &str) -> IdentityAdjudication {
-    IdentityAdjudication::Assert(AssertIdentity::new(eid(e), just(), at()))
+    IdentityAdjudication::Assert(AssertIdentity::new(eid(e), who(), just(), at()))
 }
 
 fn merge(sources: &[&str], into: &str) -> IdentityAdjudication {
@@ -66,6 +66,7 @@ fn merge(sources: &[&str], into: &str) -> IdentityAdjudication {
         MergeEntities::new(
             sources.iter().map(|s| eid(s)).collect::<Vec<_>>(),
             eid(into),
+            who(),
             just(),
             at(),
         )
@@ -78,6 +79,7 @@ fn partition(source: &str, into: &[&str]) -> IdentityAdjudication {
         SplitEntity::partition(
             eid(source),
             into.iter().map(|s| eid(s)).collect::<Vec<_>>(),
+            who(),
             just(),
             at(),
         )
@@ -89,6 +91,7 @@ fn forget(e: &str) -> IdentityAdjudication {
     IdentityAdjudication::Forget(ForgetEntity::new(
         eid(e),
         RetirementReason::new("superseded by adjudication").expect("reason"),
+        who(),
         just(),
         at(),
     ))
@@ -778,4 +781,14 @@ fn the_public_resolver_runs_over_the_historical_view_unchanged() {
 
     drop(s);
     clean(&path);
+}
+
+/// `KIRRA-WM-IDENTITY-AUTHORITY-001`: every identity adjudication names an
+/// authorized adjudicator, so the fixtures do too.
+fn who() -> kirra_world::same_as_adjudication::AdjudicationAuthority {
+    kirra_world::same_as_adjudication::AdjudicationAuthority::new(
+        kirra_world::observation::SourceClass::Operator,
+        "test-operator",
+    )
+    .expect("authority")
 }

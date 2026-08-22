@@ -39,32 +39,34 @@
 //!    refuses any class but `Operator` at CONSTRUCTION, so a held authority is
 //!    already an authorized one. A check here would be a second place authority
 //!    is decided — which is the defect this module exists to avoid, not a
-//!    belt-and-braces improvement.
+//!    belt-and-braces improvement. Since
+//!    `KIRRA-WM-IDENTITY-AUTHORITY-001` this holds for every verb: the domain
+//!    value carries the adjudicator, and the command hands it along.
 //!
-//! # The asymmetry this module surfaces rather than papers over
+//! # The asymmetry this module surfaced — now closed
 //!
 //! Building the surface required auditing every write door, and the audit found
-//! **two routes to canonical identity change, only one of them gated**:
+//! **two routes to canonical identity change, only one of them gated**. That
+//! finding is what `KIRRA-WM-IDENTITY-AUTHORITY-001` was raised to settle, and
+//! it has been: every route now carries an adjudicator.
 //!
 //! | Door | Authority |
 //! |---|---|
 //! | `append_same_as_candidate` | pins `Derivation`/`Candidate` — structurally cannot promote |
-//! | `adjudicate_same_as` | requires `AdjudicationAuthority` — `Operator` only, per `KIRRA-WM-PROMOTION-001` |
-//! | `append_adjudication` (Merge / Split / Forget) | **none** |
+//! | `adjudicate_same_as` | `AdjudicationAuthority` on the request — `Operator` only |
+//! | `append_adjudication` (Merge / Split / Forget) | `AdjudicationAuthority` **on the domain value** |
 //!
-//! A `Merge` reaches `Lifecycle::Merged { into }`, the entity projection, and
-//! identity resolution — the same canonical-identity effect a promoted
-//! `same_as` has, by a route carrying no adjudicator at all.
+//! The fix deliberately did NOT land here. Requiring a token at the wrapper
+//! that the domain did not require would have been the new-semantics-in-a-
+//! wrapper this box forbids: it would have looked fixed while leaving the
+//! ungated domain call available to anyone holding `&mut WorldStore`. Putting
+//! it on `MergeEntities::new` and its siblings means the refusal cannot be
+//! reached around, and this module goes on carrying rather than checking.
 //!
-//! **This module does not fix that, and the restraint is the point.** Requiring
-//! an authority token here that the domain does not require would be precisely
-//! the "new semantics hidden inside a command wrapper" the box forbids — a
-//! tightening invented at the wrapper, where the domain still permits the
-//! ungated call to anyone holding `&mut WorldStore`. The fix belongs in
-//! `kirra_world::adjudication`, and it needs a ruling: *may an identity
-//! adjudication be recorded without an authorized adjudicator?* Recorded in
-//! `WM_SCOPE.md`; pinned here by
-//! `a_merge_command_carries_no_authority_and_that_is_the_open_finding`.
+//! The derived path — `promote_confirmed_same_as`, which turns confirmed
+//! `same_as` promotions into merges — inherits the authority 2b already
+//! checked, so a derivation still adds no adjudicator that was not authorized
+//! upstream.
 //!
 //! # Why `AssertEntity` is absent
 //!

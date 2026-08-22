@@ -75,8 +75,9 @@ use kirra_world::adjudication::{
     AssertIdentity, ForgetEntity, IdentityAdjudication, Justification, MergeEntities,
     RetirementReason, SplitEntity,
 };
-use kirra_world::observation::{ClockDomain, DomainInstant};
+use kirra_world::observation::{ClockDomain, DomainInstant, SourceClass};
 use kirra_world::reference::{EntityId, ObservationId};
+use kirra_world::same_as_adjudication::AdjudicationAuthority;
 
 use crate::entity_projection::{
     self, contradiction_json, lifecycle_token, origin_of, redirect_json, ProjectedEntity,
@@ -407,26 +408,34 @@ pub fn entity_corpus() -> Vec<(i64, IdentityAdjudication)> {
         ms: 1,
         domain: ClockDomain::System,
     };
+    // `KIRRA-WM-IDENTITY-AUTHORITY-001`. Present on every corpus entry because
+    // the constructors now require it; it does NOT reach the fold's output, so
+    // this rule's corpus digest is unmoved by its arrival.
+    let who = || {
+        AdjudicationAuthority::new(SourceClass::Operator, "corpus-operator")
+            .expect("corpus authority")
+    };
 
     vec![
         (
             1,
-            IdentityAdjudication::Assert(AssertIdentity::new(eid("a"), just(), at())),
+            IdentityAdjudication::Assert(AssertIdentity::new(eid("a"), who(), just(), at())),
         ),
         (
             2,
-            IdentityAdjudication::Assert(AssertIdentity::new(eid("b"), just(), at())),
+            IdentityAdjudication::Assert(AssertIdentity::new(eid("b"), who(), just(), at())),
         ),
         (
             3,
             IdentityAdjudication::Merge(
-                MergeEntities::new(vec![eid("a")], eid("b"), just(), at()).expect("corpus merge"),
+                MergeEntities::new(vec![eid("a")], eid("b"), who(), just(), at())
+                    .expect("corpus merge"),
             ),
         ),
         (
             4,
             IdentityAdjudication::Split(
-                SplitEntity::partition(eid("b"), [eid("b1"), eid("b2")], just(), at())
+                SplitEntity::partition(eid("b"), [eid("b1"), eid("b2")], who(), just(), at())
                     .expect("corpus split"),
             ),
         ),
@@ -435,6 +444,7 @@ pub fn entity_corpus() -> Vec<(i64, IdentityAdjudication)> {
             IdentityAdjudication::Forget(ForgetEntity::new(
                 eid("b1"),
                 RetirementReason::new("decommissioned").expect("corpus reason"),
+                who(),
                 just(),
                 at(),
             )),
@@ -442,7 +452,7 @@ pub fn entity_corpus() -> Vec<(i64, IdentityAdjudication)> {
         // The contradiction axis: `a` was already asserted at generation 1.
         (
             6,
-            IdentityAdjudication::Assert(AssertIdentity::new(eid("a"), just(), at())),
+            IdentityAdjudication::Assert(AssertIdentity::new(eid("a"), who(), just(), at())),
         ),
     ]
 }

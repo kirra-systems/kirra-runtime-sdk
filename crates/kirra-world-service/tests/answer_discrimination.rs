@@ -142,7 +142,7 @@ fn assert_entity(store: &mut WorldStore, tag: &str, id: &str, at_ms: i64) {
         store,
         tag,
         at_ms,
-        &IdentityAdjudication::Assert(AssertIdentity::new(eid(id), just(), at())),
+        &IdentityAdjudication::Assert(AssertIdentity::new(eid(id), who(), just(), at())),
     );
 }
 
@@ -188,7 +188,8 @@ fn store_with_a_contradicted_identity(name: &str) -> (WorldStore, std::path::Pat
         "merge-a-into-b",
         T0 + 3,
         &IdentityAdjudication::Merge(
-            MergeEntities::new(vec![eid("dock_a")], eid("dock_b"), just(), at()).expect("a into b"),
+            MergeEntities::new(vec![eid("dock_a")], eid("dock_b"), who(), just(), at())
+                .expect("a into b"),
         ),
     );
     adjudicate(
@@ -196,7 +197,8 @@ fn store_with_a_contradicted_identity(name: &str) -> (WorldStore, std::path::Pat
         "merge-b-into-a",
         T0 + 4,
         &IdentityAdjudication::Merge(
-            MergeEntities::new(vec![eid("dock_b")], eid("dock_a"), just(), at()).expect("b into a"),
+            MergeEntities::new(vec![eid("dock_b")], eid("dock_a"), who(), just(), at())
+                .expect("b into a"),
         ),
     );
     store.fold().expect("fold");
@@ -215,8 +217,14 @@ fn store_with_an_ambiguous_identity(name: &str) -> (WorldStore, std::path::PathB
         "split",
         T0 + 2,
         &IdentityAdjudication::Split(
-            SplitEntity::partition(eid("dock_a"), [eid("dock_x"), eid("dock_y")], just(), at())
-                .expect("partition"),
+            SplitEntity::partition(
+                eid("dock_a"),
+                [eid("dock_x"), eid("dock_y")],
+                who(),
+                just(),
+                at(),
+            )
+            .expect("partition"),
         ),
     );
     store.fold().expect("fold");
@@ -292,7 +300,8 @@ fn the_same_fixture_without_the_second_merge_resolves() {
         "merge-a-into-b",
         T0 + 3,
         &IdentityAdjudication::Merge(
-            MergeEntities::new(vec![eid("dock_a")], eid("dock_b"), just(), at()).expect("a into b"),
+            MergeEntities::new(vec![eid("dock_a")], eid("dock_b"), who(), just(), at())
+                .expect("a into b"),
         ),
     );
     store.fold().expect("fold");
@@ -505,4 +514,14 @@ fn a_query_error_is_neither_an_answer_nor_unknown() {
 
     drop(store);
     cleanup(&path);
+}
+
+/// `KIRRA-WM-IDENTITY-AUTHORITY-001`: every identity adjudication names an
+/// authorized adjudicator, so the fixtures do too.
+fn who() -> kirra_world::same_as_adjudication::AdjudicationAuthority {
+    kirra_world::same_as_adjudication::AdjudicationAuthority::new(
+        kirra_world::observation::SourceClass::Operator,
+        "test-operator",
+    )
+    .expect("authority")
 }

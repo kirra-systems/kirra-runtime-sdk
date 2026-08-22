@@ -305,6 +305,13 @@ fn an_adjudications_justification_is_indexed_through_the_nested_write() {
         Justification::new([ObservationId::new("obs-just").expect("obs")]).expect("justification");
     let adjudication = IdentityAdjudication::Assert(AssertIdentity::new(
         EntityId::new("dock_a").expect("entity"),
+        // KIRRA-WM-IDENTITY-AUTHORITY-001: an identity adjudication names its
+        // authorized adjudicator.
+        kirra_world::same_as_adjudication::AdjudicationAuthority::new(
+            kirra_world::observation::SourceClass::Operator,
+            "test-operator",
+        )
+        .expect("authority"),
         justification,
         DomainInstant {
             ms: 1,
