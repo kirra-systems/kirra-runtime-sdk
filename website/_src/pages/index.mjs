@@ -569,7 +569,7 @@ export const body = `
             <h3>Adversarial by default</h3>
             <p>4 fuzz targets run on every push and 90 minutes each, weekly. PR diffs to the checker face
             mutation testing: if a mutant survives your tests, the gate fails.</p>
-            ${evRow("fuzz/fuzz_targets/", ".github/workflows/ci.yml:812#mutation-gate:")}
+            ${evRow("fuzz/fuzz_targets/", ".github/workflows/ci.yml:837#mutation-gate:")}
           </div>
           <div class="card" data-reveal>
             <h3>Coverage that can't regress</h3>

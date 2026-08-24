@@ -572,12 +572,37 @@ jobs:
     # cargo-llvm-cov's inner build-script compiles — would run on stable and
     # reject `-Z`. `RUSTUP_TOOLCHAIN` (env) outranks `rust-toolchain.toml` and is
     # inherited by all child processes, so it forces nightly job-wide.
+    #
+    # PINNED to a DATED nightly, 2026-08-23. Floating `nightly` broke this lane
+    # and only this lane: rustc 1.100.0-nightly (c656540d6 2026-08-21) made an
+    # inference site in `zenoh 1.9.0` ambiguous, so a third-party crate stopped
+    # compiling and took the whole workspace instrumentation down with it:
+    #
+    #     error[E0282]: type annotations needed
+    #       --> zenoh-1.9.0/src/api/session.rs:1454:13
+    #          |  Ok(session)   -- cannot infer type parameter `E`
+    #
+    # Not transient, which is why this is a pin rather than a wait: it
+    # reproduces on the two successive nightlies (…08-21 and c54751567
+    # 2026-08-22) and `zenoh 1.10.0` does not fix it either. Recovery needs an
+    # upstream change that does not exist yet.
+    #
+    # 2026-08-20 is the last nightly verified to compile the workspace
+    # (`cargo +nightly-2026-08-20 check -p kirra-fleet-transport` -> Finished).
+    # Both spellings below must name the SAME toolchain: `RUSTUP_TOOLCHAIN`
+    # outranks the action's own selection, so a mismatch would silently install
+    # one nightly and run another.
+    #
+    # UNPIN when zenoh compiles on floating nightly again -- the lane exists to
+    # track the instrumentation rustc actually offers, and a pin left in place
+    # is a lane measuring a compiler nobody ships. Tracked by #1481.
     env:
-      RUSTUP_TOOLCHAIN: nightly
+      RUSTUP_TOOLCHAIN: nightly-2026-08-20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: dtolnay/rust-toolchain@efcb852328a9f50117170cc43094fb6f09eaf1ae # nightly
         with:
+          toolchain: nightly-2026-08-20
           components: llvm-tools-preview
       - name: Install cargo-llvm-cov
         run: cargo install cargo-llvm-cov
