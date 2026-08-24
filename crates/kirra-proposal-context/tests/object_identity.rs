@@ -154,18 +154,19 @@ fn a_merged_object_resolves_to_the_candidate_it_became() {
     record_adjudication(
         &mut store,
         "1",
-        &IdentityAdjudication::Assert(AssertIdentity::new(eid("dock_old"), just(), at())),
+        &IdentityAdjudication::Assert(AssertIdentity::new(eid("dock_old"), who(), just(), at())),
     );
     record_adjudication(
         &mut store,
         "2",
-        &IdentityAdjudication::Assert(AssertIdentity::new(eid("dock_b"), just(), at())),
+        &IdentityAdjudication::Assert(AssertIdentity::new(eid("dock_b"), who(), just(), at())),
     );
     record_adjudication(
         &mut store,
         "3",
         &IdentityAdjudication::Merge(
-            MergeEntities::new(vec![eid("dock_old")], eid("dock_b"), just(), at()).expect("merge"),
+            MergeEntities::new(vec![eid("dock_old")], eid("dock_b"), who(), just(), at())
+                .expect("merge"),
         ),
     );
     store
@@ -242,7 +243,7 @@ fn a_stale_identity_graph_refuses_rather_than_matching_the_raw_object() {
     record_adjudication(
         &mut store,
         "1",
-        &IdentityAdjudication::Assert(AssertIdentity::new(eid("dock_b"), just(), at())),
+        &IdentityAdjudication::Assert(AssertIdentity::new(eid("dock_b"), who(), just(), at())),
     );
     // Deliberately NOT folded: the adjudication sits in the log unconsumed.
 
@@ -294,7 +295,7 @@ fn an_ambiguous_object_refuses_rather_than_picking_a_successor() {
     record_adjudication(
         &mut store,
         "1",
-        &IdentityAdjudication::Assert(AssertIdentity::new(eid("dock_b"), just(), at())),
+        &IdentityAdjudication::Assert(AssertIdentity::new(eid("dock_b"), who(), just(), at())),
     );
     record_adjudication(
         &mut store,
@@ -303,6 +304,7 @@ fn an_ambiguous_object_refuses_rather_than_picking_a_successor() {
             SplitEntity::partition(
                 eid("dock_b"),
                 [eid("dock_b1"), eid("dock_b2")],
+                who(),
                 just(),
                 at(),
             )
@@ -399,4 +401,14 @@ fn every_refusal_reason_has_its_own_tag() {
             "a contradictory history must never yield something to match on"
         );
     }
+}
+
+/// `KIRRA-WM-IDENTITY-AUTHORITY-001`: every identity adjudication names an
+/// authorized adjudicator, so the fixtures do too.
+fn who() -> kirra_world::same_as_adjudication::AdjudicationAuthority {
+    kirra_world::same_as_adjudication::AdjudicationAuthority::new(
+        kirra_world::observation::SourceClass::Operator,
+        "test-operator",
+    )
+    .expect("authority")
 }

@@ -28,8 +28,8 @@
 //! errors rather than reading as absent"* was a claim with no test behind it.
 
 use kirra_world_store::{
-    provenance_graph::GraphSpec, ClaimStatus, EventId, NewEvent, ObservationId, StoreError,
-    WorldStore, WriterClass,
+    provenance_graph::GraphSpec, ClaimStatus, EventId, NewEvent, ObservationId, WorldStore,
+    WriterClass,
 };
 
 const T0: i64 = 1_700_000_000_000;

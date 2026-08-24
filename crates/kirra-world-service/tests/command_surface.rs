@@ -120,14 +120,28 @@ fn adjudication_row<'a>(event: &'a EventId, observation: &'a ObservationId) -> A
     }
 }
 
+/// `KIRRA-WM-IDENTITY-AUTHORITY-001`: every identity adjudication names an
+/// authorized adjudicator, so every fixture here does too.
+fn who() -> AdjudicationAuthority {
+    AdjudicationAuthority::new(SourceClass::Operator, "console-operator").expect("authority")
+}
+
 fn merge() -> MergeEntities {
-    MergeEntities::new([eid("track-a")], eid("track-b"), just(), at(T0 as u64 + 10)).expect("merge")
+    MergeEntities::new(
+        [eid("track-a")],
+        eid("track-b"),
+        who(),
+        just(),
+        at(T0 as u64 + 10),
+    )
+    .expect("merge")
 }
 
 fn forget() -> ForgetEntity {
     ForgetEntity::new(
         eid("track-z"),
         RetirementReason::new("decommissioned").expect("reason"),
+        who(),
         just(),
         at(T0 as u64 + 10),
     )
@@ -324,40 +338,58 @@ fn no_command_can_record_an_assert_because_5d_is_unruled() {
     );
 }
 
+/// **The adjudicator reaches the log, so both routes to identity carry one.**
+///
+/// This REPLACES `a_merge_command_carries_no_authority_and_that_is_the_open_
+/// finding`, and the replacement is recorded rather than done quietly.
+///
+/// That fence was written to fail the day `KIRRA-WM-IDENTITY-AUTHORITY-001`
+/// landed. **It did not fail.** It asserted `RecordMerge` had grown no
+/// `authority` FIELD, and the ruling put the authority inside `MergeEntities`
+/// instead — so the fence kept passing while the thing it guarded had already
+/// changed underneath it. A guard written against one shape of a change,
+/// satisfied by a different shape of the same change.
+///
+/// The replacement is behavioural for exactly that reason. Two merges identical
+/// in every respect except WHO decided must produce different logs. That cannot
+/// be satisfied by reshaping: it fails if the command drops the authority, if
+/// the payload does not persist it, and if the encoding writes a constant.
 #[test]
-fn a_merge_command_carries_no_authority_and_that_is_the_open_finding() {
-    // Two routes reach canonical identity. `adjudicate_same_as` requires an
-    // `AdjudicationAuthority` -- Operator-only by KIRRA-WM-PROMOTION-001.
-    // `append_adjudication`, which a Merge rides to `Lifecycle::Merged` and on
-    // into identity resolution, requires nothing.
-    //
-    // This test does NOT assert the asymmetry is correct. It asserts that the
-    // command layer did not paper over it, because papering over it -- adding
-    // an authority requirement here that the domain does not have -- is exactly
-    // the "new semantics hidden inside a command wrapper" 5c.1 forbids, and it
-    // would leave the ungated domain call available to anyone holding
-    // `&mut WorldStore` while looking fixed.
-    //
-    // When the ruling lands and `kirra_world::adjudication` grows the gate,
-    // this test is the thing that should fail and be rewritten.
-    let merge_decl = COMMAND_SOURCE
-        .split("pub struct RecordMerge")
-        .nth(1)
-        .expect("RecordMerge is declared")
-        .split('}')
-        .next()
-        .expect("its fields");
-    assert!(
-        !merge_decl.contains("authority"),
-        "RecordMerge grew an authority field. If the domain now requires one, \
-         this fence has served its purpose -- delete it and record the ruling. \
-         If the domain does NOT, this is a tightening invented at the wrapper."
-    );
+fn two_merges_differing_only_in_adjudicator_are_different_records() {
+    let (event, observation) = (evt(DECIDE_EVT), obs(DECIDE_OBS));
 
-    // And the other half, so this is a statement about the asymmetry rather
-    // than about one struct: the same_as route DOES carry it.
-    assert!(
-        COMMAND_SOURCE.contains("AdjudicationAuthority"),
-        "the module must still name the authority it carries for same_as"
+    let decided_by = |adjudicator: &str| {
+        MergeEntities::new(
+            [eid("track-a")],
+            eid("track-b"),
+            AdjudicationAuthority::new(SourceClass::Operator, adjudicator).expect("authority"),
+            just(),
+            at(T0 as u64 + 10),
+        )
+        .expect("merge")
+    };
+
+    let mut yard = store("adjudicator-yard");
+    CommandEngine::new(&mut yard)
+        .execute(RecordMerge {
+            row: adjudication_row(&event, &observation),
+            merge: decided_by("yard-supervisor"),
+        })
+        .expect("command");
+
+    let mut night = store("adjudicator-night");
+    CommandEngine::new(&mut night)
+        .execute(RecordMerge {
+            row: adjudication_row(&event, &observation),
+            merge: decided_by("night-shift-lead"),
+        })
+        .expect("command");
+
+    assert_ne!(
+        yard.head_chain().expect("chain"),
+        night.head_chain().expect("chain"),
+        "who adjudicated does not reach the log — the authority is being \
+         dropped between the domain value and the stored record, which makes \
+         KIRRA-WM-IDENTITY-AUTHORITY-001 a type signature and nothing more"
     );
 }
