@@ -5744,14 +5744,23 @@ is the rule this tier exists to stop violating.
 
 1. Are `Explain` and `Freshness` **discharged in another form** — an operation
    and a classifier respectively — rather than outstanding queries?
+   > **Settled 2026-08-26** by `KIRRA-WM-EXPLAIN-FRESHNESS-DISCHARGE-001`,
+   > recorded below. Both discharged.
 2. Is `Related` **complete at v1** without `Predicate`/`Depth`, with `Depth`
    ruled permanently out under `KIRRA-WM-TRANSITIVITY-001` and `At` left as an
    additive extension when a consumer needs history?
+   > **Settled 2026-08-21** by `KIRRA-WM-RELATED-V1-001`, recorded below.
 3. Does `ChangesSince` get designed as a bounded family now, or stay gated on a
    consumer with `changed_since` remaining fenced-and-unbounded?
+   > **Settled 2026-08-26** by `KIRRA-WM-CHANGES-SINCE-GATED-001`, recorded
+   > below. Gated.
 
-Until those are ruled, the honest state of 5c.2 is *"four candidates, three of
-them waiting on a consumer"* — not *"one of eight queries done"*.
+All three are now ruled. With `Explain` and `Freshness` discharged and
+`ChangesSince` gated, the honest state of 5c.2 is **three candidates, all three
+waiting on a consumer** — `WhatIsAt`, `Resolve`, `Capabilities` — which is not
+a smaller version of *"seven of eight queries left"*. It is a different
+statement: there is no query work available that rule 1 permits, so the next
+move on 5c.2 is finding a consumer rather than writing a query.
 
 ### KIRRA-WM-RELATED-V1-001 — `Related` is complete at v1 — 2026-08-21
 
@@ -5995,3 +6004,158 @@ unblock box 5d: operator teaching remains blocked on what writer class an
 operator assertion carries and whether it may outrank sensed evidence, and no
 command records an `Assert` — still pinned by
 `no_command_can_record_an_assert_because_5d_is_unruled`.
+
+### KIRRA-WM-EXPLAIN-FRESHNESS-DISCHARGE-001 — two of the eight are already answered — 2026-08-26
+
+Ruled, closing open question 1 from the §8 re-audit:
+
+> **`Explain` and `Freshness` are DISCHARGED — as an operation and as a
+> classifier respectively — not outstanding queries. Neither is to be added as
+> a `WorldQuery` family.**
+
+The blueprint lists eight query signatures. Two of them describe work this tree
+already does, in a form that is not a query and was not chosen by accident. The
+ruling matters because a checklist does not know that: left open, both rows read
+as gaps, and closing them **as specified** would undo the rulings that put the
+work where it is.
+
+#### `Explain` — an operation, because nobody outside can hold its argument
+
+The signature is `Explain(FactHandle)`. `KIRRA-WM-EXPLAIN-NEUTRALITY` guarantees
+no external party ever holds a World coordinate, so there is no caller who could
+construct a `FactHandle` to pass in — a query taking one would be a query nobody
+outside the boundary can call, and the way to make it callable is to hand out
+the coordinate the neutrality ruling exists to withhold.
+
+`explain_current_subject(store, subject)` is the discharged form. It takes a
+subject NAME and chooses page size, graph depth, node ceiling and pin itself,
+and its module docs give the reason that is the point rather than a limitation:
+
+> *"There is no argument a caller could set to make the work larger, so there is
+> nothing to abuse."*
+
+#### `Freshness` — a classifier, because a second one is the defect
+
+`Freshness(FieldRef, At)` asks a question every answer already carries.
+`KIRRA-WM-FRESHNESS-POLICY-001` rules freshness centrally by claim kind and
+rides the result on each answer, and that ruling exists **because the first
+place it was decided was decided by nobody** — `None` meant `Timeless`, so the
+engine asserted "this fact's age does not matter" about every fact in the store
+whenever a caller supplied no budget.
+
+A `Freshness` query would be a second place the same question is answered. Two
+places that agree are redundant; two that disagree reproduce the original defect
+with an API in front of it.
+
+#### The two controls this needed, and the one it did not
+
+Most of the argument was already under test, and this ruling deliberately did
+not restate it: `the_walk_is_bounded_by_this_crates_constants_not_by_the_data`
+and `two_calls_against_an_unchanged_store_are_identical` for the operation, and
+eleven cases in `tests/freshness_policy.rs` for the classifier. Two gaps were
+real, and `crates/kirra-world-service/tests/query_discharge.rs` closes them.
+
+**1. The existing explain-bound test would survive the change that matters.**
+It proves the DATA cannot widen the walk. It would keep passing if the operation
+grew a caller-supplied `depth` and the test passed a small value — and a
+caller-supplied bound is exactly what turns an operation back into a query
+surface. The replacement is a signature pin on that axis rather than on the word
+*Explain*: a `fn` pointer that admits a store and a subject name and nothing
+else. Mutation-verified — adding a `_depth: usize` parameter does not fail the
+assertion, it fails **compilation**, naming both signatures.
+
+**2. Nothing checked that the answer agrees with the table.** The existing
+freshness cases write each expectation out beside the row it tests, so the table
+and the read path can drift apart while both halves of every test go on agreeing
+with each other. `the_validity_on_an_answer_agrees_with_the_ruled_table` derives
+its expectation from `resolve_policy` instead, across every ruled row at a clock
+inside its bound and a clock past it. That is the discharge argument as a
+control: it fails the moment a second decision point disagrees with the first.
+
+The mutation that proves it is the original defect re-introduced —
+the `Ask` path still calls `policy_for`, and then ignores what it returns:
+
+```
+at age 1ms the answer for mission/Some("last_seen_at") carries Timeless, but the
+ruled table says Fresh. The read path and the table disagree, which is the
+second-decision-point this ruling exists to keep out.
+```
+
+Note what that mutation leaves intact. A guard asking *"does the read path
+consult the table"* would have passed it.
+
+#### One piece of scaffolding was deleted rather than documented
+
+The first draft of the agreement test carried a named exception list — rows
+*"a sensor claim cannot produce"* — holding the adjudicated-identity row, plus a
+guard asserting the list was exactly the uncovered set. Emptying the list was the
+check on whether the exemption was real, and **every test still passed**: the
+store does not constrain the `kind` string, so the row appends like any other and
+was never uncovered. The guard, meanwhile, compared two lists that move together.
+
+Both were deleted and all four ruled rows are now covered directly. Recorded
+because an exemption that exempts nothing is worse than no exemption — it reads
+as a considered carve-out. It is a cousin of the wrong-axis guards this tier has
+hit three times, not another instance: those fired on the wrong property, this
+one could not fail at all. The shared root is the same, which is why the check
+that caught it is the same one — **ask what would have to be true for the guard
+to fire, and then make that true**.
+
+What the coverage does **not** claim: the identity row is written in that test
+as a sensor claim, which is not how production writes it (`RecordMerge`, with an
+`AdjudicationAuthority`). It proves the read path agrees with the table for that
+class, not that the production write path emits such a row.
+
+### KIRRA-WM-CHANGES-SINCE-GATED-001 — `ChangesSince` is not designed yet — 2026-08-26
+
+Ruled, closing open question 3 from the §8 re-audit:
+
+> **`ChangesSince` stays gated on a consumer. `WorldStore::changed_since`
+> remains classified `unbounded` and fenced. A typed `ChangesSince` may only be
+> added as a NEW bounded family — a page and a cursor, like `History` — and only
+> alongside its first production consumer.**
+
+This is the one of the three that could have been built. It was not, and the
+reason is rule 1, which this tier exists to stop violating: every new declaration
+needs a production consumer, and there is no consumer asking what changed.
+
+The technical half is that a typed `ChangesSince` **cannot wrap** the method that
+shares its name. `changed_since` is classified `unbounded` in
+`ci/store_boundedness_baseline.json` — *"the result grows with how long ago the
+caller asks about"* — and its SQL carries no `LIMIT`. Wrapping it would be the
+exact defect class of #1440 and #1441: the answer bounded, the work not, and
+nothing showing it.
+
+There is no live hole today. Rule 5 forbids consumer crates from calling
+`changed_since`, and none does.
+
+#### The control already exists, and was verified rather than assumed
+
+No new guard was added, because adding one would have been a second mechanism
+for a property an existing gate already carries — and a redundant guard is how
+a tree ends up with guards nobody checks. `check_query_boundedness.py` rule 2
+forbids **anything in the boundary crate** from calling an unbounded store
+method, and `query.rs` is in the boundary crate.
+
+Verified by mutation rather than by reading the gate. Both plausible shapes of
+the forbidden change were written and run:
+
+```
+crates/kirra-world-service/src/query.rs:395 — the answer boundary calls the
+UNBOUNDED store method `changed_since`.
+```
+
+The second mutation is the one worth recording: a `ChangesSince { since_ms,
+page }` request that *looks* bounded and truncates the result in Rust. It reds
+identically, because the gate keys on the **call**, not on whether the result
+looks bounded — which is the axis this ruling needs it to be on. A guard keyed
+on the request type's shape would have passed it.
+
+#### What the ruling permits, with a precedent already in the tree
+
+This is a gate on the unbounded route, not a ban on the feature. The permitted
+path is the one `citations_of` already took: it was a whole-array read, was
+bounded *by argument* with a SQL `LIMIT` and one extra probe row so truncation is
+reported rather than inferred, and is classified `bounded` today. A
+`ChangesSince` built that way, with a consumer, passes the same gate that refuses
+the wrapper.
