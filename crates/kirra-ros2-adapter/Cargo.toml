@@ -115,7 +115,7 @@ kirra-trajectory  = { path = "../kirra-trajectory" }
 # ROS 2 bindings — feature-gated. Pinned (`=`) because r2r explicitly does
 # not guarantee API stability; a deliberate bump is a separate maintenance
 # action. Runtime-agnostic + async-from-the-ground-up.
-r2r = { version = "=0.9.5", optional = true }
+r2r = { version = "=0.9.7", optional = true }
 
 # cxx — Rust ↔ C++ FFI bridge. Used by `Lanelet2CorridorSource` to call
 # into `lanelet2_core`'s boost::serialization deserializer (`fromBinMsg`
